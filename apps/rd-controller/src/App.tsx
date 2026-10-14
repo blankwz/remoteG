@@ -5,6 +5,7 @@
  * 除 /spike 外均为占位页（T-019 ~ T-023 实现）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
 import type { DecodeStats } from "./video/decoder";
@@ -130,6 +131,13 @@ export default function App() {
     const onHashChange = () => setRoute(parseRoute(window.location.hash));
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  // T-019 接线：启动时探测 WebCodecs 解码能力并上报后端（连接握手时填入 Hello）
+  useEffect(() => {
+    probeDecodeCaps()
+      .then((caps) => setDecodeCaps(caps).catch(() => undefined))
+      .catch(() => undefined);
   }, []);
 
   return (

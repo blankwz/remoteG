@@ -1,0 +1,232 @@
+/* 设备页样式（T-019）：深色系，风格与 App.module.css 一致 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  color: #eee;
+}
+
+.addBtn {
+  padding: 6px 16px;
+  border: 1px solid #4a7d4a;
+  border-radius: 4px;
+  background: #245224;
+  color: #e6ffe6;
+  cursor: pointer;
+}
+
+.addBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  margin: 0;
+  color: #ff9d9d;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.notice {
+  margin: 0;
+  color: #9dcfe8;
+  font-size: 13px;
+}
+
+.empty {
+  margin: 24px 0;
+  color: #888;
+  font-size: 14px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1c1c1c;
+}
+
+.mainBtn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mainBtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #555;
+}
+
+.dot[data-online="true"] {
+  background: #7ddf7d;
+  box-shadow: 0 0 6px #7ddf7d80;
+}
+
+.info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.name {
+  font-size: 14px;
+  color: #eee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addr {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fp {
+  flex: none;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #6a9fd8;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.actionBtn {
+  padding: 4px 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #2a2a2a;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.danger {
+  border-color: #6b3030;
+  color: #ff9d9d;
+}
+
+.danger:hover:not(:disabled) {
+  background: #3a2020;
+}
+
+/* 添加设备对话框 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 60%);
+  z-index: 10;
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  padding: 20px;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background: #222;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+}
+
+.dialogTitle {
+  margin: 0;
+  font-size: 16px;
+  color: #eee;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field > span {
+  font-size: 12px;
+  color: #999;
+}
+
+.input {
+  padding: 7px 10px;
+  font-family: Consolas, "Courier New", monospace;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #111;
+  color: #eee;
+  font-size: 13px;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #4a7d4a;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}

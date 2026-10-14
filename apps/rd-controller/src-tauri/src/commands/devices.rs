@@ -1,45 +1,457 @@
-//! 设备发现与配对命令（T-019 实现具体逻辑；当前为骨架空桩）。
+//! 设备管理命令（T-019）：持久化身份 + 设备列表（devices.json）+ 6 位码配对 +
+//! 连接/断开/探测 + 解码能力上报。
 //!
-//! 命令已在 lib.rs 注册，后续任务只替换本文件实现，不改 lib.rs。
+//! 存储布局（`ConnManager::data_dir`，Windows `%APPDATA%\com.rd.controller`）：
+//! - `identity/identity.bin`：本机身份（rd-security，DPAPI 加密）；
+//! - `trusted.json`：信任指纹（rd-security `TrustStore`，信任即设备）；
+//! - `devices.json`：设备地址/名称等自有信息（`[{id, name, addr, fingerprint_hex, added_at}]`）。
 
-/// 列出已配对设备。
-#[tauri::command]
-pub async fn list_devices() -> Result<(), String> {
-    Err("not implemented".into())
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rd_proto::v0::{envelope, Codec, PairRequest, PairResult};
+use rd_security::TrustStore;
+use rd_transport::Fingerprint;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
+
+use crate::conn::{
+    self, ConnManager, DecodeCaps, DeviceConn, HandshakeError, PairAction, PairingFlow,
+};
+
+/// 配对码位数。
+const CODE_LEN: usize = 6;
+/// probe 连接测试超时。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+// ---------------------------------------------------------------------------
+// DTO
+// ---------------------------------------------------------------------------
+
+/// 设备条目（前端卡片）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDto {
+    pub id: String,
+    pub name: String,
+    pub addr: String,
+    pub fingerprint_hex: String,
+    pub added_at: u64,
+    pub online: bool,
 }
 
-/// 用托盘显示的 6 位配对码配对新设备。
-#[tauri::command]
-pub async fn pair_device() -> Result<(), String> {
-    Err("not implemented".into())
+/// connect_device 返回的 Agent 能力。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloAckDto {
+    pub proto_ver: u32,
+    pub host_name: String,
+    pub encode_caps: Vec<String>,
 }
 
-/// 从信任列表移除设备。
-#[tauri::command]
-pub async fn remove_device() -> Result<(), String> {
-    Err("not implemented".into())
+/// 前端启动探测出的解码能力。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodeCapsDto {
+    pub h264_baseline_420: bool,
+    pub h264_high_444: bool,
 }
 
-/// 连接指定设备（建立 QUIC 并登记到 ConnManager）。
+impl From<DecodeCapsDto> for DecodeCaps {
+    fn from(dto: DecodeCapsDto) -> Self {
+        Self {
+            h264_420: dto.h264_baseline_420,
+            h264_444: dto.h264_high_444,
+        }
+    }
+}
+
+fn codec_label(v: i32) -> String {
+    match Codec::try_from(v) {
+        Ok(Codec::H264420) => "H264_420".into(),
+        Ok(Codec::H264444) => "H264_444".into(),
+        Ok(Codec::Hevc444) => "HEVC_444".into(),
+        Ok(Codec::Av1) => "AV1".into(),
+        _ => format!("unknown({v})"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// devices.json
+// ---------------------------------------------------------------------------
+
+/// 设备列表条目（任务卡结构：`[{id, name, addr, fingerprint_hex, added_at}]`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEntry {
+    pub id: String,
+    pub name: String,
+    pub addr: String,
+    pub fingerprint_hex: String,
+    pub added_at: u64,
+}
+
+/// 设备列表存储（与 TrustStore 同款原子写：tmp + fsync + rename）。
+pub struct DeviceStore {
+    path: std::path::PathBuf,
+    devices: Vec<DeviceEntry>,
+}
+
+impl DeviceStore {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let devices = if path.exists() {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("读取设备列表失败：{e}"))?;
+            serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("解析设备列表失败：{e}"))?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            path: path.to_path_buf(),
+            devices,
+        })
+    }
+
+    pub fn list(&self) -> Vec<DeviceEntry> {
+        self.devices.clone()
+    }
+
+    pub fn by_id(&self, id: &str) -> Option<&DeviceEntry> {
+        self.devices.iter().find(|d| d.id == id)
+    }
+
+    /// 指纹相同 → 更新名称/地址（保留 id 与加入时间）；否则新增。
+    pub fn upsert(&mut self, entry: DeviceEntry) -> anyhow::Result<()> {
+        if let Some(existing) = self
+            .devices
+            .iter_mut()
+            .find(|d| d.fingerprint_hex == entry.fingerprint_hex)
+        {
+            existing.name = entry.name;
+            existing.addr = entry.addr;
+        } else {
+            self.devices.push(entry);
+        }
+        self.save()
+    }
+
+    pub fn remove(&mut self, id: &str) -> anyhow::Result<Option<DeviceEntry>> {
+        let Some(pos) = self.devices.iter().position(|d| d.id == id) else {
+            return Ok(None);
+        };
+        let removed = self.devices.remove(pos);
+        self.save()?;
+        Ok(Some(removed))
+    }
+
+    fn save(&self) -> anyhow::Result<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(self.path.parent().unwrap_or_else(|| Path::new(".")))
+            .map_err(|e| anyhow::anyhow!("创建数据目录失败：{e}"))?;
+        let tmp = self.path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(&self.devices)
+            .map_err(|e| anyhow::anyhow!("序列化设备列表失败：{e}"))?;
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| anyhow::anyhow!("写入临时文件失败：{e}"))?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| anyhow::anyhow!("写入临时文件失败：{e}"))?;
+        file.sync_all().map_err(|e| anyhow::anyhow!("fsync 失败：{e}"))?;
+        drop(file);
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| anyhow::anyhow!("原子替换设备列表失败：{e}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 辅助
+// ---------------------------------------------------------------------------
+
+fn open_store(state: &ConnManager) -> Result<DeviceStore, String> {
+    DeviceStore::open(&state.data_dir().join("devices.json"))
+        .map_err(|e| format!("{e:#}"))
+}
+
+fn open_trust(state: &ConnManager) -> Result<TrustStore, String> {
+    TrustStore::open(&state.data_dir().join("trusted.json")).map_err(|e| format!("{e:#}"))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn parse_fingerprint(hex: &str) -> Result<Fingerprint, String> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("设备指纹数据损坏（非 64 位 hex）".into());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("设备指纹数据损坏：{e}"))?;
+    }
+    Ok(Fingerprint(out))
+}
+
+fn fingerprint_of_hex(hex: &str) -> Fingerprint {
+    // open_store 校验过的数据；解析失败兜底为全 0（连接必失败并报指纹不匹配）
+    parse_fingerprint(hex).unwrap_or(Fingerprint([0; 32]))
+}
+
+fn to_dto(entry: &DeviceEntry, online: bool) -> DeviceDto {
+    DeviceDto {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        addr: entry.addr.clone(),
+        fingerprint_hex: entry.fingerprint_hex.clone(),
+        added_at: entry.added_at,
+        online,
+    }
+}
+
+/// 传输层连接失败 → 用户可读提示（含 DoD 要求的"设备指纹不匹配"）。
+fn describe_connect_error(err: &anyhow::Error) -> String {
+    let chain = format!("{err:#}");
+    if chain.contains("fingerprint mismatch") {
+        "设备指纹不匹配：对端证书已变化（可能已重装），请删除该设备后重新配对".into()
+    } else {
+        format!("无法连接设备：{chain}")
+    }
+}
+
+fn describe_handshake_error(e: HandshakeError) -> String {
+    match e {
+        HandshakeError::Unauthenticated { message, .. } => {
+            format!("设备尚未信任本机，请先配对（{message}）")
+        }
+        HandshakeError::AgentError { code, message } => format!("对端错误 {code}: {message}"),
+        HandshakeError::UnexpectedReply => "对端回复了意外的消息类型".into(),
+        HandshakeError::Transport(s) => format!("连接失败：{s}"),
+    }
+}
+
+/// 保存（或更新）设备：devices.json + trusted.json。
+fn save_device(
+    state: &ConnManager,
+    fp: Fingerprint,
+    addr: &str,
+    name: &str,
+) -> Result<DeviceEntry, String> {
+    let fp_hex = fp.hex();
+    let mut store = open_store(state)?;
+    let id = store
+        .list()
+        .iter()
+        .find(|d| d.fingerprint_hex == fp_hex)
+        .map(|d| d.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let entry = DeviceEntry {
+        id,
+        name: name.to_string(),
+        addr: addr.to_string(),
+        fingerprint_hex: fp_hex,
+        added_at: unix_now(),
+    };
+    store.upsert(entry.clone()).map_err(|e| format!("{e:#}"))?;
+    let mut trust = open_trust(state)?;
+    trust.add(fp, name).map_err(|e| format!("写入信任列表失败：{e:#}"))?;
+    Ok(entry)
+}
+
+/// 发送一条 PairRequest 并解析 PairResult 回复。
+async fn pair_step(conn: &DeviceConn, payload: Vec<u8>) -> Result<PairResult, String> {
+    let reply = conn
+        .rpc(envelope::Msg::PairReq(PairRequest { spake2_msg: payload }))
+        .await
+        .map_err(|e| format!("配对通信失败：{e:#}"))?;
+    conn::parse_pair_reply(reply)
+}
+
+/// 配对核心（pair_device 主体）：Hello → Error{1} → 两步 SPAKE2/MAC → 保存。
+async fn run_pairing(
+    conn: &DeviceConn,
+    code: &str,
+    addr: &str,
+    name: &str,
+    state: &ConnManager,
+) -> Result<DeviceEntry, String> {
+    match conn.handshake(state.decode_caps()).await {
+        // Agent 已信任本机（如本机重装但 Agent 侧信任仍在）：免码直接登记
+        Ok(_ack) => return save_device(state, conn.peer_fingerprint(), addr, name),
+        Err(HandshakeError::Unauthenticated { .. }) => {}
+        Err(e) => return Err(describe_handshake_error(e)),
+    }
+
+    let my_fp = state.identity().fingerprint();
+    let (mut flow, msg1) = PairingFlow::start(code, my_fp, conn.peer_fingerprint());
+
+    // 第 1 步：发 SPAKE2 消息，收 Agent 的 SPAKE2 消息
+    let reply1 = pair_step(conn, msg1).await?;
+    let mac_c = match flow.on_pair_result(reply1.ok, &reply1.spake2_msg, &reply1.reason) {
+        PairAction::Send(mac) => mac,
+        PairAction::Done => return Err("对端提前完成配对（协议错误）".into()),
+        PairAction::Fail(msg) => return Err(msg),
+    };
+
+    // 第 2 步：发 MAC_c，收 Agent 的 MAC_a
+    let reply2 = pair_step(conn, mac_c).await?;
+    match flow.on_pair_result(reply2.ok, &reply2.spake2_msg, &reply2.reason) {
+        PairAction::Done => save_device(state, conn.peer_fingerprint(), addr, name),
+        PairAction::Send(_) => Err("对端要求继续配对（协议错误）".into()),
+        PairAction::Fail(msg) => Err(msg),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri 命令（签名与 lib.rs 注册一致）
+// ---------------------------------------------------------------------------
+
+/// 列出已配对设备（在线状态取自连接表）。
 #[tauri::command]
-pub async fn connect_device() -> Result<(), String> {
-    Err("not implemented".into())
+pub async fn list_devices(state: State<'_, ConnManager>) -> Result<Vec<DeviceDto>, String> {
+    let store = open_store(&state)?;
+    Ok(store
+        .list()
+        .iter()
+        .map(|entry| {
+            let online = state.get_device(&entry.id).is_some();
+            to_dto(entry, online)
+        })
+        .collect())
+}
+
+/// 用被控端托盘显示的 6 位配对码配对新设备；成功后保存设备并写入信任列表。
+#[tauri::command]
+pub async fn pair_device(
+    addr: String,
+    code: String,
+    name: String,
+    state: State<'_, ConnManager>,
+) -> Result<DeviceDto, String> {
+    let code = code.trim().to_string();
+    if code.len() != CODE_LEN || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("配对码必须是 6 位数字".into());
+    }
+    let addr = addr.trim().to_string();
+    if addr.is_empty() {
+        return Err("设备地址不能为空".into());
+    }
+    let name = {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            addr.split(':').next().unwrap_or("未命名设备").to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    // 首连不校验指纹（对端尚未进信任列表），配对成功后按实测指纹保存
+    let conn = DeviceConn::connect("pairing", &addr, state.identity(), None)
+        .await
+        .map_err(|e| describe_connect_error(&e))?;
+    let result = run_pairing(&conn, &code, &addr, &name, &state).await;
+    conn.close(0, "pairing done");
+    let entry = result?;
+    Ok(to_dto(&entry, false))
+}
+
+/// 从设备列表与信任列表移除设备；若在线则断开。
+#[tauri::command]
+pub async fn remove_device(id: String, state: State<'_, ConnManager>) -> Result<(), String> {
+    let mut store = open_store(&state)?;
+    let removed = store.remove(&id).map_err(|e| format!("{e:#}"))?;
+    if let Some(entry) = removed
+        && let Ok(fp) = parse_fingerprint(&entry.fingerprint_hex)
+    {
+        let mut trust = open_trust(&state)?;
+        trust
+            .remove(&fp)
+            .map_err(|e| format!("移除信任失败：{e:#}"))?;
+    }
+    if let Some(conn) = state.take_device(&id) {
+        conn.close(0, "removed");
+    }
+    Ok(())
+}
+
+/// 连接指定设备：QUIC（校验指纹）→ Hello 握手 → 登记连接表。
+#[tauri::command]
+pub async fn connect_device(
+    id: String,
+    app: AppHandle,
+    state: State<'_, ConnManager>,
+) -> Result<HelloAckDto, String> {
+    let entry = {
+        let store = open_store(&state)?;
+        store
+            .by_id(&id)
+            .cloned()
+            .ok_or_else(|| "设备不存在".to_string())?
+    };
+    let fp = fingerprint_of_hex(&entry.fingerprint_hex);
+    let conn = DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp))
+        .await
+        .map_err(|e| describe_connect_error(&e))?;
+    let ack = match conn.handshake(state.decode_caps()).await {
+        Ok(ack) => ack,
+        Err(e) => {
+            conn.close(0, "handshake failed");
+            return Err(describe_handshake_error(e));
+        }
+    };
+    state.put_device(id, conn, app);
+    if let Ok(mut trust) = open_trust(&state) {
+        let _ = trust.touch(&fp); // 失败不影响连接
+    }
+    Ok(HelloAckDto {
+        proto_ver: ack.proto_ver,
+        host_name: ack.host_name,
+        encode_caps: ack.encode_caps.iter().map(|c| codec_label(*c)).collect(),
+    })
 }
 
 /// 断开指定设备。
 #[tauri::command]
-pub async fn disconnect_device() -> Result<(), String> {
-    Err("not implemented".into())
+pub async fn disconnect_device(id: String, state: State<'_, ConnManager>) -> Result<(), String> {
+    let conn = state
+        .take_device(&id)
+        .ok_or_else(|| "设备未连接".to_string())?;
+    conn.close(0, "disconnected by user");
+    Ok(())
 }
 
-/// 探测设备可达性。
+/// 探测设备可达性（2 s 超时的连接测试，不发 Hello）。
 #[tauri::command]
-pub async fn probe_device() -> Result<(), String> {
-    Err("not implemented".into())
+pub async fn probe_device(id: String, state: State<'_, ConnManager>) -> Result<bool, String> {
+    let entry = {
+        let store = open_store(&state)?;
+        store
+            .by_id(&id)
+            .cloned()
+            .ok_or_else(|| "设备不存在".to_string())?
+    };
+    let fp = fingerprint_of_hex(&entry.fingerprint_hex);
+    match tokio::time::timeout(
+        PROBE_TIMEOUT,
+        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp)),
+    )
+    .await
+    {
+        Ok(Ok(conn)) => {
+            conn.close(0, "probe done");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
-/// 设置解码能力（上报 Hello.decode_caps）。
+/// 设置解码能力（前端启动时探测后上报；连接握手时填入 Hello）。
 #[tauri::command]
-pub async fn set_decode_caps() -> Result<(), String> {
-    Err("not implemented".into())
+pub async fn set_decode_caps(
+    caps: DecodeCapsDto,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    state.set_decode_caps(caps.into());
+    tracing::info!(?caps, "decode caps updated");
+    Ok(())
 }
