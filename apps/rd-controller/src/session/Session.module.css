@@ -1,0 +1,231 @@
+/* 会话页样式（T-021）：深色系，风格与 Windows.module.css 一致 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- 工具栏 ---- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+}
+
+.toolBtn {
+  padding: 5px 14px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #1b1b1b;
+  color: #ddd;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toolBtn:hover {
+  border-color: #4a7d4a;
+}
+
+.toolBtnActive {
+  border-color: #4a7d4a;
+  background: #245224;
+  color: #e6ffe6;
+}
+
+.zoomSelect {
+  padding: 5px 8px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #1b1b1b;
+  color: #ddd;
+  font-size: 13px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.notice {
+  color: #e8b45a;
+  font-size: 12px;
+}
+
+.toast {
+  color: #9fd49f;
+  font-size: 12px;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toastError {
+  color: #e07a7a;
+}
+
+/* ---- 标签栏 ---- */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 12px 0;
+  border-bottom: 1px solid #333;
+  overflow-x: auto;
+}
+
+.tab,
+.tabActive {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid #333;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: #161616;
+  color: #bbb;
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 240px;
+  user-select: none;
+}
+
+.tabActive {
+  background: #222;
+  color: #eee;
+  border-color: #4a7d4a;
+}
+
+.tabTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabClose {
+  border: none;
+  background: transparent;
+  color: #888;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.tabClose:hover {
+  color: #e07a7a;
+}
+
+/* ---- 舞台 ---- */
+
+.stageArea {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.empty {
+  margin: auto;
+  color: #777;
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+
+.stageTopLeft {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+.stageCenter {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.group {
+  position: relative;
+  flex: none;
+}
+
+.surface {
+  position: absolute;
+}
+
+.videoCanvas {
+  display: block;
+  background: #000;
+}
+
+/* 瓦片层叠在视频层之上，透明背景，输入事件放行给视频层（T-022 接管） */
+.tileCanvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ---- 遮罩与 HUD ---- */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgb(0 0 0 / 65%);
+  z-index: 3;
+}
+
+.overlayText {
+  margin: 0;
+  color: #ddd;
+  font-size: 15px;
+}
+
+.retryBtn {
+  padding: 6px 22px;
+  border: 1px solid #4a7d4a;
+  border-radius: 4px;
+  background: #245224;
+  color: #e6ffe6;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.hud {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgb(0 0 0 / 55%);
+  z-index: 2;
+}
+
+.hudItem {
+  color: #b9e2b9;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
+import { Session } from "./pages/Session";
 import { Windows } from "./pages/Windows";
 import type { DecodeStats } from "./video/decoder";
 import { H264Decoder } from "./video/decoder";
@@ -156,9 +157,7 @@ export default function App() {
         <Placeholder title="Devices" task="T-019" />
       )}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
-      {route.page === "session" && (
-        <Placeholder title={`Session (${route.deviceId})`} task="T-021" />
-      )}
+      {route.page === "session" && <Session deviceId={route.deviceId} />}
     </div>
   );
 }
