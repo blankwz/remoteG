@@ -152,15 +152,20 @@ async fn t03_tiles_pixel_exact() -> Result<()> {
     // 64px 块的编码尺寸，瓦片将永远无法下发。
     let drain = tokio::spawn(async move { while let Ok(Some(_)) = s.video.recv().await {} });
 
-    // 立即开始收瓦片（瓦片成熟需静止 ≥300ms，收集窗覆盖成熟期），同时等待
-    // 画面进入静止。
+    // 瓦片产出时序：首帧创建编码器/精修器（实测约 150 ms）→ 静止 ≥300 ms
+    // 成熟 → tick（50 ms 周期、字节预算分批）下发，首批瓦片约在 500 ms 处。
+    // 先等精修完成再开收集——此前的瓦片已排在 QUIC 流缓冲中，collect 启动
+    // 即读到；同时避开 collect 的 400 ms 静默提前退出与成熟期的重叠误判。
+    tokio::time::sleep(Duration::from_millis(800)).await;
     let hwnd = env.hwnd;
     let collect_handle = tokio::spawn(async move {
         common::collect_tiles(&mut s.tile, hwnd, Duration::from_secs(6))
             .await
             .expect("瓦片收集失败")
     });
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // 源图与瓦片同为静止画面（Agent 与本地抓取时刻内容相同），再等 700 ms
+    // 保持约 1.5 s 的原始节奏。
+    tokio::time::sleep(Duration::from_millis(700)).await;
 
     // 源图：testwin 静止画面，Agent 抓取时刻与本地抓取时刻内容相同。
     let src = common::capture_source_frame(env.hwnd)?;
@@ -220,27 +225,14 @@ async fn t03_tiles_pixel_exact() -> Result<()> {
         }
     }
 
-    // Agent 侧瓦片路径当前无产出（见 12_tasks/T-025 上报）：测试进程以同一
-    // rd-capture-win + rd-encode 实现、同一窗口与预算复现持续产出瓦片，
-    // 而 Agent 进程内瓦片流全程 0 字节。此时显式跳过并打印证据，不静默通过。
-    if ratio < 0.15 {
-        drain.abort();
-        println!(
-            "SKIP(known-issue): 9s 内瓦片流 0 数据（覆盖率 {:.1}%，Agent 瓦片 kbps={agent_kbps:?}）。\
-             测试进程以同一实现复现：同预算产出 {} 张/最大 {} B——瓦片精修/发送链路在 Agent 进程内 \
-             未产出，缺陷上报 A4；修复后本用例自动恢复逐像素断言。",
-            ratio * 100.0,
-            local_probe.0,
-            local_probe.1
-        );
-        return Ok(());
-    }
-
     anyhow::ensure!(
         ratio >= 0.15,
-        "瓦片覆盖率过低: {:.1}%（{} / {total} px）",
+        "瓦片覆盖率过低: {:.1}%（{} / {total} px；本地复算同预算 {} 张/最大 {} B，\
+         Agent 瓦片 kbps={agent_kbps:?}）",
         ratio * 100.0,
-        covered
+        covered,
+        local_probe.0,
+        local_probe.1
     );
 
     // 已覆盖区域逐像素比对（BGRA 4 通道；源图行距为 stride）。
@@ -435,13 +427,11 @@ async fn send_click(c: &mut Client, hwnd: u64, x: i32, y: i32, button: u32) -> R
 // ---------------------------------------------------------------------------
 
 /// 对 testwin 客户区右键 → 3s 内收到 CHILD_ADDED（root_id=testwin）。
-/// 随后关闭菜单，确认组恢复为仅根窗口。
+/// 随后点击菜单项关闭菜单（"菜单可交互感知"），确认组恢复为仅根窗口。
 ///
-/// 已知缺陷上报（A4/T-027）：弹出菜单窗口（#32768）无法被 WGC 捕获
-/// （CreateForWindow 返回 E_INVALIDARG），`add_child` 子管线建立失败时
-/// **不发 CHILD_ADDED**，控制端感知不到菜单。本用例对"本地组已见到菜单、
-/// 控制端却无事件"的组合显式打印缺陷说明后按通过处理（不得静默）；
-/// 菜单未弹出（注入链路问题）仍判失败。
+/// 弹出菜单（#32768）无法被 WGC 捕获（CreateForWindow E_INVALIDARG，Windows
+/// 平台硬限制）：CHILD_ADDED 必须与子管线建立解耦——事件照发、无视频流降级
+/// （D-011 缺陷 2 修复语义）；点击作用于菜单依赖 is_open 的组成员放行。
 #[tokio::test(flavor = "multi_thread")]
 async fn t06_menu_child_added() -> Result<()> {
     let _guard = common::serial_lock().await;
@@ -511,16 +501,10 @@ async fn t06_menu_child_added() -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            anyhow::ensure!(
-                menu_open_now,
-                "3s 内未收到 CHILD_ADDED 且本地窗口组未见菜单（右键注入或菜单弹出失败）: {err:#}"
-            );
-            println!(
-                "SKIP(known-defect): 弹出菜单已出现（本地窗口组可见），但 Agent 未发送 \
-                 CHILD_ADDED——菜单窗口 #32768 无法被 WGC 捕获（CreateForWindow E_INVALIDARG），\
-                 add_child 子管线失败时不发事件。缺陷已上报 A4，待修复后本用例自动转绿。"
-            );
-            Ok(())
+            if menu_open_now {
+                bail!("菜单已弹出但 3s 内未收到 CHILD_ADDED（事件应与子管线建立解耦）: {err:#}");
+            }
+            bail!("3s 内未收到 CHILD_ADDED 且本地窗口组未见菜单（右键注入或菜单弹出失败）: {err:#}")
         }
     }
 }

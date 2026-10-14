@@ -29,10 +29,12 @@
 //! 每连接一个会话 tick 任务（首次窗口消息时启动）：
 //! - **组轮询**（250 ms 周期；MenuStart/Created 事件经 `Notify` 提前触发）：
 //!   对本连接每个已打开根窗口求 [`window_group`] 并与上次快照 diff——
-//!   新增成员发 `CHILD_ADDED`（x/y 为相对根客户区偏移）并为其开独立管线
-//!   （菜单类 `#32768` 不精修、一律不做 Fit）；消失成员发 `CHILD_REMOVED`
-//!   并停管线；偏移变化发 `MOVED`。子窗口 id 进组成员表，`is_open` 对其
-//!   返回 true（T-017 的点击可作用于菜单）。
+//!   新增成员即发 `CHILD_ADDED`（x/y 为相对根客户区偏移；事件与管线建立
+//!   解耦，FIX-1 缺陷 2），随后尝试开独立子管线，失败（含菜单类 `#32768`
+//!   不可捕获的 Windows 硬限制）则无视频流降级；子窗口一律不做 Fit、菜单
+//!   类不精修；消失成员发 `CHILD_REMOVED` 并停管线；偏移变化发 `MOVED`。
+//!   子窗口 id 进组成员表（与管线成败无关），`is_open` 对其返回 true
+//!   （T-017 的点击可作用于菜单）。
 //! - **码率自适应**（200 ms 周期）：每会话一个 [`RateController`]，以
 //!   `conn.rtt()`、发送在途字节（视频/瓦片发送任务在途记账）、QUIC 丢包
 //!   差分更新，决策码率按各窗口客户区面积比例落到全部编码器
@@ -1055,6 +1057,12 @@ impl PipeError {
 ///
 /// T-027：每帧与每瓦片 tick 前应用会话码率决策（`set_bitrate`）；建议帧率
 /// 低于捕获帧率时按时间间隔丢帧节流（事件驱动管线，节流在编码侧执行）。
+///
+/// FIX-1（D-011 缺陷 1）：瓦片 tick 是时间驱动，不能挂在 `recv_timeout` 的
+/// Timeout 分支上——WGC 对常显窗口会以不低于编码消费的节奏持续推帧，此时
+/// recv 每次都立即取到帧、永不超时，tick 被饿死（瓦片与失效标记全程零
+/// 产出）。tick 检查按绝对期限放在循环顶部执行，`recv_timeout(wait)` 只是
+/// "最多等到下个 tick"的有界等待，帧到得再密也不影响 tick 节拍。
 fn encode_loop(run: PipeRun) {
     let PipeRun {
         frame_rx,
@@ -1082,6 +1090,21 @@ fn encode_loop(run: PipeRun) {
     loop {
         if cancel.is_cancelled() {
             return;
+        }
+        // 瓦片 tick：按绝对期限执行（帧流持续时 recv 同样不会超时，见函数文档）
+        let now = Instant::now();
+        if now >= next_tick {
+            next_tick = now + TILE_TICK;
+            // 静止期同样应用码率决策（长静止后恢复时使用新码率）
+            applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
+            let budget = tile_budget_bytes(applied_kbps);
+            if let Some((seq, raw)) = last.as_ref() {
+                for t in pipe.tick(raw, now, budget) {
+                    if tile_tx.blocking_send((*seq, t)).is_err() {
+                        return; // 瓦片发送任务已退出
+                    }
+                }
+            }
         }
         let wait = next_tick
             .saturating_duration_since(Instant::now())
@@ -1140,22 +1163,7 @@ fn encode_loop(run: PipeRun) {
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                let now = Instant::now();
-                if now < next_tick {
-                    continue; // 被关闭信号提前唤醒，等下一个 tick 点
-                }
-                next_tick = now + TILE_TICK;
-                // 静止期同样应用码率决策（长静止后恢复时使用新码率）
-                applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
-                let budget = tile_budget_bytes(applied_kbps);
-                let Some((seq, raw)) = last.as_ref() else {
-                    continue;
-                };
-                for t in pipe.tick(raw, now, budget) {
-                    if tile_tx.blocking_send((*seq, t)).is_err() {
-                        return;
-                    }
-                }
+                continue; // 到点与否由循环顶部的期限检查裁决
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 return; // 捕获会话已关闭（正常关闭路径）
@@ -1567,13 +1575,42 @@ async fn poll_groups(ctx: &Arc<SessionCtx>) {
     }
 }
 
-/// 窗口组新增成员：建独立子管线，成功后发 `CHILD_ADDED` 并登记组成员表
-/// （T-027 步骤 1/2）。子窗口不做 Fit（恒 SCALE）；菜单类 `#32768` 不精修；
-/// 不保存布局（无 placement 可恢复）。失败仅记日志——成员已写入 diff 快照，
-/// 消失重现前不重试（避免 250 ms 周期反复拉起失败管线）。
+/// 窗口组新增成员：先发 `CHILD_ADDED`（事件与管线建立解耦；T-027 步骤 1/2
+/// 与 FIX-1 缺陷 2），再登记组成员表并尝试建独立子管线。子窗口不做 Fit
+/// （恒 SCALE）；菜单类 `#32768` 不精修；不保存布局（无 placement 可恢复）。
+///
+/// D-011 缺陷 2：弹出菜单窗口（`#32768`）无法被 WGC 捕获（CreateForWindow
+/// 返回 E_INVALIDARG，Windows 平台硬限制），子管线注定失败——但事件必须
+/// 照发（控制端"菜单可交互感知"），成员表照常登记（`is_open` 放行，T-017
+/// 的点击可作用于菜单），管线失败仅记日志降级（无视频流）。事件先行同时
+/// 消除了"管线先建、CHILD_ADDED 后发"的控制端首帧竞态（帧先于子窗口映射
+/// 到达被丢）。成员已写入 diff 快照，消失重现前不重试（避免 250 ms 周期
+/// 反复拉起失败管线）。
 async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
     let child = m.hwnd as u64;
     let is_menu = class_name_is_menu(m.hwnd);
+    let info = child_window_info(m);
+    if let Err(err) = ctx
+        .send(
+            Msg::WindowEvent(WindowEvent {
+                kind: Kind::ChildAdded as i32,
+                info: Some(info),
+                root_id,
+            }),
+            0,
+        )
+        .await
+    {
+        tracing::debug!("CHILD_ADDED 发送失败（连接已断）: {err:#}");
+        return; // 连接已断，无需再建管线
+    }
+    // 成员表登记与管线成败无关：is_open 对子窗口放行（点击可作用于菜单）。
+    child_members()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .entry(ctx_key(ctx))
+        .or_default()
+        .insert(child);
     let cfg = &ctx.state.config;
     let spec = PipeSpec {
         hwnd: m.hwnd,
@@ -1589,27 +1626,6 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
     };
     match start_pipeline(ctx, spec).await {
         Ok(started) => {
-            child_members()
-                .lock()
-                .unwrap_or_else(lock_poisoned)
-                .entry(ctx_key(ctx))
-                .or_default()
-                .insert(child);
-            let info = child_window_info(m);
-            if let Err(err) = ctx
-                .send(
-                    Msg::WindowEvent(WindowEvent {
-                        kind: Kind::ChildAdded as i32,
-                        info: Some(info),
-                        root_id,
-                    }),
-                    0,
-                )
-                .await
-            {
-                tracing::debug!("CHILD_ADDED 发送失败（连接已断）: {err:#}");
-                return;
-            }
             tracing::info!(
                 child = format!("{child:#x}"),
                 root = format!("{root_id:#x}"),
@@ -1620,10 +1636,11 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
             );
         }
         Err(err) => {
+            // 含菜单类不可捕获（Windows 硬限制）：事件已发、无视频流降级。
             tracing::warn!(
                 child = format!("{child:#x}"),
                 root = format!("{root_id:#x}"),
-                "子窗口管线建立失败（跳过，成员消失重现前不重试）: {err:#}"
+                "子窗口管线建立失败（无视频流降级，成员消失重现前不重试）: {err:#}"
             );
         }
     }
