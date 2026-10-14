@@ -17,9 +17,17 @@ tracing.workspace = true
 dcv-color-primitives = "1.0.0"
 openh264 = "0.9.8"
 openh264-sys2 = "0.9.8"
+qoi.workspace = true
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format"], optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+criterion = "0.8"
+
+[[bench]]
+name = "tiles"
+harness = false
