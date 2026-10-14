@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn req_table_allocates_unique_nonzero_ids() {
-        let mut table = ReqTable::default();
+        let table = ReqTable::default();
         let a = table.allocate();
         let b = table.allocate();
         let c = table.allocate();
