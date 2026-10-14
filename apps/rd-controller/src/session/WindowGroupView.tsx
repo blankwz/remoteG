@@ -13,11 +13,22 @@ import {
   useEffect,
   useRef,
   useState,
+  type CompositionEvent,
   type CSSProperties,
+  type FocusEvent,
+  type KeyboardEvent,
+  type PointerEvent,
   type RefObject,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { connectDevice } from "../api/devices";
+import {
+  keyEvent,
+  mouseButton,
+  mouseMove,
+  mouseWheel,
+  textInput,
+} from "../api/input";
 import {
   closeWindow,
   openWindow,
@@ -25,6 +36,17 @@ import {
   setViewport,
   subscribeGroupEvents,
 } from "../api/session";
+import {
+  hitWindow,
+  InputMapper,
+  loadCmdToCtrl,
+  mapButton,
+  mapGroupPoint,
+  MouseMovePacer,
+  normalizeWheel,
+  saveCmdToCtrl,
+  type KeyInput,
+} from "../input/InputMapper";
 import {
   H264Decoder,
   parseVideoHeader,
@@ -56,6 +78,23 @@ const VIEWPORT_DEBOUNCE_MS = 150;
 const RECONNECT_ATTEMPTS = 3;
 /** 重连退避基数（第 n 次失败后等待 n 倍基数再试）。 */
 const RECONNECT_BACKOFF_MS = 800;
+
+/** 隐藏的键盘捕获 textarea（任务卡步骤 5）：1px 透明，不参与指针命中。 */
+const CAPTURE_STYLE: CSSProperties = {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  width: 1,
+  height: 1,
+  opacity: 0,
+  border: "none",
+  padding: 0,
+  margin: 0,
+  resize: "none",
+  outline: "none",
+  overflow: "hidden",
+  pointerEvents: "none",
+};
 
 /** 会话阶段。 */
 type Phase = "connecting" | "open" | "reconnecting" | "failed";
@@ -255,6 +294,297 @@ export function WindowGroupView({
     },
     [windowId],
   );
+
+  // ---- 输入映射（T-022 挂载）----
+
+  const groupRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Cmd→Ctrl（任务卡步骤 7，默认开，localStorage 持久化）。 */
+  const [cmdToCtrl, setCmdToCtrl] = useState<boolean>(() => loadCmdToCtrl());
+  /** 发送时读取最新 deviceId，避免闭包捕获旧连接。 */
+  const deviceIdRef = useRef(deviceId);
+  useEffect(() => {
+    deviceIdRef.current = deviceId;
+  }, [deviceId]);
+  /** 根窗口视频物理尺寸（坐标映射基准；无帧时不发送）。 */
+  const rootStatsRef = useRef(rootStats);
+  rootStatsRef.current = rootStats;
+
+  /** 吞掉发送错误：输入丢失不弹错，断连由会话层遮罩与重连兜底。 */
+  const sendInput = useCallback((p: Promise<void>) => {
+    void p.catch(() => undefined);
+  }, []);
+
+  /** 键盘 / IME 映射器（生命周期 = 本标签；失焦抬起全部按下键）。 */
+  const mapperRef = useRef<InputMapper | null>(null);
+  if (mapperRef.current === null) {
+    mapperRef.current = new InputMapper(
+      {
+        key: (k) => {
+          sendInput(
+            keyEvent(deviceIdRef.current, k.scancode, k.extended, k.down, k.modifiers),
+          );
+        },
+        text: (t) => {
+          sendInput(textInput(deviceIdRef.current, t));
+        },
+      },
+      { cmdToCtrl },
+    );
+  }
+  useEffect(() => {
+    const mapper = mapperRef.current;
+    if (mapper !== null) {
+      mapper.cmdToCtrl = cmdToCtrl;
+    }
+  }, [cmdToCtrl]);
+
+  /** 鼠标移动 rAF 合并器（任务卡步骤 3；卸载丢弃挂起帧）。 */
+  const pacerRef = useRef<MouseMovePacer | null>(null);
+  if (pacerRef.current === null) {
+    pacerRef.current = new MouseMovePacer((m) => {
+      sendInput(mouseMove(deviceIdRef.current, m.windowId, m.x, m.y));
+    });
+  }
+  useEffect(
+    () => () => {
+      pacerRef.current?.cancel();
+      mapperRef.current?.releaseAll();
+    },
+    [sendInput],
+  );
+
+  /** 组容器 CSS 坐标 → 根窗口物理像素（无容器/无帧返回 null：不发送）。 */
+  const toPhys = useCallback((clientX: number, clientY: number) => {
+    const el = groupRef.current;
+    if (el === null) {
+      return null;
+    }
+    const rect = el.getBoundingClientRect();
+    const rs = rootStatsRef.current;
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      rs === null ||
+      rs.width <= 0 ||
+      rs.height <= 0
+    ) {
+      return null;
+    }
+    return mapGroupPoint(
+      clientX - rect.left,
+      clientY - rect.top,
+      rect.width,
+      rect.height,
+      rs.width,
+      rs.height,
+    );
+  }, []);
+
+  /** 物理坐标命中的窗口记录（子窗口上层优先，回退根窗口）。 */
+  const hitAt = useCallback(
+    (p: { x: number; y: number }) => {
+      const rs = rootStatsRef.current;
+      if (rs === null) {
+        return null;
+      }
+      return hitWindow(p.x, p.y, windowId, rs.width, rs.height, snapshot.children);
+    },
+    [windowId, snapshot.children],
+  );
+
+  /**
+   * 按下中的鼠标按钮：按下时命中的窗口（含其在根坐标系中的偏移）与
+   * **该窗口相对坐标**（协议 x/y 为目标窗口客户区坐标，Agent 按窗口自身
+   * 原点换算）。抬起按原窗原位发送。
+   */
+  const downWinsRef = useRef(
+    new Map<number, { id: string; ox: number; oy: number; x: number; y: number }>(),
+  );
+
+  const onPointerMove = (e: PointerEvent<HTMLDivElement>): void => {
+    if (phase !== "open") {
+      return;
+    }
+    const p = toPhys(e.clientX, e.clientY);
+    if (p === null) {
+      return;
+    }
+    // 有按钮按下（拖拽/拖选）：移动继续发给按下的窗口（捕获语义），
+    // 不随光标跨越子窗口边界换目标
+    const downs = [...downWinsRef.current.values()];
+    if (downs.length > 0) {
+      const target = downs[downs.length - 1];
+      if (target !== undefined) {
+        target.x = p.x - target.ox;
+        target.y = p.y - target.oy;
+        pacerRef.current?.submit({ windowId: target.id, x: target.x, y: target.y });
+      }
+      return;
+    }
+    const hit = hitAt(p);
+    if (hit === null) {
+      return;
+    }
+    pacerRef.current?.submit({
+      windowId: hit.id,
+      x: p.x - hit.x,
+      y: p.y - hit.y,
+    });
+  };
+
+  const onPointerDown = (e: PointerEvent<HTMLDivElement>): void => {
+    if (phase !== "open") {
+      return;
+    }
+    textareaRef.current?.focus({ preventScroll: true });
+    const p = toPhys(e.clientX, e.clientY);
+    if (p !== null) {
+      const hit = hitAt(p);
+      if (hit !== null) {
+        const btn = mapButton(e.button);
+        const rel = { x: p.x - hit.x, y: p.y - hit.y };
+        downWinsRef.current.set(btn, {
+          id: hit.id,
+          ox: hit.x,
+          oy: hit.y,
+          x: rel.x,
+          y: rel.y,
+        });
+        sendInput(mouseButton(deviceIdRef.current, hit.id, rel.x, rel.y, btn, true));
+      }
+    }
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // 捕获失败不影响本次点击（指针未离开容器时事件仍按几何命中）
+    }
+  };
+
+  /** 按下按钮抬起（pointerup / pointercancel 共用）。 */
+  const releaseButton = (e: PointerEvent<HTMLDivElement>): void => {
+    if (phase !== "open") {
+      return;
+    }
+    const btn = mapButton(e.button);
+    const down = downWinsRef.current.get(btn);
+    if (down === undefined) {
+      return;
+    }
+    downWinsRef.current.delete(btn);
+    sendInput(mouseButton(deviceIdRef.current, down.id, down.x, down.y, btn, false));
+  };
+
+  /** 捕获丢失（Alt+Tab / 系统手势）：抬起全部按下按钮防远端卡键。 */
+  const onLostPointerCapture = (): void => {
+    for (const [btn, down] of downWinsRef.current) {
+      sendInput(mouseButton(deviceIdRef.current, down.id, down.x, down.y, btn, false));
+    }
+    downWinsRef.current.clear();
+  };
+
+  // 滚轮：原生监听（passive:false 才能 preventDefault 阻止页面滚动）
+  useEffect(() => {
+    const el = groupRef.current;
+    if (el === null) {
+      return undefined;
+    }
+    const onWheel = (e: WheelEvent): void => {
+      if (phase !== "open") {
+        return;
+      }
+      e.preventDefault();
+      const p = toPhys(e.clientX, e.clientY);
+      if (p === null) {
+        return;
+      }
+      const hit = hitAt(p);
+      if (hit === null) {
+        return;
+      }
+      const { dx, dy } = normalizeWheel(e.deltaMode, e.deltaX, e.deltaY, e.shiftKey);
+      if (dx !== 0 || dy !== 0) {
+        sendInput(
+          mouseWheel(deviceIdRef.current, hit.id, p.x - hit.x, p.y - hit.y, dx, dy),
+        );
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+    };
+  }, [phase, toPhys, hitAt, sendInput]);
+
+  const keyInputOf = (e: KeyboardEvent<HTMLTextAreaElement>): KeyInput => ({
+    code: e.code,
+    ctrlKey: e.ctrlKey,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey,
+    metaKey: e.metaKey,
+    // React 合成事件类型未暴露 isComposing，从原生事件读取
+    isComposing: e.nativeEvent.isComposing,
+  });
+
+  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    const action = mapperRef.current?.handleKeyDown(keyInputOf(e)) ?? "ignored";
+    if (action === "forwarded") {
+      e.preventDefault();
+    }
+  };
+
+  const onKeyUp = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    const action = mapperRef.current?.handleKeyUp(keyInputOf(e)) ?? "ignored";
+    if (action === "forwarded") {
+      e.preventDefault();
+    }
+  };
+
+  const onCompositionStart = (): void => {
+    const mapper = mapperRef.current;
+    if (mapper !== null) {
+      mapper.composing = true;
+    }
+  };
+
+  const onCompositionEnd = (e: CompositionEvent<HTMLTextAreaElement>): void => {
+    const mapper = mapperRef.current;
+    if (mapper !== null) {
+      mapper.handleCompositionEnd(e.data);
+    }
+    e.currentTarget.value = "";
+  };
+
+  const onCaptureBlur = (e: FocusEvent<HTMLTextAreaElement>): void => {
+    e.currentTarget.value = "";
+    mapperRef.current?.releaseAll();
+  };
+
+  // 会话失活（断线重连 / 失败）：抬起远端按键与鼠标按钮，防切走后卡键
+  useEffect(() => {
+    if (phase !== "open") {
+      mapperRef.current?.releaseAll();
+      downWinsRef.current.clear();
+    }
+  }, [phase]);
+
+  // 窗口失焦：发送已按下键的抬起（任务卡步骤 8）
+  useEffect(() => {
+    const onWinBlur = (): void => {
+      mapperRef.current?.releaseAll();
+    };
+    window.addEventListener("blur", onWinBlur);
+    return () => {
+      window.removeEventListener("blur", onWinBlur);
+    };
+  }, []);
+
+  // 会话打开后聚焦键盘捕获（键盘即生效；点 HUD 控件可正常夺走焦点）
+  useEffect(() => {
+    if (phase === "open") {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
+  }, [phase]);
 
   // 容器尺寸跟踪（Scale 模式计算缩放比；Fit 视口上报另有观察器）
   useEffect(() => {
@@ -522,6 +852,18 @@ export function WindowGroupView({
         <span className={styles.hudItem}>
           {snapshot.fit} ×{Math.round(snapshot.zoom * 100)}%
         </span>
+        <label className={styles.hudItem} title="macOS：Cmd 组合键映射为远端 Ctrl">
+          <input
+            type="checkbox"
+            checked={cmdToCtrl}
+            onChange={(e) => {
+              const v = e.currentTarget.checked;
+              saveCmdToCtrl(v);
+              setCmdToCtrl(v);
+            }}
+          />{" "}
+          Cmd→Ctrl
+        </label>
       </div>
     );
 
@@ -546,9 +888,34 @@ export function WindowGroupView({
   return (
     <div className={styles.stage} ref={containerRef}>
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
-        <div className={styles.group} style={wrapStyle}>
+        <div
+          className={styles.group}
+          style={wrapStyle}
+          ref={groupRef}
+          onPointerMove={onPointerMove}
+          onPointerDown={onPointerDown}
+          onPointerUp={releaseButton}
+          onPointerCancel={releaseButton}
+          onLostPointerCapture={onLostPointerCapture}
+          onContextMenu={(e) => {
+            e.preventDefault();
+          }}
+        >
           {rootSurface}
           {children}
+          <textarea
+            ref={textareaRef}
+            style={CAPTURE_STYLE}
+            tabIndex={-1}
+            aria-hidden="true"
+            spellCheck={false}
+            autoComplete="off"
+            onKeyDown={onKeyDown}
+            onKeyUp={onKeyUp}
+            onCompositionStart={onCompositionStart}
+            onCompositionEnd={onCompositionEnd}
+            onBlur={onCaptureBlur}
+          />
         </div>
       </div>
       {overlay}
