@@ -1,10 +1,14 @@
 /**
- * 会话页（T-021）：多标签，每标签一个窗口组。工具栏（模式 / zoom / HUD /
- * 导出）+ 标签栏（标题 + 关闭）+ 舞台（激活标签的 WindowGroupView）。
+ * 会话页（T-021 窗口组 + T-023 终端）：多标签。工具栏（模式 / zoom / HUD /
+ * 导出）+ 标签栏（窗口标签 + “+ 终端”）+ 舞台（激活标签内容）。
  *
- * URL 参数：`?open=<windowId>` 自动打开标签；`?term=<shell>` 终端标签由
- * T-023 消费（本卡不处理）。快捷键：Ctrl+Shift+H 切换 HUD、Ctrl+Shift+S
- * 导出当前激活标签根窗口的合成 PNG。
+ * 标签两类：窗口组（id = windowId，随标签持有 SessionStore）与终端
+ * （id = `term:<shell>`，内容为 TermView；标题取 xterm onTitleChange，
+ * 关闭只移除本地标签，远端会话保留供 resume）。
+ *
+ * URL 参数：`?open=<windowId>` 自动打开窗口标签；`?term=<shell>` 打开终端
+ * 标签（如 `?term=wsl`）。快捷键：Ctrl+Shift+H 切换 HUD、Ctrl+Shift+S 导出
+ * 当前激活窗口标签根窗口的合成 PNG（终端标签激活时为空操作提示）。
  */
 import {
   useCallback,
@@ -20,9 +24,14 @@ import {
   type SessionSnapshot,
 } from "../session/SessionStore";
 import { WindowGroupView } from "../session/WindowGroupView";
+import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
+import { DEFAULT_TERM_SHELL, parseShell } from "../api/term";
 import type { FitMode } from "../api/session";
-import styles from "./Session.module.css";
+import styles from "../session/Session.module.css";
+
+/** 终端标签 id 前缀（窗口 id 为十进制字符串，命名空间不重叠）。 */
+const TERM_ID_PREFIX = "term:";
 
 /** 把 Error/unknown 统一成消息文本。 */
 function errText(e: unknown): string {
@@ -33,14 +42,26 @@ function errText(e: unknown): string {
 const subscribeNoop = () => () => undefined;
 const getEmptySnapshot = () => EMPTY_SNAPSHOT;
 
-/** 单个会话标签的运行时容器：store 与视图共享键（windowId）。 */
-interface TabEntry {
+/** 窗口组标签：id 为窗口句柄十进制字符串，store 与视图共享键。 */
+interface WindowTab {
+  readonly kind: "window";
   readonly id: string;
   readonly store: SessionStore;
 }
 
+/** 终端标签：id = `term:<shell>`（同 shell 幂等复用），标题由 TermView 上报。 */
+interface TermTab {
+  readonly kind: "term";
+  readonly id: string;
+  readonly shell: string;
+  /** xterm onTitleChange 更新；未知名回退 shell。 */
+  readonly title: string | null;
+}
+
+type SessionTab = WindowTab | TermTab;
+
 export function Session({ deviceId }: { deviceId: string }) {
-  const [tabs, setTabs] = useState<readonly TabEntry[]>([]);
+  const [tabs, setTabs] = useState<readonly SessionTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [hudVisible, setHudVisible] = useState(true);
   /** 导出结果 / 错误提示（数秒后自动消失）。 */
@@ -59,23 +80,52 @@ export function Session({ deviceId }: { deviceId: string }) {
     }, 5000);
   }, []);
 
-  /** 打开标签（幂等）；store 随标签创建。 */
+  /** 打开窗口组标签（幂等）；store 随标签创建。 */
   const openTab = useCallback((windowId: string) => {
     setTabs((prev) => {
       if (prev.some((t) => t.id === windowId)) {
         return prev;
       }
-      return [...prev, { id: windowId, store: new SessionStore(windowId) }];
+      const next: WindowTab = {
+        kind: "window",
+        id: windowId,
+        store: new SessionStore(windowId),
+      };
+      return [...prev, next];
     });
     setActiveId(windowId);
   }, []);
 
+  /** 打开终端标签（同 shell 幂等；T-023）。 */
+  const openTermTab = useCallback((shell: string) => {
+    const id = `${TERM_ID_PREFIX}${shell}`;
+    setTabs((prev) => {
+      if (prev.some((t) => t.id === id)) {
+        return prev;
+      }
+      const next: TermTab = { kind: "term", id, shell, title: null };
+      return [...prev, next];
+    });
+    setActiveId(id);
+  }, []);
+
+  /** 终端标题上报（xterm onTitleChange）。 */
+  const setTermTitle = useCallback((id: string, title: string) => {
+    setTabs((prev) =>
+      prev.map((t) => (t.kind === "term" && t.id === id ? { ...t, title } : t)),
+    );
+  }, []);
+
   const closeTab = useCallback(
-    (windowId: string) => {
-      // 视图卸载清理同样会发 CloseWindow；重复发送幂等（Agent 静默忽略）
-      void closeWindow(deviceId, windowId).catch(() => undefined);
-      setTabs((prev) => prev.filter((t) => t.id !== windowId));
-      setActiveId((cur) => (cur === windowId ? null : cur));
+    (tabId: string) => {
+      // 终端标签只移除本地视图，远端会话保留（resume 窗口期内重开可恢复
+      // 历史）；窗口标签照旧发 CloseWindow（视图卸载清理同样会发，重复
+      // 发送幂等，Agent 静默忽略）
+      if (!tabId.startsWith(TERM_ID_PREFIX)) {
+        void closeWindow(deviceId, tabId).catch(() => undefined);
+      }
+      setTabs((prev) => prev.filter((t) => t.id !== tabId));
+      setActiveId((cur) => (cur === tabId ? null : cur));
     },
     [deviceId],
   );
@@ -90,9 +140,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     }
   }, [activeId, tabs]);
 
-  // URL ?open=<windowId>：挂载与 hash 变化时解析并自动打开标签
-  // （?term= 由 T-023 消费）。App 路由剥离查询串，同设备换开窗口只体现为
-  // hash 变化，本页自行监听以捕获。
+  // URL ?open=<windowId> / ?term=<shell>：挂载与 hash 变化时解析并自动打开
+  // 标签（打开均幂等，重复 hash 事件无副作用）。App 路由剥离查询串，同设备
+  // 换开窗口只体现为 hash 变化，本页自行监听以捕获。
   useEffect(() => {
     const openFromHash = () => {
       const params = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
@@ -100,35 +150,38 @@ export function Session({ deviceId }: { deviceId: string }) {
       if (open !== null && open.length > 0) {
         openTab(open);
       }
+      const term = params.get("term");
+      if (term !== null && term.length > 0) {
+        openTermTab(parseShell(term));
+      }
     };
     openFromHash();
     window.addEventListener("hashchange", openFromHash);
     return () => {
       window.removeEventListener("hashchange", openFromHash);
     };
-  }, [openTab]);
+  }, [openTab, openTermTab]);
 
-  const activeEntry =
-    activeId !== null
-      ? tabs.find((t) => t.id === activeId) ?? null
-      : null;
+  const activeTab =
+    activeId !== null ? tabs.find((t) => t.id === activeId) ?? null : null;
+  const activeWindow = activeTab?.kind === "window" ? activeTab : null;
   const snapshot: SessionSnapshot = useSyncExternalStore(
-    activeEntry?.store.subscribe ?? subscribeNoop,
-    activeEntry?.store.getSnapshot ?? getEmptySnapshot,
+    activeWindow?.store.subscribe ?? subscribeNoop,
+    activeWindow?.store.getSnapshot ?? getEmptySnapshot,
   );
 
   const setFit = useCallback(
     (fit: FitMode) => {
-      activeEntry?.store.setFit(fit);
+      activeWindow?.store.setFit(fit);
     },
-    [activeEntry],
+    [activeWindow],
   );
 
   const setZoom = useCallback(
     (zoom: number) => {
-      activeEntry?.store.setZoom(zoom);
+      activeWindow?.store.setZoom(zoom);
     },
-    [activeEntry],
+    [activeWindow],
   );
 
   const doExport = useCallback(() => {
@@ -214,34 +267,61 @@ export function Session({ deviceId }: { deviceId: string }) {
       </div>
 
       <nav className={styles.tabs}>
-        {tabs.map((tab) => (
-          <TabButton
-            key={tab.id}
-            id={tab.id}
-            store={tab.store}
-            active={tab.id === activeId}
-            onSelect={() => setActiveId(tab.id)}
-            onClose={() => closeTab(tab.id)}
-          />
-        ))}
+        {tabs.map((tab) =>
+          tab.kind === "term" ? (
+            <TabButton
+              key={tab.id}
+              title={tab.title ?? `终端 ${tab.shell}`}
+              closeLabel={`关闭 终端 ${tab.shell}`}
+              active={tab.id === activeId}
+              onSelect={() => setActiveId(tab.id)}
+              onClose={() => closeTab(tab.id)}
+            />
+          ) : (
+            <WindowTabButton
+              key={tab.id}
+              tab={tab}
+              active={tab.id === activeId}
+              onSelect={() => setActiveId(tab.id)}
+              onClose={() => closeTab(tab.id)}
+            />
+          ),
+        )}
+        <button
+          type="button"
+          className={styles.toolBtn}
+          onClick={() => openTermTab(DEFAULT_TERM_SHELL)}
+        >
+          + 终端
+        </button>
       </nav>
 
       <div className={styles.stageArea}>
-        {activeEntry !== null ? (
+        {activeTab === null ? (
+          <p className={styles.empty}>
+            从窗口列表打开一个远程窗口，或点击“+ 终端”开始终端会话
+            （Ctrl+Shift+H 切换 HUD，Ctrl+Shift+S 导出清晰度对比图）。
+          </p>
+        ) : activeTab.kind === "term" ? (
+          <div className={styles.stage}>
+            <TermView
+              key={activeTab.id}
+              deviceId={deviceId}
+              tabId={activeTab.id}
+              shell={activeTab.shell}
+              onTitle={(title) => setTermTitle(activeTab.id, title)}
+            />
+          </div>
+        ) : (
           <WindowGroupView
-            key={activeEntry.id}
+            key={activeTab.id}
             deviceId={deviceId}
-            windowId={activeEntry.id}
-            store={activeEntry.store}
+            windowId={activeTab.id}
+            store={activeTab.store}
             showHud={hudVisible}
             exportFnRef={exportFnRef}
-            onRootGone={() => closeTab(activeEntry.id)}
+            onRootGone={() => closeTab(activeTab.id)}
           />
-        ) : (
-          <p className={styles.empty}>
-            从窗口列表打开一个远程窗口开始会话（Ctrl+Shift+H 切换 HUD，
-            Ctrl+Shift+S 导出清晰度对比图）。
-          </p>
         )}
       </div>
     </main>
@@ -249,17 +329,21 @@ export function Session({ deviceId }: { deviceId: string }) {
 }
 
 interface TabButtonProps {
-  id: string;
-  store: SessionStore;
+  title: string;
+  closeLabel: string;
   active: boolean;
   onSelect: () => void;
   onClose: () => void;
 }
 
-/** 标签按钮：标题取自会话快照（MOVED/TITLE 事件更新），未知名回退窗口 id。 */
-function TabButton({ id, store, active, onSelect, onClose }: TabButtonProps) {
-  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const title = snapshot.title ?? `窗口 ${id}`;
+/** 标签按钮（两类标签共用外观）。 */
+function TabButton({
+  title,
+  closeLabel,
+  active,
+  onSelect,
+  onClose,
+}: TabButtonProps) {
   return (
     <div
       className={active ? styles.tabActive : styles.tab}
@@ -272,7 +356,7 @@ function TabButton({ id, store, active, onSelect, onClose }: TabButtonProps) {
       <button
         type="button"
         className={styles.tabClose}
-        aria-label={`关闭 ${title}`}
+        aria-label={closeLabel}
         onClick={(e) => {
           e.stopPropagation();
           onClose();
@@ -281,5 +365,30 @@ function TabButton({ id, store, active, onSelect, onClose }: TabButtonProps) {
         ×
       </button>
     </div>
+  );
+}
+
+/** 窗口标签按钮：标题取自会话快照（MOVED/TITLE 事件更新），未知名回退窗口 id。 */
+function WindowTabButton({
+  tab,
+  active,
+  onSelect,
+  onClose,
+}: {
+  tab: WindowTab;
+  active: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+}) {
+  const snapshot = useSyncExternalStore(tab.store.subscribe, tab.store.getSnapshot);
+  const title = snapshot.title ?? `窗口 ${tab.id}`;
+  return (
+    <TabButton
+      title={title}
+      closeLabel={`关闭 ${title}`}
+      active={active}
+      onSelect={onSelect}
+      onClose={onClose}
+    />
   );
 }
