@@ -3,7 +3,7 @@
 //! - [`enumerate`]：可捕获顶层窗口列表（`is_capturable` 过滤规则）与窗口图标
 //! - [`events`]：WinEvent 窗口事件监听（创建/销毁/移动/标题/菜单弹出）
 //! - [`group`]：窗口组（根窗口 + owned 对话框 + 同线程弹出菜单）
-//! - [`resize`]：1:1 适配（T-009 实现，本任务不含）
+//! - [`resize`]：1:1 适配（T-009）
 //!
 //! 所有坐标均为屏幕物理像素（per-monitor DPI aware 上下文），字段与
 //! `rd-capture-win` 的捕获坐标系一致。
