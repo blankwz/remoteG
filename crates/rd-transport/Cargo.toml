@@ -4,3 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+quinn = { version = "0.11", default-features = false, features = [
+    "log",
+    "runtime-tokio",
+    "rustls-ring",
+] }
+rcgen = { workspace = true }
+rd-proto = { path = "../rd-proto" }
+rustls = { workspace = true, features = ["ring"] }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true }
