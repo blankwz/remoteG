@@ -22,36 +22,56 @@
 //! ## 事件推送
 //! 全局 `SetWinEventHook` 监听线程（rd-window-win）经桥接线程转 `broadcast`；
 //! 连接首次 `ListWindows` 时订阅，事件经"当前可捕获顶层窗口"复核后转为
-//! `WindowEvent` 推送（子窗口 / 菜单 / 已不在列表的窗口事件不上报）。
+//! `WindowEvent` 推送（顶层窗口事件；子窗口/菜单事件由窗口组轮询改以
+//! CHILD_ADDED/CHILD_REMOVED/MOVED 形式上报，见下）。
+//!
+//! ## 窗口组与码率自适应（T-027）
+//! 每连接一个会话 tick 任务（首次窗口消息时启动）：
+//! - **组轮询**（250 ms 周期；MenuStart/Created 事件经 `Notify` 提前触发）：
+//!   对本连接每个已打开根窗口求 [`window_group`] 并与上次快照 diff——
+//!   新增成员发 `CHILD_ADDED`（x/y 为相对根客户区偏移）并为其开独立管线
+//!   （菜单类 `#32768` 不精修、一律不做 Fit）；消失成员发 `CHILD_REMOVED`
+//!   并停管线；偏移变化发 `MOVED`。子窗口 id 进组成员表，`is_open` 对其
+//!   返回 true（T-017 的点击可作用于菜单）。
+//! - **码率自适应**（200 ms 周期）：每会话一个 [`RateController`]，以
+//!   `conn.rtt()`、发送在途字节（视频/瓦片发送任务在途记账）、QUIC 丢包
+//!   差分更新，决策码率按各窗口客户区面积比例落到全部编码器
+//!   （`set_bitrate`），建议帧率在编码线程做节流丢帧。
+//! - **StatsReport**（每 1 s）：fps（编码 AU 计数）、rtt_ms、kbps（实际
+//!   发送字节差分），req_id=0 经控制流发送。
 //!
 //! 注：`handle` 内的工作为异步执行，同连接连续两条窗口消息的到达顺序
 //! 不保证与协议顺序严格一致（tokio 调度粒度）；控制端按协议不应在
 //! 未收到 ack 前对同一窗口发后续窗口消息，此为 M1 的既定约束。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use rd_capture_win::{CaptureOptions, CapturedFrame, WindowCapture};
+use rd_encode::caps::{negotiate, probe_encode_caps};
 use rd_encode::dirty::Rect as DirtyRect;
 use rd_encode::frame::RawFrame;
+use rd_encode::rate::RateController;
+use rd_encode::rate::RateInput;
 use rd_encode::tiles::{TileOut, TileRefiner};
 use rd_encode::{create_best, EncodedAu, EncoderConfig, VideoEncoder};
 use rd_proto::v0::envelope::Msg;
 use rd_proto::v0::window_event::Kind;
 use rd_proto::v0::{
     CloseWindow, Codec, Error, FitMode, ListWindows, OpenWindow, OpenWindowAck, RenderLevel,
-    ViewportInfo, WindowEvent, WindowInfo, WindowList,
+    StatsReport, ViewportInfo, WindowEvent, WindowInfo, WindowList,
 };
+use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
 use rd_window_win::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
 use rd_window_win::resize::{fit_window, restore_placement, save_placement, target_client_size};
 use rd_window_win::resize::{FitResult, SavedPlacement};
-use rd_window_win::{list_windows, window_icon_png, WindowAttrs};
-use tokio::sync::{broadcast, mpsc};
+use rd_window_win::{list_windows, window_group, window_icon_png, GroupMember, WindowAttrs};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::session::{AgentState, SessionCtx};
@@ -80,6 +100,15 @@ const AU_CHANNEL_CAP: usize = 64;
 const TILE_CHANNEL_CAP: usize = 256;
 /// 编码线程空转等待下限（recv_timeout 的最小超时，防忙等）。
 const SLEEP_MIN: Duration = Duration::from_millis(1);
+/// 窗口组轮询周期（T-027 步骤 1）。
+const GROUP_POLL: Duration = Duration::from_millis(250);
+/// 码率自适应反馈周期（T-011：RateController 每 200 ms 消费一条反馈）。
+const RATE_TICK: Duration = Duration::from_millis(200);
+/// StatsReport 周期（T-027 步骤 5：每 1 s）。
+const STATS_PERIOD: Duration = Duration::from_secs(1);
+/// 弹出菜单窗口类名（rd-window-win group.rs 的 MENU_CLASS 未跨 crate 导出，
+/// 此处按同一常量复刻；修改须两处同步）。
+const MENU_CLASS: &str = "#32768";
 
 // ---------------------------------------------------------------------------
 // 进程级注册表（WindowSessions 为 unit struct，接口由 session.rs 固定）
@@ -93,6 +122,10 @@ static EVENT_SUBS: OnceLock<Mutex<HashMap<usize, mpsc::Sender<()>>>> = OnceLock:
 static ICON_CACHE: OnceLock<Mutex<HashMap<u64, Option<Vec<u8>>>>> = OnceLock::new();
 /// 最近一次列表枚举得到的可捕获顶层窗口集合（事件复核用）。
 static TOP_WINDOWS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+/// 连接标识 → 会话 tick 任务句柄（组轮询 / 码率自适应 / StatsReport）。
+static SERVICES: OnceLock<Mutex<HashMap<usize, ServiceEntry>>> = OnceLock::new();
+/// 连接标识 → 该连接窗口组内的子窗口 id 集合（is_open 对子窗口放行）。
+static CHILD_MEMBERS: OnceLock<Mutex<HashMap<usize, HashSet<u64>>>> = OnceLock::new();
 
 fn pipes() -> &'static Mutex<HashMap<u64, PipeHandle>> {
     PIPES.get_or_init(Default::default)
@@ -108,6 +141,48 @@ fn icon_cache() -> &'static Mutex<HashMap<u64, Option<Vec<u8>>>> {
 
 fn top_windows() -> &'static Mutex<HashSet<u64>> {
     TOP_WINDOWS.get_or_init(Default::default)
+}
+
+fn services() -> &'static Mutex<HashMap<usize, ServiceEntry>> {
+    SERVICES.get_or_init(Default::default)
+}
+
+fn child_members() -> &'static Mutex<HashMap<usize, HashSet<u64>>> {
+    CHILD_MEMBERS.get_or_init(Default::default)
+}
+
+/// 每连接的会话级服务句柄：tick 任务取消令牌、组轮询提前唤醒、发送字节累计。
+struct ServiceEntry {
+    /// 令 tick 任务退出（断开时撤销）。
+    cancel: CancellationToken,
+    /// 事件订阅任务在 MenuStart/Created 时 notify，组轮询立即跑一轮（菜单
+    /// 弹出 300 ms 内出现的时效保证；250 ms 轮询为兜底）。
+    kick: Arc<Notify>,
+    /// 本会话（连接）累计发送字节（视频+瓦片；StatsReport.kbps 的数据源）。
+    bytes_sent: Arc<AtomicU64>,
+}
+
+/// 幂等启动本连接的会话 tick 任务，返回共享的发送字节计数器。
+///
+/// 首条窗口类消息（List/Open）时调用；任务随断开（`on_disconnect`）取消。
+fn ensure_services(ctx: &Arc<SessionCtx>) -> Arc<AtomicU64> {
+    let key = ctx_key(ctx);
+    let mut map = services().lock().unwrap_or_else(lock_poisoned);
+    if let Some(s) = map.get(&key) {
+        return Arc::clone(&s.bytes_sent);
+    }
+    let entry = ServiceEntry {
+        cancel: CancellationToken::new(),
+        kick: Arc::new(Notify::new()),
+        bytes_sent: Arc::new(AtomicU64::new(0)),
+    };
+    let cancel = entry.cancel.clone();
+    let kick = Arc::clone(&entry.kick);
+    let bytes = Arc::clone(&entry.bytes_sent);
+    map.insert(key, entry);
+    drop(map);
+    spawn_session_tick(Arc::clone(ctx), Arc::clone(&bytes), cancel, kick);
+    bytes
 }
 
 /// Mutex 中毒恢复：状态各字段独立、无跨字段不变量，直接沿用内部值（guard）。
@@ -158,13 +233,24 @@ pub enum WindowMsg {
 pub struct WindowSessions;
 
 impl WindowSessions {
-    /// 指定窗口是否已打开捕获会话。
+    /// 指定窗口是否属于本进程的已打开会话。
+    ///
+    /// T-027 扩展：窗口组内的子窗口（弹出菜单/owned 对话框）也返回 true，
+    /// T-017 的点击即可作用于菜单（前台窗口判定同样放行）。
     #[allow(dead_code)]
     pub fn is_open(&self, id: u64) -> bool {
-        pipes()
+        if pipes()
             .lock()
             .unwrap_or_else(lock_poisoned)
             .contains_key(&id)
+        {
+            return true;
+        }
+        child_members()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .values()
+            .any(|set| set.contains(&id))
     }
 }
 
@@ -179,9 +265,17 @@ pub fn handle(ctx: &SessionCtx, req_id: u32, msg: WindowMsg) -> anyhow::Result<(
     }
 }
 
-/// 会话断开：停止本连接打开的全部窗口管线，并撤销事件订阅。
+/// 会话断开：停止本连接的会话 tick 任务、打开的全部窗口管线（含子窗口），
+/// 并撤销事件订阅与组成员登记。
 pub fn on_disconnect(ctx: &SessionCtx) {
     let key = ctx_key(ctx);
+    if let Some(s) = services().lock().unwrap_or_else(lock_poisoned).remove(&key) {
+        s.cancel.cancel(); // tick 任务退出（组轮询/码率/Stats 停止）
+    }
+    child_members()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .remove(&key);
     event_subs()
         .lock()
         .unwrap_or_else(lock_poisoned)
@@ -207,6 +301,8 @@ pub fn on_disconnect(ctx: &SessionCtx) {
 
 fn handle_list(ctx: &SessionCtx, req_id: u32) -> anyhow::Result<()> {
     let ctx = ctx_arc(ctx);
+    // 窗口类首条消息：启动会话 tick（组轮询/码率/Stats）。
+    ensure_services(&ctx);
     // 首次 ListWindows 启动全局 watcher 并为本连接订阅事件推送（幂等）。
     subscribe_events(&ctx);
     tokio::spawn(async move {
@@ -353,6 +449,15 @@ fn subscribe_events(ctx: &SessionCtx) {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
             };
+            // 菜单弹出/窗口创建：提前唤醒本连接的组轮询（T-027，菜单时效）。
+            if matches!(
+                ev,
+                WindowEventRaw::MenuStart(_) | WindowEventRaw::Created(_)
+            ) {
+                if let Some(s) = services().lock().unwrap_or_else(lock_poisoned).get(&key) {
+                    s.kick.notify_one();
+                }
+            }
             let Some(msg) = window_event_msg(&ev) else {
                 continue;
             };
@@ -478,128 +583,47 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         }
     };
 
-    let (capture, frame_rx) =
-        match WindowCapture::start(attrs.hwnd, CaptureOptions { max_fps: fps }) {
-            Ok(v) => v,
-            Err(err) => {
-                restore_saved(attrs.hwnd, &saved);
-                return send_error(
-                    ctx,
-                    req_id,
-                    ERR_NOT_CAPTURABLE,
-                    format!("启动捕获失败: {err:#}"),
-                )
-                .await;
-            }
-        };
-
-    let mut video_tx = match ctx.conn.open_data(StreamKind::Video).await {
-        Ok(t) => t,
+    let area = u64::from(attrs.rect.w).saturating_mul(u64::from(attrs.rect.h));
+    let spec = PipeSpec {
+        hwnd: attrs.hwnd,
+        fps,
+        kbps,
+        refine,
+        fit: open.fit,
+        saved,
+        is_root: true,
+        area,
+        owner: ctx_key(ctx),
+        session_bytes: ensure_services(ctx),
+    };
+    let started = match start_pipeline(ctx, spec).await {
+        Ok(s) => s,
         Err(err) => {
-            drop(capture);
-            restore_saved(attrs.hwnd, &saved);
-            return send_error(
-                ctx,
-                req_id,
-                ERR_NOT_CAPTURABLE,
-                format!("打开视频流失败: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let mut tile_tx = match ctx.conn.open_data(StreamKind::Tile).await {
-        Ok(t) => t,
-        Err(err) => {
-            drop(capture);
-            restore_saved(attrs.hwnd, &saved);
-            return send_error(
-                ctx,
-                req_id,
-                ERR_NOT_CAPTURABLE,
-                format!("打开瓦片流失败: {err:#}"),
-            )
-            .await;
-        }
-    };
-    let video_stream_id = u32::try_from(video_tx.id()).unwrap_or(u32::MAX);
-    let tile_stream_id = u32::try_from(tile_tx.id()).unwrap_or(u32::MAX);
-
-    let cancel = CancellationToken::new();
-    let errors = Arc::new(PipeError::default());
-    let (au_tx, au_rx) = mpsc::channel(AU_CHANNEL_CAP);
-    let (tile_out_tx, tile_rx) = mpsc::channel(TILE_CHANNEL_CAP);
-
-    let enc_thread = {
-        let run = PipeRun {
-            frame_rx,
-            au_tx,
-            tile_tx: tile_out_tx,
-            state: Arc::clone(&ctx.state),
-            fps,
-            kbps,
-            refine,
-            errors: Arc::clone(&errors),
-            cancel: cancel.clone(),
-        };
-        match std::thread::Builder::new()
-            .name(format!("rd-enc-{wid:#x}"))
-            .spawn(move || encode_loop(run))
-        {
-            Ok(t) => t,
-            Err(err) => {
-                drop(capture);
-                restore_saved(attrs.hwnd, &saved);
-                let _ = video_tx.finish();
-                let _ = tile_tx.finish();
-                return send_error(
-                    ctx,
-                    req_id,
-                    ERR_NOT_CAPTURABLE,
-                    format!("启动编码线程失败: {err}"),
-                )
-                .await;
-            }
+            return send_error(ctx, req_id, ERR_NOT_CAPTURABLE, format!("{err:#}")).await;
         }
     };
 
-    tokio::spawn(video_send_task(
-        Arc::clone(ctx),
-        cancel.clone(),
-        video_tx,
-        au_rx,
-        wid,
-        Arc::clone(&errors),
+    // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
+    // proto 的 repeated Codec 在 prost 生成物中为 Vec<i32>，需转回枚举。
+    let decode_caps: Vec<Codec> = ctx
+        .hello
+        .decode_caps
+        .iter()
+        .filter_map(|&c| Codec::try_from(c).ok())
+        .collect();
+    let codec = effective_codec(negotiate(
+        &probe_encode_caps(),
+        &decode_caps,
+        ctx.hello.supports_444,
     ));
-    tokio::spawn(tile_send_task(
-        Arc::clone(ctx),
-        cancel.clone(),
-        tile_tx,
-        tile_rx,
-        wid,
-        errors,
-    ));
-
-    pipes().lock().unwrap_or_else(lock_poisoned).insert(
-        wid,
-        PipeHandle {
-            cancel: cancel.clone(),
-            capture: Some(capture),
-            enc_thread: Some(enc_thread),
-            saved,
-            hwnd: wid,
-            fit: open.fit,
-            deb: Arc::new(ViewportDeb::default()),
-            owner: ctx_key(ctx),
-        },
-    );
 
     ctx.send(
         Msg::OpenWindowAck(OpenWindowAck {
             window_id: wid,
             level: RenderLevel::L0Pixel as i32,
-            video_stream_id,
-            tile_stream_id,
-            codec: Codec::H264420 as i32,
+            video_stream_id: started.video_stream_id,
+            tile_stream_id: started.tile_stream_id,
+            codec: codec as i32,
             w: attrs.rect.w,
             h: attrs.rect.h,
         }),
@@ -612,11 +636,188 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         fps,
         kbps,
         refine,
-        video_stream_id,
-        tile_stream_id,
+        ?codec,
+        video_stream_id = started.video_stream_id,
+        tile_stream_id = started.tile_stream_id,
         "窗口管线已建立"
     );
     Ok(())
+}
+
+/// 发送任务的共享记账状态（T-027：码率自适应的在途积压信号 + 会话字节累计）。
+struct SendAccounting {
+    /// 本管线在途字节（发送任务入队 +N、写完 -N）。
+    backlog: Arc<AtomicU64>,
+    /// 本会话累计发送字节（StatsReport.kbps 数据源）。
+    session_bytes: Arc<AtomicU64>,
+}
+
+/// 一条窗口管线的搭建参数（根窗口 OpenWindow 与窗口组成员共用）。
+struct PipeSpec {
+    hwnd: isize,
+    fps: u32,
+    /// 初始码率（kbps）；随后由会话 RateController 动态覆盖。
+    kbps: u32,
+    refine: bool,
+    /// 适配模式（proto 枚举原始 i32）；子窗口恒 SCALE（不做 Fit）。
+    fit: i32,
+    /// 会话前布局（根 Some；子窗口 None，关闭时不恢复）。
+    saved: Option<SavedPlacement>,
+    /// 根窗口（组轮询对象、可接收 Viewport）；子窗口 false。
+    is_root: bool,
+    /// 客户区面积（码率按面积比例分配的权重）。
+    area: u64,
+    /// 打开者连接标识。
+    owner: usize,
+    /// 所属会话的发送字节累计（StatsReport 用）。
+    session_bytes: Arc<AtomicU64>,
+}
+
+/// 管线搭建结果（供 ack / CHILD_ADDED 使用的流 id）。
+struct PipeStarted {
+    video_stream_id: u32,
+    tile_stream_id: u32,
+}
+
+/// 搭建一条完整管线：捕获 → 数据流 → 编码线程 → 双发送任务 → 注册表。
+///
+/// 失败时清理已建资源（捕获/流 finish）并把错误原样上抛；错误回包由
+/// 调用方决定（根窗口回 `Error{11}`，子窗口仅记日志降级）。
+async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result<PipeStarted> {
+    let wid = spec.hwnd as u64;
+    let restore_on_fail = |s: &PipeSpec| restore_saved(s.hwnd, &s.saved);
+    let started_capture = WindowCapture::start(spec.hwnd, CaptureOptions { max_fps: spec.fps })
+        .with_context(|| format!("启动捕获失败（hwnd {wid:#x}）"));
+    let (capture, frame_rx) = match started_capture {
+        Ok(v) => v,
+        Err(err) => {
+            restore_on_fail(&spec);
+            return Err(err);
+        }
+    };
+
+    let mut video_tx = match ctx.conn.open_data(StreamKind::Video).await {
+        Ok(t) => t,
+        Err(err) => {
+            drop(capture);
+            restore_on_fail(&spec);
+            anyhow::bail!("打开视频流失败: {err:#}");
+        }
+    };
+    let mut tile_tx = match ctx.conn.open_data(StreamKind::Tile).await {
+        Ok(t) => t,
+        Err(err) => {
+            drop(capture);
+            let _ = video_tx.finish();
+            restore_on_fail(&spec);
+            anyhow::bail!("打开瓦片流失败: {err:#}");
+        }
+    };
+    let video_stream_id = u32::try_from(video_tx.id()).unwrap_or(u32::MAX);
+    let tile_stream_id = u32::try_from(tile_tx.id()).unwrap_or(u32::MAX);
+
+    let cancel = CancellationToken::new();
+    let errors = Arc::new(PipeError::default());
+    let (au_tx, au_rx) = mpsc::channel(AU_CHANNEL_CAP);
+    let (tile_out_tx, tile_rx) = mpsc::channel(TILE_CHANNEL_CAP);
+    let backlog = Arc::new(AtomicU64::new(0));
+    let frames = Arc::new(AtomicU64::new(0));
+    let target_kbps = Arc::new(AtomicU32::new(spec.kbps));
+    let fps_cap = Arc::new(AtomicU32::new(spec.fps));
+    // 根窗口预置组快照（仅含根自身）：首次轮询 diff 时根不会误报为新增。
+    let group_snapshot = spec.is_root.then(|| {
+        Arc::new(Mutex::new(HashMap::from([(
+            spec.hwnd,
+            GroupMember {
+                hwnd: spec.hwnd,
+                offset_x: 0,
+                offset_y: 0,
+                w: 0,
+                h: 0,
+            },
+        )])))
+    });
+
+    let enc_thread = {
+        let run = PipeRun {
+            frame_rx,
+            au_tx,
+            tile_tx: tile_out_tx,
+            state: Arc::clone(&ctx.state),
+            fps: spec.fps,
+            kbps: spec.kbps,
+            refine: spec.refine,
+            errors: Arc::clone(&errors),
+            cancel: cancel.clone(),
+            target_kbps: Arc::clone(&target_kbps),
+            fps_cap: Arc::clone(&fps_cap),
+            frames: Arc::clone(&frames),
+        };
+        match std::thread::Builder::new()
+            .name(format!("rd-enc-{wid:#x}"))
+            .spawn(move || encode_loop(run))
+        {
+            Ok(t) => t,
+            Err(err) => {
+                drop(capture);
+                let _ = video_tx.finish();
+                let _ = tile_tx.finish();
+                restore_on_fail(&spec);
+                anyhow::bail!("启动编码线程失败: {err}");
+            }
+        }
+    };
+
+    tokio::spawn(video_send_task(
+        Arc::clone(ctx),
+        cancel.clone(),
+        video_tx,
+        au_rx,
+        wid,
+        Arc::clone(&errors),
+        SendAccounting {
+            backlog: Arc::clone(&backlog),
+            session_bytes: Arc::clone(&spec.session_bytes),
+        },
+    ));
+    tokio::spawn(tile_send_task(
+        Arc::clone(ctx),
+        cancel.clone(),
+        tile_tx,
+        tile_rx,
+        wid,
+        errors,
+        SendAccounting {
+            backlog: Arc::clone(&backlog),
+            session_bytes: Arc::clone(&spec.session_bytes),
+        },
+    ));
+
+    pipes().lock().unwrap_or_else(lock_poisoned).insert(
+        wid,
+        PipeHandle {
+            cancel: cancel.clone(),
+            capture: Some(capture),
+            enc_thread: Some(enc_thread),
+            saved: spec.saved,
+            hwnd: wid,
+            fit: spec.fit,
+            deb: Arc::new(ViewportDeb::default()),
+            owner: spec.owner,
+            is_root: spec.is_root,
+            area: spec.area,
+            backlog,
+            frames,
+            target_kbps,
+            fps_cap,
+            members: group_snapshot,
+        },
+    );
+
+    Ok(PipeStarted {
+        video_stream_id,
+        tile_stream_id,
+    })
 }
 
 fn restore_saved(hwnd: isize, saved: &Option<SavedPlacement>) {
@@ -773,6 +974,20 @@ struct PipeHandle {
     deb: Arc<ViewportDeb>,
     /// 打开该窗口的连接标识（SessionCtx 地址）；断开清理只动自己的窗口。
     owner: usize,
+    /// 根窗口（组轮询对象、Viewport 接受者）；子窗口（组成员）false。
+    is_root: bool,
+    /// 客户区面积（码率按面积比例分配的权重）。
+    area: u64,
+    /// 发送在途字节（发送任务入队 +N、写完 -N；码率自适应的积压信号）。
+    backlog: Arc<AtomicU64>,
+    /// 累计产出 AU 帧数（StatsReport.fps 的数据源）。
+    frames: Arc<AtomicU64>,
+    /// 会话 RateController 分配给本管线的目标码率（kbps）。
+    target_kbps: Arc<AtomicU32>,
+    /// 会话建议帧率上限（编码线程节流）。
+    fps_cap: Arc<AtomicU32>,
+    /// 根窗口的窗口组快照（hwnd → 成员，diff 基准）；子窗口 None。
+    members: Option<Arc<Mutex<HashMap<isize, GroupMember>>>>,
 }
 
 impl PipeHandle {
@@ -807,6 +1022,12 @@ struct PipeRun {
     refine: bool,
     errors: Arc<PipeError>,
     cancel: CancellationToken,
+    /// 会话分配的目标码率（kbps）；变化时经 `set_bitrate` 落到编码器。
+    target_kbps: Arc<AtomicU32>,
+    /// 会话建议帧率上限（低于捕获帧率时丢帧节流）。
+    fps_cap: Arc<AtomicU32>,
+    /// 累计产出 AU 帧数（StatsReport 用）。
+    frames: Arc<AtomicU64>,
 }
 
 /// 管线故障槽：编码线程写入，发送任务收尾时读取并转 `Error` 回控制端。
@@ -831,6 +1052,9 @@ impl PipeError {
 ///
 /// 退出条件：取消令牌、捕获通道关闭（capture drop）、发送端关闭、编码出错
 /// （写入 [`PipeError`] 后退出，由发送任务收尾上报）。
+///
+/// T-027：每帧与每瓦片 tick 前应用会话码率决策（`set_bitrate`）；建议帧率
+/// 低于捕获帧率时按时间间隔丢帧节流（事件驱动管线，节流在编码侧执行）。
 fn encode_loop(run: PipeRun) {
     let PipeRun {
         frame_rx,
@@ -842,13 +1066,18 @@ fn encode_loop(run: PipeRun) {
         refine,
         errors,
         cancel,
+        target_kbps,
+        fps_cap,
+        frames,
     } = run;
     let mut pipe = FramePipeline::new(fps, kbps, refine, true);
-    let budget = tile_budget_bytes(kbps);
+    let mut applied_kbps = kbps;
     let mut frame_seq: u32 = 0;
     // 最近一帧（瓦片 tick 需要；refine 关闭时不保留，省一帧内存）
     let mut last: Option<(u32, RawFrame)> = None;
     let mut next_tick = Instant::now() + TILE_TICK;
+    // 上次产出 AU 的时刻（帧率节流基准）
+    let mut last_encode: Option<Instant> = None;
 
     loop {
         if cancel.is_cancelled() {
@@ -865,6 +1094,18 @@ fn encode_loop(run: PipeRun) {
                     last = None; // 暂停期间不出帧（瓦片一并停）
                     continue;
                 }
+                let now = Instant::now();
+                // 帧率节流（T-027）：会话建议帧率低于捕获帧率时按间隔丢帧。
+                // 丢帧不更新 last（瓦片基线保持为最近编码帧）。
+                let cap = fps_cap.load(Ordering::Relaxed).max(1);
+                if let Some(prev) = last_encode {
+                    let min_gap = Duration::from_nanos(1_000_000_000 / u64::from(cap));
+                    if now.duration_since(prev) < min_gap {
+                        continue;
+                    }
+                }
+                // 应用码率决策（编码器创建/重配置即用最新值）
+                applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
                 let raw = RawFrame {
                     width: frame.width,
                     height: frame.height,
@@ -873,9 +1114,11 @@ fn encode_loop(run: PipeRun) {
                     data: frame.data,
                 };
                 let dirty = dirty_rects(frame.dirty);
-                match pipe.process(&raw, dirty.as_deref(), Instant::now()) {
+                match pipe.process(&raw, dirty.as_deref(), now) {
                     Ok(step) => {
                         if let Some(au) = step.au {
+                            frames.fetch_add(1, Ordering::Relaxed);
+                            last_encode = Some(now);
                             if au_tx.blocking_send((frame_seq, au)).is_err() {
                                 return; // 视频发送任务已退出
                             }
@@ -902,6 +1145,9 @@ fn encode_loop(run: PipeRun) {
                     continue; // 被关闭信号提前唤醒，等下一个 tick 点
                 }
                 next_tick = now + TILE_TICK;
+                // 静止期同样应用码率决策（长静止后恢复时使用新码率）
+                applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
+                let budget = tile_budget_bytes(applied_kbps);
                 let Some((seq, raw)) = last.as_ref() else {
                     continue;
                 };
@@ -916,6 +1162,17 @@ fn encode_loop(run: PipeRun) {
             }
         }
     }
+}
+
+/// 把会话目标码率落到管线（编码器存在时运行中调整，不存在时仅更新创建
+/// 参数，首帧创建即用该值）。返回当前生效值（无变化时透传 `applied`）。
+fn retune_pipeline(pipe: &mut FramePipeline, target: &AtomicU32, applied: u32) -> u32 {
+    let want = target.load(Ordering::Relaxed);
+    if want == 0 || want == applied {
+        return applied;
+    }
+    pipe.retune(want);
+    want
 }
 
 /// 瓦片 tick 字节预算 = 当前码率 × [`TILE_BUDGET_RATIO`] × tick 周期(0.05 s)。
@@ -977,6 +1234,27 @@ impl FramePipeline {
     #[cfg_attr(not(test), allow(dead_code))]
     fn size(&self) -> Option<(u32, u32)> {
         self.last_size
+    }
+
+    /// 当前目标码率（kbps；供单测断言 retune 生效）。
+    #[cfg(test)]
+    fn bitrate(&self) -> u32 {
+        self.kbps
+    }
+
+    /// 应用新的目标码率（码率自适应 T-027）：更新创建参数；编码器已存在
+    /// 时经 `set_bitrate` 运行中调整（OpenH264 即时生效，硬编经重建）。
+    /// 调整失败不致命（保持旧码率编码，下个决策周期再试）。
+    fn retune(&mut self, kbps: u32) {
+        if kbps == self.kbps {
+            return;
+        }
+        self.kbps = kbps;
+        if let Some(enc) = self.encoder.as_mut() {
+            if let Err(err) = enc.set_bitrate(kbps) {
+                tracing::warn!("编码器 set_bitrate({kbps} kbps) 失败: {err:#}");
+            }
+        }
     }
 
     /// 处理一帧：脏块比对（失效回收）→ 尺寸变化处理 → 编码。
@@ -1048,7 +1326,12 @@ async fn video_send_task(
     mut rx: mpsc::Receiver<(u32, EncodedAu)>,
     window_id: u64,
     errors: Arc<PipeError>,
+    acct: SendAccounting,
 ) {
+    let SendAccounting {
+        backlog,
+        session_bytes,
+    } = acct;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
@@ -1061,10 +1344,17 @@ async fn video_send_task(
                         pts_us: au.pts_us,
                         keyframe: au.keyframe,
                     };
-                    if let Err(err) = tx.send_video(&header, &au.data).await {
+                    // 在途字节记账（码率自适应的积压信号）：写完前计入，
+                    // 完成后扣除（成功与否都扣，失败时管线即将关闭）。
+                    let n = (au.data.len() + VIDEO_HEADER_LEN) as u64;
+                    backlog.fetch_add(n, Ordering::Relaxed);
+                    let sent = tx.send_video(&header, &au.data).await;
+                    backlog.fetch_sub(n, Ordering::Relaxed);
+                    if let Err(err) = sent {
                         tracing::warn!(window = format!("{window_id:#x}"), "视频发送失败: {err:#}");
                         break;
                     }
+                    session_bytes.fetch_add(n, Ordering::Relaxed);
                 }
             }
         }
@@ -1080,7 +1370,12 @@ async fn tile_send_task(
     mut rx: mpsc::Receiver<(u32, TileOut)>,
     window_id: u64,
     errors: Arc<PipeError>,
+    acct: SendAccounting,
 ) {
+    let SendAccounting {
+        backlog,
+        session_bytes,
+    } = acct;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
@@ -1096,10 +1391,15 @@ async fn tile_send_task(
                         h: tile.h,
                         fmt: tile.fmt,
                     };
-                    if let Err(err) = tx.send_tile(&header, &tile.data).await {
+                    let n = (tile.data.len() + TILE_HEADER_LEN) as u64;
+                    backlog.fetch_add(n, Ordering::Relaxed);
+                    let sent = tx.send_tile(&header, &tile.data).await;
+                    backlog.fetch_sub(n, Ordering::Relaxed);
+                    if let Err(err) = sent {
                         tracing::warn!(window = format!("{window_id:#x}"), "瓦片发送失败: {err:#}");
                         break;
                     }
+                    session_bytes.fetch_add(n, Ordering::Relaxed);
                 }
             }
         }
@@ -1130,6 +1430,457 @@ fn unix_us() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// 会话 tick：窗口组轮询 + 码率自适应 + StatsReport（T-027）
+// ---------------------------------------------------------------------------
+
+/// 会话 tick 任务：组轮询（250 ms 周期，MenuStart/Created 事件提前唤醒）、
+/// 码率自适应（200 ms 周期）、StatsReport（1 s 周期）。断开时经 `cancel`
+/// 退出并自清理 [`SERVICES`] 注册表。
+fn spawn_session_tick(
+    ctx: Arc<SessionCtx>,
+    bytes_sent: Arc<AtomicU64>,
+    cancel: CancellationToken,
+    kick: Arc<Notify>,
+) {
+    tokio::spawn(async move {
+        let cfg = &ctx.state.config;
+        let mut rate = RateController::new(cfg.start_kbps.max(1), cfg.max_fps.max(1));
+        let mut next_rate = Instant::now() + RATE_TICK;
+        let mut next_group = Instant::now() + GROUP_POLL;
+        let mut next_stats = Instant::now() + STATS_PERIOD;
+        // QUIC 丢包差分基线（丢包率 = Δlost / Δsent）
+        let path = ctx.conn.stats().path;
+        let mut prev_sent = path.sent_packets;
+        let mut prev_lost = path.lost_packets;
+        // StatsReport 差分基线
+        let mut prev_bytes = 0u64;
+        let mut prev_frames = 0u64;
+
+        loop {
+            let wake = next_rate.min(next_group).min(next_stats);
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                // 菜单弹出/窗口创建：立即跑一轮组轮询（250 ms 轮询为兜底）
+                _ = kick.notified() => {
+                    next_group = Instant::now();
+                }
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            let now = Instant::now();
+            if now >= next_group {
+                next_group = now + GROUP_POLL;
+                poll_groups(&ctx).await;
+            }
+            if now >= next_rate {
+                next_rate = now + RATE_TICK;
+                apply_rate(&ctx, &mut rate, &mut prev_sent, &mut prev_lost);
+            }
+            if now >= next_stats {
+                next_stats = now + STATS_PERIOD;
+                send_stats(&ctx, &bytes_sent, &mut prev_bytes, &mut prev_frames).await;
+            }
+        }
+        services()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .remove(&ctx_key(&ctx));
+        tracing::debug!("会话 tick 任务退出");
+    });
+}
+
+/// 一轮窗口组轮询：对本连接每个根窗口求 `window_group` 并 diff（T-027 步骤 1）。
+///
+/// `window_group` 内部全部为本地 Win32 调用（枚举/类名/客户区），无跨进程
+/// 同步消息，不会挂起，直接在当前任务执行。
+async fn poll_groups(ctx: &Arc<SessionCtx>) {
+    let key = ctx_key(ctx);
+    let roots: Vec<u64> = {
+        pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .iter()
+            .filter(|(_, h)| h.owner == key && h.is_root)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for root in roots {
+        let Some(snap) = pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .get(&root)
+            .and_then(|h| h.members.clone())
+        else {
+            continue; // 管线刚被关闭
+        };
+        let members = window_group(root as isize);
+        if members.is_empty() {
+            // 根已销毁：子窗口随根消亡，停管线但不发 CHILD_REMOVED
+            // （DESTROYED 已由事件推送路径通知控制端）。
+            let stale: Vec<isize> = {
+                let mut s = snap.lock().unwrap_or_else(lock_poisoned);
+                let keys: Vec<isize> = s.keys().copied().filter(|&h| h != root as isize).collect();
+                s.retain(|h, _| *h == root as isize);
+                keys
+            };
+            for h in stale {
+                teardown_child(ctx, root, h, false).await;
+            }
+            continue;
+        }
+        let diff = {
+            let mut s = snap.lock().unwrap_or_else(lock_poisoned);
+            let d = diff_group(&s, &members);
+            *s = members.iter().map(|m| (m.hwnd, m.clone())).collect();
+            d
+        };
+        for m in diff.added {
+            add_child(ctx, root, &m).await;
+        }
+        for h in diff.removed {
+            teardown_child(ctx, root, h, true).await;
+        }
+        for m in diff.moved {
+            let info = child_window_info(&m);
+            tracing::debug!(
+                child = format!("{:#x}", m.hwnd),
+                root = format!("{root:#x}"),
+                "组成员偏移变化"
+            );
+            if ctx
+                .send(
+                    Msg::WindowEvent(WindowEvent {
+                        kind: Kind::Moved as i32,
+                        info: Some(info),
+                        root_id: root,
+                    }),
+                    0,
+                )
+                .await
+                .is_err()
+            {
+                return; // 连接已断
+            }
+        }
+    }
+}
+
+/// 窗口组新增成员：建独立子管线，成功后发 `CHILD_ADDED` 并登记组成员表
+/// （T-027 步骤 1/2）。子窗口不做 Fit（恒 SCALE）；菜单类 `#32768` 不精修；
+/// 不保存布局（无 placement 可恢复）。失败仅记日志——成员已写入 diff 快照，
+/// 消失重现前不重试（避免 250 ms 周期反复拉起失败管线）。
+async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
+    let child = m.hwnd as u64;
+    let is_menu = class_name_is_menu(m.hwnd);
+    let cfg = &ctx.state.config;
+    let spec = PipeSpec {
+        hwnd: m.hwnd,
+        fps: cfg.max_fps.max(1),
+        kbps: cfg.start_kbps.max(1),
+        refine: cfg.refine_enabled && !is_menu,
+        fit: FitMode::Scale as i32,
+        saved: None,
+        is_root: false,
+        area: u64::from(m.w).saturating_mul(u64::from(m.h)),
+        owner: ctx_key(ctx),
+        session_bytes: ensure_services(ctx),
+    };
+    match start_pipeline(ctx, spec).await {
+        Ok(started) => {
+            child_members()
+                .lock()
+                .unwrap_or_else(lock_poisoned)
+                .entry(ctx_key(ctx))
+                .or_default()
+                .insert(child);
+            let info = child_window_info(m);
+            if let Err(err) = ctx
+                .send(
+                    Msg::WindowEvent(WindowEvent {
+                        kind: Kind::ChildAdded as i32,
+                        info: Some(info),
+                        root_id,
+                    }),
+                    0,
+                )
+                .await
+            {
+                tracing::debug!("CHILD_ADDED 发送失败（连接已断）: {err:#}");
+                return;
+            }
+            tracing::info!(
+                child = format!("{child:#x}"),
+                root = format!("{root_id:#x}"),
+                menu = is_menu,
+                video_stream_id = started.video_stream_id,
+                tile_stream_id = started.tile_stream_id,
+                "窗口组成员已接入（独立管线）"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                child = format!("{child:#x}"),
+                root = format!("{root_id:#x}"),
+                "子窗口管线建立失败（跳过，成员消失重现前不重试）: {err:#}"
+            );
+        }
+    }
+}
+
+/// 窗口组成员消失：停管线（不恢复布局）并移出组成员表；`notify` 为 true
+/// 时发 `CHILD_REMOVED`（根销毁引发的批量清理不发——DESTROYED 已另行通知）。
+async fn teardown_child(ctx: &Arc<SessionCtx>, root_id: u64, child: isize, notify: bool) {
+    let handle = pipes()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .remove(&(child as u64));
+    if let Some(h) = handle {
+        h.shutdown(false); // 子窗口无 saved，restore 为 no-op
+    }
+    if let Some(set) = child_members()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .get_mut(&ctx_key(ctx))
+    {
+        set.remove(&(child as u64));
+    }
+    if notify {
+        let info = WindowInfo {
+            id: child as u64,
+            ..WindowInfo::default()
+        };
+        let _ = ctx
+            .send(
+                Msg::WindowEvent(WindowEvent {
+                    kind: Kind::ChildRemoved as i32,
+                    info: Some(info),
+                    root_id,
+                }),
+                0,
+            )
+            .await;
+    }
+    tracing::debug!(
+        child = format!("{child:#x}"),
+        root = format!("{root_id:#x}"),
+        "窗口组成员已移除"
+    );
+}
+
+/// 窗口组成员 → 协议 `WindowInfo`：x/y 为相对根客户区偏移（物理像素），
+/// 供控制端按相对坐标合成（架构 §3.3 M1）。仅填 id/几何字段：跨进程的
+/// `GetWindowText` 类查询可能等待目标窗口，菜单弹出时效优先，不做。
+fn child_window_info(m: &GroupMember) -> WindowInfo {
+    WindowInfo {
+        id: m.hwnd as u64,
+        title: String::new(),
+        process: String::new(),
+        pid: 0,
+        icon_png: Vec::new(),
+        x: m.offset_x,
+        y: m.offset_y,
+        w: m.w,
+        h: m.h,
+        dpi: 0,
+        resizable: false,
+        minimized: false,
+    }
+}
+
+/// 窗口类名是否为弹出菜单（`#32768`）。`GetClassNameW` 为本地查询，不挂起。
+fn class_name_is_menu(hwnd: isize) -> bool {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buf = [0u16; 32];
+    let h = HWND(hwnd as *mut c_void);
+    let len = unsafe { GetClassNameW(h, &mut buf) };
+    let n = (len.max(0) as usize).min(buf.len());
+    String::from_utf16_lossy(&buf[..n]) == MENU_CLASS
+}
+
+/// 窗口组 diff 结果。
+struct GroupDiff {
+    /// 本次新出现的成员（保持 Z 序）。
+    added: Vec<GroupMember>,
+    /// 已消失成员的 hwnd。
+    removed: Vec<isize>,
+    /// 相对根客户区偏移变化的成员（携带新偏移/尺寸，保持 Z 序）。
+    moved: Vec<GroupMember>,
+}
+
+/// 上次组快照 → 本次组列表的 diff（纯函数，供单测；T-027 步骤 1）。
+///
+/// - 新 hwnd → `added`；
+/// - 消失 hwnd → `removed`；
+/// - 偏移（x/y）变化 → `moved`（尺寸变化不单独算，随 moved 事件顺带刷新；
+///   管线内部以帧尺寸差量自行处理编码器重配置）。
+fn diff_group(prev: &HashMap<isize, GroupMember>, next: &[GroupMember]) -> GroupDiff {
+    let next_ids: HashSet<isize> = next.iter().map(|m| m.hwnd).collect();
+    let mut added = Vec::new();
+    let mut moved = Vec::new();
+    for m in next {
+        match prev.get(&m.hwnd) {
+            None => added.push(m.clone()),
+            Some(p) if p.offset_x != m.offset_x || p.offset_y != m.offset_y => {
+                moved.push(m.clone());
+            }
+            _ => {}
+        }
+    }
+    let removed: Vec<isize> = prev
+        .keys()
+        .copied()
+        .filter(|h| !next_ids.contains(h))
+        .collect();
+    GroupDiff {
+        added,
+        removed,
+        moved,
+    }
+}
+
+/// 会话总码率按窗口客户区面积比例分配（纯函数，供单测；T-027 步骤 3）。
+///
+/// 每份下限 1 kbps、上限为总额（比例取整不超发）；面积和为 0（异常）时
+/// 均分总额。
+fn allocate_kbps(total: u32, areas: &[u64]) -> Vec<u32> {
+    let total = total.max(1);
+    let sum: u64 = areas.iter().sum();
+    if sum == 0 {
+        return vec![total; areas.len()];
+    }
+    areas
+        .iter()
+        .map(|&a| ((u64::from(total) * a / sum).max(1).min(u64::from(total))) as u32)
+        .collect()
+}
+
+/// 协商结果的"实际可用"编解码器（T-027 步骤 4）。
+///
+/// [`rd_encode::caps::negotiate`] 依据双方能力选出目标；当前 rd-encode 的
+/// 编码器创建路径（`create_best`/`FfmpegEncoder`，NV12 输入、字段私有）尚
+/// 无 4:4:4 创建接口——该层不在本任务可写范围（见上报事项）。此时必须
+/// 诚实回退 `H264_420`：`OpenWindowAck.codec` 告知控制端以何种格式解码，
+/// 谎报 444 会导致 WebCodecs 以错误配置建解码器而失败。rd-encode 暴露
+/// 444 创建接口后改为透传协商结果即可。
+fn effective_codec(negotiated: Codec) -> Codec {
+    match negotiated {
+        Codec::H264444 => {
+            tracing::info!("协商结果 H264_444：rd-encode 暂无 4:4:4 编码创建路径，回退 H264_420");
+            Codec::H264420
+        }
+        other => other,
+    }
+}
+
+/// 一次码率自适应反馈（T-027 步骤 3，每 [`RATE_TICK`] 一次）：
+/// 采样 RTT / 发送在途字节 / QUIC 丢包差分 → [`RateController`] 决策；
+/// 码率按各窗口面积比例写入全部管线的 `target_kbps`（编码线程经
+/// `set_bitrate` 落到编码器），建议帧率写入 `fps_cap` 做节流。
+fn apply_rate(
+    ctx: &SessionCtx,
+    rate: &mut RateController,
+    prev_sent: &mut u64,
+    prev_lost: &mut u64,
+) {
+    let key = ctx_key(ctx);
+    struct Slot {
+        area: u64,
+        target: Arc<AtomicU32>,
+        fps_cap: Arc<AtomicU32>,
+        backlog: Arc<AtomicU64>,
+    }
+    let slots: Vec<Slot> = {
+        let map = pipes().lock().unwrap_or_else(lock_poisoned);
+        map.iter()
+            .filter(|(_, h)| h.owner == key)
+            .map(|(_, h)| Slot {
+                area: h.area,
+                target: Arc::clone(&h.target_kbps),
+                fps_cap: Arc::clone(&h.fps_cap),
+                backlog: Arc::clone(&h.backlog),
+            })
+            .collect()
+    };
+    if slots.is_empty() {
+        return; // 本会话暂无打开窗口
+    }
+
+    let path = ctx.conn.stats().path;
+    let d_sent = path.sent_packets.saturating_sub(*prev_sent);
+    let d_lost = path.lost_packets.saturating_sub(*prev_lost);
+    *prev_sent = path.sent_packets;
+    *prev_lost = path.lost_packets;
+    let lost_ratio = if d_sent > 0 {
+        (d_lost as f32 / d_sent as f32).min(1.0)
+    } else {
+        0.0
+    };
+
+    let rtt_ms = u32::try_from(ctx.conn.rtt().as_millis()).unwrap_or(u32::MAX);
+    // 在途字节：视频/瓦片发送任务在 QUIC 写入期间的未完成量（应用层积压；
+    // 慢网络使 send await 阻塞 → AU 通道排队 → 该值上升）
+    let queued: usize = slots
+        .iter()
+        .map(|s| s.backlog.load(Ordering::Relaxed))
+        .sum::<u64>() as usize;
+    let dec = rate.update(RateInput {
+        rtt_ms,
+        queued_bytes: queued,
+        lost_ratio,
+    });
+
+    let areas: Vec<u64> = slots.iter().map(|s| s.area).collect();
+    let shares = allocate_kbps(dec.kbps, &areas);
+    for (s, kbps) in slots.iter().zip(shares) {
+        s.target.store(kbps, Ordering::Relaxed);
+        s.fps_cap.store(dec.fps, Ordering::Relaxed);
+    }
+    tracing::debug!(
+        rtt_ms,
+        queued,
+        lost = format!("{lost_ratio:.3}"),
+        kbps = dec.kbps,
+        fps = dec.fps,
+        windows = slots.len(),
+        "码率自适应决策"
+    );
+}
+
+/// 每秒一条 `StatsReport`（T-027 步骤 5）：fps（本会话编码 AU 差分）、
+/// rtt_ms（QUIC 平滑 RTT）、kbps（实际发送字节差分 ×8/1000）。req_id=0。
+async fn send_stats(
+    ctx: &SessionCtx,
+    bytes_sent: &AtomicU64,
+    prev_bytes: &mut u64,
+    prev_frames: &mut u64,
+) {
+    let key = ctx_key(ctx);
+    let frames: u64 = {
+        let map = pipes().lock().unwrap_or_else(lock_poisoned);
+        map.iter()
+            .filter(|(_, h)| h.owner == key)
+            .map(|(_, h)| h.frames.load(Ordering::Relaxed))
+            .sum()
+    };
+    let sent = bytes_sent.load(Ordering::Relaxed);
+    let d_frames = frames.saturating_sub(*prev_frames);
+    let d_bytes = sent.saturating_sub(*prev_bytes);
+    *prev_frames = frames;
+    *prev_bytes = sent;
+
+    let report = StatsReport {
+        fps: d_frames.min(u64::from(u32::MAX)) as u32,
+        rtt_ms: u32::try_from(ctx.conn.rtt().as_millis()).unwrap_or(u32::MAX),
+        kbps: (d_bytes.saturating_mul(8) / 1000).min(u64::from(u32::MAX)) as u32,
+        decode_ms: 0,
+    };
+    if let Err(err) = ctx.send(Msg::Stats(report), 0).await {
+        tracing::debug!("StatsReport 发送失败（连接可能已断）: {err:#}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,5 +1996,191 @@ mod tests {
         // 预算 = 码率 × 50% × 0.05s：8000 kbps → 25_000 B
         assert_eq!(tile_budget_bytes(8000), 25_000);
         assert_eq!(tile_budget_bytes(0), 0);
+    }
+
+    #[test]
+    fn retune_updates_target_and_encoder() {
+        let mut p = pipe();
+        let t0 = Instant::now();
+        let f = frame(320, 240, 10, 0);
+        let _ = p.process(&f, None, t0).expect("首帧成功（创建编码器）");
+        p.retune(2000);
+        assert_eq!(p.bitrate(), 2000, "retune 后管线目标码率应更新");
+        // 变化后再编码一帧：OpenH264 set_bitrate 应成功不 panic
+        let f2 = frame(320, 240, 11, 1);
+        let _ = p.process(&f2, None, t0).expect("retune 后编码成功");
+    }
+
+    #[test]
+    fn retune_pipeline_noop_on_same_value() {
+        let mut p = FramePipeline::new(30, 4000, false, false);
+        let target = AtomicU32::new(4000);
+        assert_eq!(
+            retune_pipeline(&mut p, &target, 4000),
+            4000,
+            "目标未变化时不动作"
+        );
+        target.store(8000, Ordering::Relaxed);
+        assert_eq!(
+            retune_pipeline(&mut p, &target, 4000),
+            8000,
+            "目标变化时返回新值"
+        );
+        assert_eq!(p.bitrate(), 8000);
+        // 目标为 0（尚未分配）视为无效，保持原值
+        target.store(0, Ordering::Relaxed);
+        assert_eq!(retune_pipeline(&mut p, &target, 8000), 8000);
+    }
+
+    // ----- 窗口组 diff（T-027 步骤 1 的纯函数核心） -----
+
+    fn member(hwnd: isize, x: i32, y: i32) -> GroupMember {
+        GroupMember {
+            hwnd,
+            offset_x: x,
+            offset_y: y,
+            w: 200,
+            h: 100,
+        }
+    }
+
+    fn snapshot(members: &[GroupMember]) -> HashMap<isize, GroupMember> {
+        members.iter().map(|m| (m.hwnd, m.clone())).collect()
+    }
+
+    #[test]
+    fn group_diff_added_keeps_z_order() {
+        let prev = snapshot(&[member(0x10, 0, 0)]);
+        let next = vec![
+            member(0x10, 0, 0),
+            member(0x20, 5, 10),
+            member(0x30, 50, 60),
+        ];
+        let d = diff_group(&prev, &next);
+        assert_eq!(d.added, vec![member(0x20, 5, 10), member(0x30, 50, 60)]);
+        assert!(d.removed.is_empty());
+        assert!(d.moved.is_empty());
+    }
+
+    #[test]
+    fn group_diff_removed_reports_hwnds() {
+        let prev = snapshot(&[member(0x10, 0, 0), member(0x20, 5, 10)]);
+        let next = vec![member(0x10, 0, 0)];
+        let d = diff_group(&prev, &next);
+        assert!(d.added.is_empty());
+        assert_eq!(d.removed, vec![0x20]);
+        assert!(d.moved.is_empty());
+    }
+
+    #[test]
+    fn group_diff_moved_on_offset_change_only() {
+        let prev = snapshot(&[
+            member(0x10, 0, 0),
+            member(0x20, 5, 10),
+            GroupMember {
+                hwnd: 0x30,
+                offset_x: 0,
+                offset_y: 0,
+                w: 200,
+                h: 100,
+            },
+        ]);
+        // 0x20 偏移变化；0x30 仅尺寸变化、偏移不变（不算 moved，也不算 added）
+        let next = vec![
+            member(0x10, 0, 0),
+            GroupMember {
+                hwnd: 0x20,
+                offset_x: 5,
+                offset_y: 40,
+                w: 200,
+                h: 100,
+            },
+            GroupMember {
+                hwnd: 0x30,
+                offset_x: 0,
+                offset_y: 0,
+                w: 640,
+                h: 480,
+            },
+        ];
+        let d = diff_group(&prev, &next);
+        assert_eq!(d.moved.len(), 1);
+        assert_eq!(d.moved[0].hwnd, 0x20);
+        assert_eq!(d.moved[0].offset_y, 40, "moved 应携带新偏移");
+        assert!(d.added.is_empty(), "既有成员仅尺寸变化不算新增");
+        assert!(d.removed.is_empty());
+    }
+
+    #[test]
+    fn group_diff_mixed_add_remove_move() {
+        let prev = snapshot(&[member(0x10, 0, 0), member(0x20, 5, 10), member(0x40, 1, 1)]);
+        let next = vec![
+            member(0x10, 0, 0),
+            member(0x30, 7, 8), // 新增
+            member(0x40, 2, 1), // 移动
+        ]; // 0x20 消失
+        let d = diff_group(&prev, &next);
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].hwnd, 0x30);
+        assert_eq!(d.removed, vec![0x20]);
+        assert_eq!(d.moved.len(), 1);
+        assert_eq!(d.moved[0].hwnd, 0x40);
+    }
+
+    #[test]
+    fn group_diff_empty_next_reports_all_removed() {
+        let prev = snapshot(&[member(0x10, 0, 0), member(0x20, 5, 10)]);
+        let d = diff_group(&prev, &[]);
+        assert!(d.added.is_empty());
+        assert!(d.moved.is_empty());
+        assert_eq!(d.removed.len(), 2);
+    }
+
+    // ----- 码率按面积分配（T-027 步骤 3 的纯函数核心） -----
+
+    #[test]
+    fn allocate_kbps_splits_by_area() {
+        // 1:3 面积 → 1:3 码率（取整）
+        let shares = allocate_kbps(8000, &[100, 300]);
+        assert_eq!(shares, vec![2000, 6000]);
+    }
+
+    #[test]
+    fn allocate_kbps_single_window_gets_all() {
+        assert_eq!(allocate_kbps(8000, &[1920 * 1080]), vec![8000]);
+    }
+
+    #[test]
+    fn allocate_kbps_zero_total_area_splits_evenly() {
+        assert_eq!(allocate_kbps(8000, &[0, 0]), vec![8000, 8000]);
+    }
+
+    #[test]
+    fn allocate_kbps_min_share_is_one() {
+        // 微小面积仍应分到至少 1 kbps；整数截断 + 下限 1，总和不超过总额
+        let shares = allocate_kbps(1000, &[1_000_000, 1]);
+        assert_eq!(shares[0], 999); // 1000×10^6/(10^6+1) 截断
+        assert_eq!(shares[1], 1); // 0 截断后抬到下限 1
+        assert!(shares.iter().all(|&s| s >= 1));
+        assert!(shares.iter().sum::<u32>() <= 1000, "不超发");
+    }
+
+    // ----- 编解码协商回退（T-027 步骤 4） -----
+
+    #[test]
+    fn effective_codec_falls_back_to_420_when_444_unavailable() {
+        // 当前 rd-encode 无 4:4:4 创建路径：协商出 444 也必须诚实回退
+        assert_eq!(effective_codec(Codec::H264444), Codec::H264420);
+        assert_eq!(effective_codec(Codec::H264420), Codec::H264420);
+    }
+
+    #[test]
+    fn negotiate_matches_caps_both_sides() {
+        use rd_encode::caps::negotiate;
+        let both = [Codec::H264420, Codec::H264444];
+        assert_eq!(negotiate(&both, &both, true), Codec::H264444);
+        assert_eq!(negotiate(&both, &both, false), Codec::H264420);
+        let only420 = [Codec::H264420];
+        assert_eq!(negotiate(&only420, &both, true), Codec::H264420);
     }
 }
