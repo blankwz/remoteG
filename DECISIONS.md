@@ -33,3 +33,8 @@
 ## D-008 代码仓库与规划仓库分离（默认采用）
 - 代码仓库根目录记为 `<RD_ROOT>`，[假设] 为 `C:\code\rd`；任务卡中所有路径相对 `<RD_ROOT>`。
 - 控制端 `apps/rd-controller/src-tauri` 为独立 Cargo workspace（通过 path 依赖引用 crates），根 workspace `exclude` 它，避免并行任务同时改根 `Cargo.toml`。
+
+## D-009 补全 `CloseWindow` 消息定义（T-001 执行中，待用户确认）
+- 现象：05_api/协议契约.md §2 的 `Envelope` oneof 引用 `CloseWindow close_window = 15`，但全文未定义 `message CloseWindow`，proto 语法上无法编译（非语义歧义，属契约笔误）。
+- 决定：按与 `OpenWindow` 对称的最小语义补全 `message CloseWindow { uint64 window_id = 1; }`（proto/rd.proto 已含），已同步标注本条记录；**05_api 文档本身未改动**。
+- 待确认：若用户希望 CloseWindow 携带其他字段（如关闭原因），在 T-015 冻结协议前修改即可。

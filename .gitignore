@@ -1,0 +1,17 @@
+# Rust
+/target
+
+# 控制端（Tauri 2 / Node）
+apps/rd-controller/node_modules/
+apps/rd-controller/dist/
+node_modules/
+dist/
+coverage/
+
+# 本地环境与临时文件
+.env
+.env.*
+*.local
+.DS_Store
+Thumbs.db
+*.log

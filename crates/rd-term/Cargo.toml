@@ -1,0 +1,7 @@
+[package]
+name = "rd-term"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

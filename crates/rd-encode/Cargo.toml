@@ -1,0 +1,6 @@
+[package]
+name = "rd-encode"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,39 @@
+syntax = "proto3"; package rd.v0;
+
+message Envelope { uint32 req_id = 1; oneof msg {
+  Hello hello = 2; HelloAck hello_ack = 3;
+  PairRequest pair_req = 4; PairResult pair_res = 5;
+  ListWindows list_windows = 10; WindowList window_list = 11; WindowEvent window_event = 12;
+  OpenWindow open_window = 13; OpenWindowAck open_window_ack = 14; CloseWindow close_window = 15;
+  ViewportInfo viewport = 16; KeyEvent key = 20; MouseButton mouse_btn = 21; MouseWheel wheel = 22; TextInput text = 23;
+  OpenTerminal open_term = 30; TerminalOpened term_opened = 31; TerminalResize term_resize = 32;
+  StatsReport stats = 40; Error error = 99; } }
+
+message Hello { uint32 proto_ver = 1; string device_name = 2; repeated Codec decode_caps = 3; bool supports_444 = 4; }
+message HelloAck { uint32 proto_ver = 1; string host_name = 2; repeated Codec encode_caps = 3; }
+message PairRequest { bytes spake2_msg = 1; }  message PairResult { bool ok = 1; bytes spake2_msg = 2; string reason = 3; }
+
+message WindowInfo { uint64 id = 1; string title = 2; string process = 3; uint32 pid = 4; bytes icon_png = 5;
+  int32 x = 6; int32 y = 7; uint32 w = 8; uint32 h = 9; uint32 dpi = 10; bool resizable = 11; bool minimized = 12; }
+message ListWindows {}  message WindowList { repeated WindowInfo windows = 1; }
+message WindowEvent { enum Kind { CREATED=0; DESTROYED=1; MOVED=2; TITLE=3; CHILD_ADDED=4; CHILD_REMOVED=5; } Kind kind = 1; WindowInfo info = 2; uint64 root_id = 3; }
+
+enum FitMode { FIT = 0; SCALE = 1; NATIVE = 2; }
+enum RenderLevel { L0_PIXEL = 0; L1_HYBRID = 1; L2_SEMANTIC = 2; }
+message OpenWindow { uint64 window_id = 1; FitMode fit = 2; RenderLevel max_level = 3; uint32 max_fps = 4; }
+message OpenWindowAck { uint64 window_id = 1; RenderLevel level = 2; uint32 video_stream_id = 3; uint32 tile_stream_id = 4; Codec codec = 5; uint32 w = 6; uint32 h = 7; }
+message CloseWindow { uint64 window_id = 1; }
+message ViewportInfo { uint64 window_id = 1; uint32 css_w = 2; uint32 css_h = 3; float dpr = 4; }
+
+message KeyEvent { uint32 scancode = 1; bool extended = 2; bool down = 3; uint32 modifiers = 4; }
+message MouseButton { uint64 window_id = 1; int32 x = 2; int32 y = 3; uint32 button = 4; bool down = 5; }
+message MouseWheel { uint64 window_id = 1; int32 x = 2; int32 y = 3; int32 dx = 4; int32 dy = 5; }
+message TextInput { string text = 1; }
+
+message OpenTerminal { string shell = 1; uint32 cols = 2; uint32 rows = 3; string resume_id = 4; }
+message TerminalOpened { string term_id = 1; uint32 stream_id = 2; }
+message TerminalResize { string term_id = 1; uint32 cols = 2; uint32 rows = 3; }
+
+enum Codec { H264_420 = 0; H264_444 = 1; HEVC_444 = 2; AV1 = 3; }
+message StatsReport { uint32 fps = 1; uint32 rtt_ms = 2; uint32 kbps = 3; uint32 decode_ms = 4; }
+message Error { uint32 code = 1; string message = 2; }
