@@ -70,10 +70,11 @@ pub fn handle(ctx: &SessionCtx, req_id: u32, msg: TermMsg) -> anyhow::Result<()>
         }
         // resize 为纯同步 rd-term 调用(内部持锁),直接执行;尺寸超界收敛到
         // u16。失败返回 Err,由分发层(handle_soft)记录,不打断会话。
-        TermMsg::Resize(m) => ctx
-            .state
-            .terms
-            .resize(&m.term_id, size_u16(m.cols), size_u16(m.rows)),
+        TermMsg::Resize(m) => {
+            ctx.state
+                .terms
+                .resize(&m.term_id, size_u16(m.cols), size_u16(m.rows))
+        }
     }
 }
 
@@ -109,7 +110,7 @@ async fn open_terminal(ctx: &SessionCtx, req_id: u32, m: OpenTerminal) -> anyhow
     };
 
     // 开终端双向流;stream id 立即回给控制端(顺序理由见模块注释)
-    let (mut tx, rx) = ctx.conn.open_bidi(StreamKind::Terminal).await?;
+    let (tx, rx) = ctx.conn.open_bidi(StreamKind::Terminal).await?;
     let stream_id = u32::try_from(tx.id())
         .map_err(|_| anyhow::anyhow!("QUIC stream id {} 超出 u32", tx.id()))?;
     ctx.send(
@@ -148,9 +149,23 @@ async fn open_and_attach(
     ctx: &SessionCtx,
     req_id: u32,
     m: &OpenTerminal,
-) -> anyhow::Result<Option<(String, Vec<u8>, tokio::sync::broadcast::Receiver<TermOutput>)>> {
-    let cols = if m.cols == 0 { DEFAULT_COLS as u16 } else { size_u16(m.cols) };
-    let rows = if m.rows == 0 { DEFAULT_ROWS as u16 } else { size_u16(m.rows) };
+) -> anyhow::Result<
+    Option<(
+        String,
+        Vec<u8>,
+        tokio::sync::broadcast::Receiver<TermOutput>,
+    )>,
+> {
+    let cols = if m.cols == 0 {
+        DEFAULT_COLS as u16
+    } else {
+        size_u16(m.cols)
+    };
+    let rows = if m.rows == 0 {
+        DEFAULT_ROWS as u16
+    } else {
+        size_u16(m.rows)
+    };
     match ctx.state.terms.open(&m.shell, cols, rows) {
         Ok(term_id) => {
             let (snapshot, rx) = ctx.state.terms.attach(&term_id)?;
@@ -171,7 +186,13 @@ async fn attach_existing(
     ctx: &SessionCtx,
     req_id: u32,
     resume_id: &str,
-) -> anyhow::Result<Option<(String, Vec<u8>, tokio::sync::broadcast::Receiver<TermOutput>)>> {
+) -> anyhow::Result<
+    Option<(
+        String,
+        Vec<u8>,
+        tokio::sync::broadcast::Receiver<TermOutput>,
+    )>,
+> {
     match ctx.state.terms.attach(resume_id) {
         Ok((snapshot, rx)) => Ok(Some((resume_id.to_string(), snapshot, rx))),
         Err(err) => {
@@ -268,7 +289,12 @@ async fn forward_output(
 
 /// 输入方向:控制端 → `terms.write`。流结束(对端 FIN)、连接断开(quinn
 /// 使流立即出错)或令牌取消即退出,并通知输出方向停止。
-async fn pump_input(state: Arc<AgentState>, term_id: String, mut rx: DataRx, stop: CancellationToken) {
+async fn pump_input(
+    state: Arc<AgentState>,
+    term_id: String,
+    mut rx: DataRx,
+    stop: CancellationToken,
+) {
     loop {
         let next = tokio::select! {
             biased;

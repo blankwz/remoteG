@@ -55,7 +55,14 @@ impl Injector {
         Ok(())
     }
 
-    pub fn wheel(&mut self, _hwnd: isize, _x: i32, _y: i32, _dx: i32, _dy: i32) -> anyhow::Result<()> {
+    pub fn wheel(
+        &mut self,
+        _hwnd: isize,
+        _x: i32,
+        _y: i32,
+        _dx: i32,
+        _dy: i32,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -282,7 +289,7 @@ pub fn on_disconnect(ctx: &SessionCtx) {
 #[cfg(windows)]
 fn foreground_hwnd() -> Option<u64> {
     let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-    (!hwnd.0.is_null()).then(|| hwnd.0 as u64)
+    (!hwnd.0.is_null()).then_some(hwnd.0 as u64)
 }
 
 #[cfg(not(windows))]
@@ -357,8 +364,8 @@ mod tests {
 
     #[test]
     fn negative_coordinates_survive_roundtrip() {
-        let mv = parse_mouse_move(&encode(1, u64::MAX, i32::MIN, i32::MAX, u32::MAX))
-            .expect("边界值包");
+        let mv =
+            parse_mouse_move(&encode(1, u64::MAX, i32::MIN, i32::MAX, u32::MAX)).expect("边界值包");
         assert_eq!(mv.x, i32::MIN);
         assert_eq!(mv.y, i32::MAX);
         assert_eq!(mv.window_id, u64::MAX);
