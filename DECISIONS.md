@@ -34,7 +34,13 @@
 - 代码仓库根目录记为 `<RD_ROOT>`，[假设] 为 `C:\code\rd`；任务卡中所有路径相对 `<RD_ROOT>`。
 - 控制端 `apps/rd-controller/src-tauri` 为独立 Cargo workspace（通过 path 依赖引用 crates），根 workspace `exclude` 它，避免并行任务同时改根 `Cargo.toml`。
 
-## D-009 补全 `CloseWindow` 消息定义（T-001 执行中，待用户确认）
+## D-009 补全 `CloseWindow` 消息定义（已确认 2026-10-14）
 - 现象：05_api/协议契约.md §2 的 `Envelope` oneof 引用 `CloseWindow close_window = 15`，但全文未定义 `message CloseWindow`，proto 语法上无法编译（非语义歧义，属契约笔误）。
-- 决定：按与 `OpenWindow` 对称的最小语义补全 `message CloseWindow { uint64 window_id = 1; }`（proto/rd.proto 已含），已同步标注本条记录；**05_api 文档本身未改动**。
-- 待确认：若用户希望 CloseWindow 携带其他字段（如关闭原因），在 T-015 冻结协议前修改即可。
+- 决定：按与 `OpenWindow` 对称的最小语义补全 `message CloseWindow { uint64 window_id = 1; }`（proto/rd.proto 已含）；05_api 文档本身未改动。
+- 状态：**用户已确认**（2026-10-14）。
+
+## D-010 M0 结论：D-003 维持 Tauri 2 + WebCodecs（用户确认 2026-10-14）
+- 数据（自动实测）：Win 本机 WebView2 支持 H.264 Baseline/High/4:4:4/AV1，184 帧 1080p 解码吞吐 769 fps；iPhone Safari 18.7（iOS 18.7）支持 Baseline/High/HEVC，吞吐 580 fps，**4:4:4 与 AV1 不支持**；编码 h264_mf 1080p 3.7-4.0ms、OpenH264 12-17ms；WGC 读回 avg 1.16ms；Spike 全链路回环通过。
+- 结论：**D-003 维持方案 A**（Tauri + WebView + WebCodecs），不切换 D-003 方案 B（原生 wgpu 视频层）。D-004 路径验证成立：文字清晰不依赖 4:4:4（iPhone 无 4:4:4），静止无损瓦片为主，4:4:4 仅作能力协商增强（Win 端可启用、iPhone 端自动关闭）。
+- 待回填：场景 A/B/C 端到端延迟数据（用户稍后补充，补齐前 LAN P95<50ms / tailnet P95<120ms 目标未正式关闭）。
+- 已知风险移交 M1：WebView2 中途 flush 死锁（流式场景预计不触发）；h264_mf 起步延迟大（T-016 管线优化）；CapturedFrame.resized 信号失效（T-016 前修复 rd-capture-win）。
