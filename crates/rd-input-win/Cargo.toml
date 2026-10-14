@@ -3,5 +3,15 @@ name = "rd-input-win"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+anyhow = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
