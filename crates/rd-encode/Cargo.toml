@@ -3,4 +3,23 @@ name = "rd-encode"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Windows 默认启用 ffmpeg 硬编路径（LGPL shared，动态链接，不携带 libx264）。
+# 无 ffmpeg 开发库的环境用 `--no-default-features` 走纯 OpenH264 路径。
+# ffmpeg-next 依赖限定 Windows target：非 Windows 平台启用本 feature 无效果，
+# 保证 macOS `cargo check` 无需 ffmpeg 开发库（05_api/任务卡 T-003）。
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next"]
+
 [dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+dcv-color-primitives = "1.0.0"
+openh264 = "0.9.8"
+openh264-sys2 = "0.9.8"
+
+[target.'cfg(windows)'.dependencies]
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format"], optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
