@@ -1,0 +1,219 @@
+/* 窗口列表页样式（T-020）：深色系，风格与 Devices.module.css 一致 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  color: #eee;
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search {
+  width: 220px;
+  padding: 6px 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #111;
+  color: #eee;
+  font-size: 13px;
+}
+
+.search:focus {
+  outline: none;
+  border-color: #4a7d4a;
+}
+
+/* “新建终端”下拉（details/summary 原生交互，无 JS 状态） */
+
+.termMenu {
+  position: relative;
+}
+
+.termBtn {
+  padding: 6px 16px;
+  border: 1px solid #4a7d4a;
+  border-radius: 4px;
+  background: #245224;
+  color: #e6ffe6;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.termBtn::-webkit-details-marker {
+  display: none;
+}
+
+.termItems {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #222;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+  z-index: 5;
+}
+
+.termItem {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #ccc;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.termItem:hover {
+  background: #2a2a2a;
+}
+
+.error {
+  margin: 0;
+  color: #ff9d9d;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.retry {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #2a2a2a;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.empty {
+  margin: 24px 0;
+  color: #888;
+  font-size: 14px;
+}
+
+/* 窗口网格卡片 */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1c1c1c;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card:hover {
+  border-color: #4a7d4a;
+  background: #20281f;
+}
+
+.card[data-minimized="true"] {
+  background: #141414;
+  border-color: #2a2a2a;
+  color: #777;
+}
+
+.icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: #262626;
+  overflow: hidden;
+}
+
+.card[data-minimized="true"] .icon {
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.iconFallback {
+  font-size: 16px;
+  color: #9db8d8;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.winTitle {
+  font-size: 13px;
+  color: #eee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card[data-minimized="true"] .winTitle {
+  color: #999;
+}
+
+.process {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.restoreHint {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #3a2f18;
+  color: #d8b86a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+

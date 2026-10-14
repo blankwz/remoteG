@@ -2,12 +2,13 @@
  * rd-controller 前端入口（T-005）。
  *
  * hash 路由：#/spike（视频链路 spike）/ #/devices / #/windows/:id / #/session/:id。
- * 除 /spike 外均为占位页（T-019 ~ T-023 实现）。
+ * /windows 由 T-020 挂载真实页面；/devices、/session 仍为占位（T-019 遗留 / T-021 实现）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
+import { Windows } from "./pages/Windows";
 import type { DecodeStats } from "./video/decoder";
 import { H264Decoder } from "./video/decoder";
 import { VideoCanvas } from "./video/VideoCanvas";
@@ -23,6 +24,8 @@ function parseRoute(hash: string): Route {
   const parts = hash
     .replace(/^#/, "")
     .split("/")
+    // 路由段剥离查询串（如 #/session/:id?open=<windowId>），查询参数由页面自取
+    .map((s) => s.split("?")[0] ?? "")
     .filter((s) => s.length > 0);
   switch (parts[0]) {
     case "spike":
@@ -152,9 +155,7 @@ export default function App() {
       {route.page === "devices" && (
         <Placeholder title="Devices" task="T-019" />
       )}
-      {route.page === "windows" && (
-        <Placeholder title={`Windows (${route.deviceId})`} task="T-020" />
-      )}
+      {route.page === "windows" && <Windows deviceId={route.deviceId} />}
       {route.page === "session" && (
         <Placeholder title={`Session (${route.deviceId})`} task="T-021" />
       )}
