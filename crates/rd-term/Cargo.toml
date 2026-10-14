@@ -3,5 +3,9 @@ name = "rd-term"
 version.workspace = true
 edition.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+getrandom = "0.2"
+portable-pty = "0.9"
+tokio = { workspace = true }
