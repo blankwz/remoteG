@@ -1,0 +1,104 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+}
+
+.nav {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+  background: #1c1c1c;
+}
+
+.nav a {
+  color: #cfcfcf;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.nav a:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+.spike {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.connectBar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.addrInput {
+  flex: 0 0 240px;
+  padding: 6px 10px;
+  font-family: Consolas, "Courier New", monospace;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #111;
+  color: #eee;
+}
+
+.connectBtn {
+  padding: 6px 16px;
+  border: 1px solid #4a7d4a;
+  border-radius: 4px;
+  background: #245224;
+  color: #e6ffe6;
+  cursor: pointer;
+}
+
+.connectBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.statusText {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  color: #888;
+}
+
+.statusText[data-status="connected"] {
+  color: #7ddf7d;
+}
+
+.statusText[data-status="error"] {
+  color: #ff7d7d;
+}
+
+.error {
+  margin: 0;
+  color: #ff9d9d;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: #000;
+  border-radius: 4px;
+  overflow: auto;
+}
+
+.placeholder {
+  padding: 24px;
+}
+
+.placeholder h1 {
+  font-size: 20px;
+}

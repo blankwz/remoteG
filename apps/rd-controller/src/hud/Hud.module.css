@@ -1,0 +1,16 @@
+.hud {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  color: #9fd49f;
+  background: #10241033;
+  border: 1px solid #2e5c2e;
+  border-radius: 4px;
+  padding: 4px 10px;
+}
+
+.item {
+  white-space: nowrap;
+}
