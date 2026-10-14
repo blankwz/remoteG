@@ -8,13 +8,30 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      # rd-encode 的 ffmpeg feature（Windows 默认开启）需要：
+      # - FFMPEG_DIR：BtbN LGPL shared 构建（动态链接，不含 libx264）
+      # - LIBCLANG_PATH：ffmpeg-sys-next 的 bindgen 需要 libclang
+      FFMPEG_DIR: ${{ github.workspace }}\ffmpeg-btbn
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install LLVM (libclang for ffmpeg-sys-next)
+        run: choco install llvm -y
+      - name: Download BtbN LGPL-shared FFmpeg 9.0
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/n9.0/ffmpeg-n9.0-win64-lgpl-shared.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
+          $dir = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1
+          Move-Item $dir.FullName "$env:GITHUB_WORKSPACE\ffmpeg-btbn"
+          Add-Content $env:GITHUB_PATH "$env:GITHUB_WORKSPACE\ffmpeg-btbn\bin"
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   macos:
