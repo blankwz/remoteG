@@ -2,20 +2,39 @@
 name = "rd-agent"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+directories = "6"
+if-addrs = "0.13"
 rd-capture-win = { path = "../../crates/rd-capture-win" }
 rd-encode = { path = "../../crates/rd-encode" }
+rd-input-win = { path = "../../crates/rd-input-win" }
+rd-proto = { path = "../../crates/rd-proto" }
+rd-security = { path = "../../crates/rd-security" }
+rd-term = { path = "../../crates/rd-term" }
 rd-transport = { path = "../../crates/rd-transport" }
+rd-window-win = { path = "../../crates/rd-window-win" }
+serde = { workspace = true }
 tokio = { workspace = true }
+tokio-util = "0.7"
+toml = "0.8"
 tracing = { workspace = true }
+tracing-appender = "0.2"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 crossbeam-channel = "0.5"
+tray-icon = "0.21"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "2"
