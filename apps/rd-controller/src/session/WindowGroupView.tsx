@@ -7,6 +7,10 @@
  *
  * 帧分发（模块级纯函数 dispatchFrame）：按首字节类型 + 帧头 window_id
  * 路由到对应窗口的 H264Decoder / TileLayer，未知窗口的帧安全忽略。
+ *
+ * 处理面注册表不变量：surfacesRef 只能经 registerSurface 增删（WindowSurface
+ * 挂载注册/卸载注销），主会话 effect 重建（断线重连 epoch++）不得清空——
+ * 否则注册 effect 依赖未变、无人重新注册，帧被 dispatchFrame 静默丢弃（黑屏）。
  */
 import {
   useCallback,
@@ -124,9 +128,30 @@ function delay(ms: number): Promise<void> {
 export interface FrameSink {
   decoder: { push(buf: ArrayBuffer): void } | null;
   tile: {
-    handleTile(header: TileHeader, rgba: Uint8ClampedArray<ArrayBuffer>): boolean;
+    handleTile(
+      header: TileHeader,
+      rgba: Uint8ClampedArray<ArrayBuffer>,
+    ): boolean;
     handleInvalidate(header: TileHeader): boolean;
   } | null;
+}
+
+/**
+ * 处理面注册表的唯一增删入口：handle 为 null 注销（WindowSurface 卸载），
+ * 否则按 winId 注册/覆盖。条目只能由此增删——主会话 effect 重建（断线重连
+ * epoch++）不清空注册表，否则重连后注册 effect 依赖未变、无人重新注册，
+ * 帧会被 dispatchFrame 静默丢弃（重连黑屏，切标签重挂载才恢复）。
+ */
+export function registerSurface<H>(
+  surfaces: Map<string, H>,
+  id: string,
+  handle: H | null,
+): void {
+  if (handle === null) {
+    surfaces.delete(id);
+  } else {
+    surfaces.set(id, handle);
+  }
 }
 
 /**
@@ -176,6 +201,8 @@ interface WindowSurfaceProps {
   pixelated: boolean;
   /** WebCodecs codec string（按 ack.codec 选定，组内窗口一致）。 */
   codec: string;
+  /** 会话重开代数：变更时注销旧处理面并重建（重连成功后帧路由随之恢复）。 */
+  sessionEpoch: number;
 }
 
 /** 单窗口叠层：{视频 canvas, 瓦片 canvas}，瓦片在上、透明背景。 */
@@ -187,6 +214,7 @@ function WindowSurface({
   effDpr,
   pixelated,
   codec,
+  sessionEpoch,
 }: WindowSurfaceProps) {
   const videoRef = useRef<HTMLCanvasElement>(null);
   const tileRef = useRef<HTMLCanvasElement>(null);
@@ -222,11 +250,12 @@ function WindowSurface({
       register(winId, null);
     };
     // codec 变化（ack 到达后 444 协商命中）→ 关闭旧解码器、按协商 profile
-    // 重建；420（默认值不变）时不重跑，零开销。React 子 effect 先于父主
-    // effect 运行，decoder 注册仍早于 openWindow，首帧不丢；ack 后仅 444
-    // 场景发生一次重建，若重建时已有帧到达（竞争窗口极小），新解码器等待
-    // 下一个 keyframe。
-  }, [winId, register, codec]);
+    // 重建；420（默认值不变）时不重跑，零开销。sessionEpoch 变化（断线重连
+    // 成功后 epoch++ 重建会话）→ 同样注销并重建，保证解码器/瓦片层不跨会话
+    // 复用。React 子 effect 先于父主 effect 运行：重建后的注册先于新会话的
+    // openWindow，首帧不丢；若重建时已有帧到达（竞争窗口极小），新解码器
+    // 等待下一个 keyframe。
+  }, [winId, register, codec, sessionEpoch]);
 
   // canvas 像素尺寸 = 视频尺寸（decoder 内部设置）；CSS = 像素 / effectiveDpr
   const css: CSSProperties =
@@ -286,13 +315,9 @@ export function WindowGroupView({
     onRootGoneRef.current = onRootGone;
   });
 
-  /** 处理面注册表（子组件挂载注册、卸载注销）。 */
+  /** 处理面注册表（子组件挂载注册、卸载注销）；条目只能经 registerSurface 增删。 */
   const register = useCallback((id: string, handle: SurfaceHandle | null) => {
-    if (handle === null) {
-      surfacesRef.current.delete(id);
-    } else {
-      surfacesRef.current.set(id, handle);
-    }
+    registerSurface(surfacesRef.current, id, handle);
   }, []);
 
   const onSurfaceStats = useCallback(
@@ -612,10 +637,12 @@ export function WindowGroupView({
     };
   }, []);
 
-  // 主会话 effect：订阅组事件 + 打开窗口；epoch 变更（重连/重开）时整体重建
+  // 主会话 effect：订阅组事件 + 打开窗口；epoch 变更（重连/重开）时整体重建。
+  // 不变量：此处不得清空 surfacesRef——注册表由 WindowSurface 的注册 effect
+  // 持有，会话重建时其依赖随 sessionEpoch 变化自行注销重注册；在此清空会使
+  // 重连后的帧路由指向空表（帧被 dispatchFrame 静默丢弃 → 黑屏，切标签才恢复）。
   useEffect(() => {
     let cancelled = false;
-    surfacesRef.current.clear();
     setPhase("connecting");
     setError(null);
     setRootStats(null);
@@ -657,7 +684,9 @@ export function WindowGroupView({
 
     return () => {
       cancelled = true;
-      surfacesRef.current.clear();
+      // 注：不清空 surfacesRef。条目随 WindowSurface 卸载/重建由其自身注销
+      // （register(id, null)）；清理函数若在此 clear，主 effect 重跑（重连
+      // epoch++）时会先抹掉全部注册，且无人重新注册 → 重连黑屏。
       void sub.catch(() => undefined);
       // Agent 对未打开窗口的 CloseWindow 静默忽略，重复发送安全
       void closeWindow(deviceId, windowId).catch(() => undefined);
@@ -813,6 +842,7 @@ export function WindowGroupView({
       pixelated={pixelated}
       style={{ left: 0, top: 0 }}
       codec={decoderCodec}
+      sessionEpoch={epoch}
     />
   );
 
@@ -896,6 +926,7 @@ export function WindowGroupView({
           top: `${off.y / effDpr}px`,
         }}
         codec={decoderCodec}
+        sessionEpoch={epoch}
       />
     );
   });
