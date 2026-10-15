@@ -368,26 +368,22 @@ async fn t05_click_injection() -> Result<()> {
     // ack 到达即管线注册完成（is_open 门放行本连接的注入）。
     let _s = common::open_window(&mut c, env.hwnd).await?;
 
-    // 预置前：测试进程先走一遍与 Agent 相同的三层置前，Agent 端随后的
-    // ensure_fg 将直接命中"已前台"分支（后台进程受前台锁时置前偶发失败，
-    // 重试一轮可消除）。
-    let _ = rd_input_win::ensure_foreground(env.hwnd as isize);
+    // 预置前 + 失败重试：Agent 端置前偶发失败会直接丢弃该次注入（FIX-1），
+    // 统一走 preset_foreground 消除该路径，确认改轮询而非固定时长。
+    common::preset_foreground(env.hwnd);
 
     let deadline = Instant::now() + Duration::from_secs(9);
-    let mut matched = false;
     let mut last = String::new();
     loop {
         send_click(&mut c, env.hwnd, 100, 100, 0).await?;
         // 每轮给 3s：点击生效（置前 + SendInput + 标题更新）的常规耗时 <1s。
-        let round_end = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < round_end {
-            last = common::testwin_title(env.hwnd)?;
-            if last.contains("clicks=1 last=100,100") {
-                matched = true;
-                break;
+        let matched = common::wait_for(Duration::from_secs(3), Duration::from_millis(100), || {
+            if let Ok(title) = common::testwin_title(env.hwnd) {
+                last = title;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+            last.contains("clicks=1 last=100,100")
+        })
+        .await;
         if matched {
             break;
         }
@@ -396,7 +392,7 @@ async fn t05_click_injection() -> Result<()> {
             "9s 内标题未变为 clicks=1 last=100,100（最后: {last:?}）"
         );
         println!("[t05] 点击未生效（可能置前失败被丢弃），预置前后重试");
-        let _ = rd_input_win::ensure_foreground(env.hwnd as isize);
+        common::preset_foreground(env.hwnd);
     }
     println!("t05 ok: 标题 {last:?}");
     Ok(())
@@ -442,31 +438,61 @@ async fn t06_menu_child_added() -> Result<()> {
     let mut c = Client::connect().await?;
     let _s = common::open_window(&mut c, env.hwnd).await?;
 
-    // 预置前（同 t05：置前失败的点击会被 Agent 丢弃，不会弹出菜单）。
-    let _ = rd_input_win::ensure_foreground(env.hwnd as isize);
-
-    // 右键按下 + 抬起（button=1）；WM_RBUTTONUP 经 DefWindowProc 产生 WM_CONTEXTMENU。
-    send_click(&mut c, env.hwnd, 400, 300, 1).await?;
-
-    let child_added = c
-        .recv_until(Duration::from_secs(3), |e: &rd_proto::v0::Envelope| {
-            matches!(
-                &e.msg,
-                Some(Msg::WindowEvent(w))
-                    if w.kind == Kind::ChildAdded as i32 && w.root_id == env.hwnd
-            )
-        })
-        .await;
+    // 弹菜单：预置前 + 右键注入 + 等 CHILD_ADDED（FIX-1 加固）。置前失败的
+    // 右键会被 Agent 丢弃（无事件、本地窗口组也不见菜单）——预置前后重试
+    // 一次；若菜单已弹出而事件未到，属 D-011 已裁决的解耦语义被破坏（事件
+    // 照发），重试无济于事，直接失败，不得掩盖。
+    const MENU_EVENT_TIMEOUT: Duration = Duration::from_secs(3);
+    let mut child_added: Option<rd_proto::v0::Envelope> = None;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=2 {
+        common::preset_foreground(env.hwnd);
+        // 右键按下 + 抬起（button=1）；WM_RBUTTONUP 经 DefWindowProc 产生
+        // WM_CONTEXTMENU。
+        send_click(&mut c, env.hwnd, 400, 300, 1).await?;
+        match c
+            .recv_until(MENU_EVENT_TIMEOUT, |e: &rd_proto::v0::Envelope| {
+                matches!(
+                    &e.msg,
+                    Some(Msg::WindowEvent(w))
+                        if w.kind == Kind::ChildAdded as i32 && w.root_id == env.hwnd
+                )
+            })
+            .await
+        {
+            Ok(ev) => {
+                child_added = Some(ev);
+                break;
+            }
+            Err(err) => {
+                last_err = Some(err);
+                if rd_window_win::window_group(env.hwnd as isize).len() > 1 {
+                    bail!(
+                        "菜单已弹出但 {MENU_EVENT_TIMEOUT:?} 内未收到 CHILD_ADDED\
+                         （事件应与子管线建立解耦，不重试掩盖）: {:#}",
+                        last_err.as_ref().expect("刚记录的错误")
+                    );
+                }
+            }
+        }
+        if attempt == 1 {
+            println!("[t06] 第 1 次右键未弹出菜单（可能置前失败被丢弃），预置前后重试");
+        }
+    }
 
     // 统一收尾：无论事件是否到达都必须关闭菜单，否则 testwin 消息循环被
-    // TrackPopupMenu 模态阻塞，后续用例全部失效。
+    // TrackPopupMenu 模态阻塞，后续用例全部失效。菜单点击/Esc 同样经 Agent
+    // 注入并过前台门控（FIX-1：置前失败即被丢弃）——每次注入前预置前，未
+    // 关闭则逐级重试；最终仍是硬断言：菜单必须关闭。
     let menu_open_now = rd_window_win::window_group(env.hwnd as isize).len() > 1;
     if menu_open_now {
-        if let Ok(ev) = &child_added {
-            let menu_id = child_window_id(ev);
-            send_click(&mut c, menu_id, 40, 15, 0).await?;
+        let menu_id = child_added.as_ref().map(child_window_id);
+        click_menu_item(&mut c, menu_id, env.hwnd).await?;
+        if !menu_closed(env.hwnd, Duration::from_secs(3)).await {
+            click_menu_item(&mut c, menu_id, env.hwnd).await?;
         }
-        if !menu_closed(env.hwnd, Duration::from_secs(3)) {
+        if !menu_closed(env.hwnd, Duration::from_secs(3)).await {
+            common::preset_foreground(env.hwnd);
             for down in [true, false] {
                 c.send(Msg::Key(KeyEvent {
                     scancode: 0x01, // Esc
@@ -476,20 +502,22 @@ async fn t06_menu_child_added() -> Result<()> {
                 }))
                 .await?;
             }
-            anyhow::ensure!(
-                menu_closed(env.hwnd, Duration::from_secs(2)),
-                "菜单未能关闭（testwin 消息循环仍被 TrackPopupMenu 阻塞，后续用例会失败）"
-            );
         }
+        anyhow::ensure!(
+            menu_closed(env.hwnd, Duration::from_secs(3)).await,
+            "菜单未能关闭（testwin 消息循环仍被 TrackPopupMenu 阻塞，后续用例会失败）"
+        );
     }
 
     match child_added {
-        Ok(ev) => {
+        Some(ev) => {
             let Msg::WindowEvent(w) = ev.msg.context("空信封")? else {
                 bail!("不可达");
             };
             let menu_id = w.info.as_ref().map(|i| i.id).unwrap_or(0);
             anyhow::ensure!(menu_id != 0, "CHILD_ADDED 未携带子窗口 id");
+            // 显式关连接（t07 依赖本连接断开触发的管线清理，见 Client::close）。
+            c.close().await;
             println!(
                 "t06 ok: CHILD_ADDED child={menu_id:#x} root={:#x} 偏移=({},{}) 尺寸={}x{}；菜单已关闭",
                 w.root_id,
@@ -500,11 +528,11 @@ async fn t06_menu_child_added() -> Result<()> {
             );
             Ok(())
         }
-        Err(err) => {
-            if menu_open_now {
-                bail!("菜单已弹出但 3s 内未收到 CHILD_ADDED（事件应与子管线建立解耦）: {err:#}");
-            }
-            bail!("3s 内未收到 CHILD_ADDED 且本地窗口组未见菜单（右键注入或菜单弹出失败）: {err:#}")
+        None => {
+            // 失败路径也显式关闭，避免残留管线拖垮下一用例的判定环境。
+            c.close().await;
+            let err = last_err.expect("两次尝试各记录一次错误");
+            bail!("两次右键注入均未收到 CHILD_ADDED 且本地窗口组未见菜单（右键注入或菜单弹出失败）: {err:#}")
         }
     }
 }
@@ -517,18 +545,21 @@ fn child_window_id(ev: &rd_proto::v0::Envelope) -> u64 {
     }
 }
 
-/// 轮询本地窗口组，直到组内只剩根窗口（菜单已销毁）。
-fn menu_closed(root: u64, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if rd_window_win::window_group(root as isize).len() <= 1 {
-            return true;
-        }
-        if Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+/// 点击菜单项关闭菜单（预置前后注入；无子窗口 id 时静默跳过，走 Esc 路径）。
+async fn click_menu_item(c: &mut Client, menu_id: Option<u64>, root: u64) -> Result<()> {
+    if let Some(id) = menu_id {
+        common::preset_foreground(root);
+        send_click(c, id, 40, 15, 0).await?;
     }
+    Ok(())
+}
+
+/// 轮询本地窗口组，直到组内只剩根窗口（菜单已销毁）。
+async fn menu_closed(root: u64, timeout: Duration) -> bool {
+    common::wait_for(timeout, Duration::from_millis(100), || {
+        rd_window_win::window_group(root as isize).len() <= 1
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -540,21 +571,47 @@ fn menu_closed(root: u64, timeout: Duration) -> bool {
 async fn t07_unopened_window_input_rejected() -> Result<()> {
     let _guard = common::serial_lock().await;
     let env = common::env();
-    // 上一用例连接刚断开，给 Agent 侧 on_disconnect 清理管线留出裕量。
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let mut c = Client::connect().await?;
+
+    // 门禁恢复探测（FIX-1 加固）：上一用例连接断开后 Agent 异步清理窗口管线
+    // （on_disconnect），清理完成前旧管线的 is_open 门仍放行注入——固定
+    // 500ms 在负载高时不够，曾致门禁漏放。改为探测点击轮询：标题变化 = 门禁
+    // 仍放行（更新基线继续探）；标题不变 = 门禁已恢复。3s 上限内必须恢复。
+    const GATE_RECOVER_TIMEOUT: Duration = Duration::from_secs(3);
+    common::preset_foreground(env.hwnd);
+    let mut baseline = common::testwin_title(env.hwnd)?;
+    let probe_deadline = Instant::now() + GATE_RECOVER_TIMEOUT;
+    loop {
+        send_click(&mut c, env.hwnd, 100, 100, 0).await?;
+        // 注入处理与标题更新（WM_SETTEXT）常规耗时 <100ms，留 150ms 裕量。
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let now = common::testwin_title(env.hwnd)?;
+        if now == baseline {
+            break;
+        }
+        baseline = now;
+        anyhow::ensure!(
+            Instant::now() < probe_deadline,
+            "{GATE_RECOVER_TIMEOUT:?} 内门禁未恢复（未打开窗口的注入仍被放行，\
+             on_disconnect 清理超时；最后: {baseline:?}）"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // 正式断言（语义不变）：门禁恢复后，未打开窗口的点击必须被拒绝。1s 注入
+    // 生效窗口内轮询，标题一旦变化立即失败（fail-fast，等效原固定 1s 等待）。
     let before = common::testwin_title(env.hwnd)?;
-
     send_click(&mut c, env.hwnd, 100, 100, 0).await?;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    let after = common::testwin_title(env.hwnd)?;
+    let leaked = common::wait_for(Duration::from_secs(1), Duration::from_millis(100), || {
+        common::testwin_title(env.hwnd).is_ok_and(|t| t != before)
+    })
+    .await;
     anyhow::ensure!(
-        before == after,
-        "未打开窗口的点击被注入了：{before:?} → {after:?}"
+        !leaked,
+        "未打开窗口的点击被注入了：{before:?} → {:?}",
+        common::testwin_title(env.hwnd).unwrap_or_default()
     );
-    println!("t07 ok: 标题保持 {after:?}（点击被拒绝）");
+    println!("t07 ok: 标题保持 {before:?}（点击被拒绝）");
     Ok(())
 }
 

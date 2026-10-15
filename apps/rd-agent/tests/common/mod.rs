@@ -359,6 +359,18 @@ impl Client {
             println!("[e2e] 丢弃非目标推送: {:?}", env.msg);
         }
     }
+
+    /// 显式关闭连接并驻留一瞬，确保 QUIC close 帧在本用例的 runtime 内发出。
+    ///
+    /// `#[tokio::test]` 的 runtime 在用例函数返回时立即 shutdown：若仅依赖
+    /// drop 触发连接关闭，close/FIN 帧可能来不及发出，Agent 侧察觉断开会
+    /// 退化为 idle 超时，`on_disconnect` 的窗口管线清理随之延迟不可控
+    /// （t07 门禁探测曾见 3s 内 clicks 一路 +1——旧管线始终未被清理）。
+    /// 下一个用例依赖旧连接清理结果时，必须以本方法收尾。
+    pub async fn close(self) {
+        self.conn.close(0, "e2e case done");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 fn hello_envelope() -> Envelope {
@@ -438,6 +450,48 @@ async fn expect_hello_ack(rx: &mut ControlRx) -> Result<()> {
         Some(other) => bail!("受信任连接应直接 HelloAck，实际 {other:?}"),
         None => bail!("收到空信封"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 轮询等待与注入防御
+// ---------------------------------------------------------------------------
+
+/// 条件轮询：每 `interval` 调用一次 `pred`，为真立即返回 true；`timeout` 到期
+/// 仍为假返回 false。
+///
+/// 等待"条件满足"而非赌固定时长——固定 sleep 在负载高时会挤压事件窗口
+/// （FIX-1 报告的 t06/t07 间歇性失败根因之一）。各用例的等待一律经本 helper
+/// 表达，断言语义由调用方保持。
+pub async fn wait_for<F>(timeout: Duration, interval: Duration, mut pred: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if pred() {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(interval.min(left)).await;
+    }
+}
+
+/// 注入用例的预置前：测试进程先走一遍与 Agent 相同的三层置前，Agent 端随后
+/// 的 ensure_fg 将直接命中"已前台"分支。后台进程受前台锁时置前偶发失败，
+/// Agent 会直接丢弃该次注入——所有注入用例在发出注入前（含失败重试时）统一
+/// 预置前，消除置前失败被丢弃的路径。失败时打印诊断（Agent 端日志写文件，
+/// 测试输出不可见，此处是置前失败唯一的观测点）。
+pub fn preset_foreground(hwnd: u64) -> bool {
+    let ok = rd_input_win::ensure_foreground(hwnd as isize);
+    if !ok {
+        println!(
+            "[e2e] 预置前失败（hwnd {hwnd:#x} 未成为前台）——本次注入可能被 Agent 前台门控丢弃"
+        );
+    }
+    ok
 }
 
 // ---------------------------------------------------------------------------
