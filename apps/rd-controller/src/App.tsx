@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
+import { Devices } from "./pages/Devices";
 import { Session } from "./pages/Session";
 import { Windows } from "./pages/Windows";
 import type { DecodeStats } from "./video/decoder";
@@ -119,15 +120,6 @@ function SpikePage() {
   );
 }
 
-function Placeholder({ title, task }: { title: string; task: string }) {
-  return (
-    <main className={styles.placeholder}>
-      <h1>{title}</h1>
-      <p>占位页，由 {task} 实现。</p>
-    </main>
-  );
-}
-
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
 
@@ -153,9 +145,7 @@ export default function App() {
         <a href="#/session/demo">Session</a>
       </nav>
       {route.page === "spike" && <SpikePage />}
-      {route.page === "devices" && (
-        <Placeholder title="Devices" task="T-019" />
-      )}
+      {route.page === "devices" && <Devices />}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
       {route.page === "session" && <Session deviceId={route.deviceId} />}
     </div>
