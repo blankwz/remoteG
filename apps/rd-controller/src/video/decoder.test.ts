@@ -1,9 +1,16 @@
 /**
  * 帧头解析单测（T-005）：字节布局必须与 05_api/协议契约.md §3 逐字段一致
  * （u64 LE window_id, u32 LE seq, u64 pts_us, u8 flags(bit0=key), u32 LE len）。
+ * 另含 codec string 选择（444 协商命中映射 High 4:4:4，未知值回退 420）。
  */
 import { describe, expect, it } from "vitest";
-import { VIDEO_HEADER_LEN, parseVideoHeader } from "./decoder";
+import {
+  H264_CODEC_420,
+  H264_CODEC_444,
+  VIDEO_HEADER_LEN,
+  codecStringFor,
+  parseVideoHeader,
+} from "./decoder";
 
 interface HeaderInput {
   windowId: bigint;
@@ -86,5 +93,29 @@ describe("parseVideoHeader", () => {
   it("does not treat header-only buffer as an error", () => {
     const header = parseVideoHeader(buildHeader(SAMPLE));
     expect(header.payloadLen).toBe(SAMPLE.payloadLen);
+  });
+});
+
+describe("codecStringFor", () => {
+  it("maps H264_444 ack codec to High 4:4:4 codec string", () => {
+    expect(codecStringFor("H264_444")).toBe(H264_CODEC_444);
+    expect(codecStringFor("H264_444")).toBe("avc1.F40033");
+  });
+
+  it("keeps 420 baseline for H264_420 ack codec", () => {
+    expect(codecStringFor("H264_420")).toBe(H264_CODEC_420);
+    expect(codecStringFor("H264_420")).toBe("avc1.42E033");
+  });
+
+  it("falls back to 420 for unknown / unsupported / empty ack codecs", () => {
+    // ack_to_dto 的其他可能取值与未来扩展均回退默认解码路径
+    for (const codec of ["HEVC_444", "AV1", "unknown(99)", "", "h264_444"]) {
+      expect(codecStringFor(codec)).toBe(H264_CODEC_420);
+    }
+  });
+
+  it("falls back to 420 when ack (or codec field) is absent", () => {
+    expect(codecStringFor(null)).toBe(H264_CODEC_420);
+    expect(codecStringFor(undefined)).toBe(H264_CODEC_420);
   });
 });

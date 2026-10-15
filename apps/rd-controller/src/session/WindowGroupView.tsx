@@ -48,6 +48,7 @@ import {
   type KeyInput,
 } from "../input/InputMapper";
 import {
+  codecStringFor,
   H264Decoder,
   parseVideoHeader,
   VIDEO_HEADER_LEN,
@@ -173,6 +174,8 @@ interface WindowSurfaceProps {
   effDpr: number;
   /** 整数倍缩放时启用 pixelated。 */
   pixelated: boolean;
+  /** WebCodecs codec string（按 ack.codec 选定，组内窗口一致）。 */
+  codec: string;
 }
 
 /** 单窗口叠层：{视频 canvas, 瓦片 canvas}，瓦片在上、透明背景。 */
@@ -183,6 +186,7 @@ function WindowSurface({
   style,
   effDpr,
   pixelated,
+  codec,
 }: WindowSurfaceProps) {
   const videoRef = useRef<HTMLCanvasElement>(null);
   const tileRef = useRef<HTMLCanvasElement>(null);
@@ -211,13 +215,18 @@ function WindowSurface({
       handle.tile?.setSize(stats.width, stats.height);
       setSize({ width: stats.width, height: stats.height });
       onStatsRef.current(winId, stats);
-    });
+    }, codec);
     register(winId, handle);
     return () => {
       handle.decoder?.close();
       register(winId, null);
     };
-  }, [winId, register]);
+    // codec 变化（ack 到达后 444 协商命中）→ 关闭旧解码器、按协商 profile
+    // 重建；420（默认值不变）时不重跑，零开销。React 子 effect 先于父主
+    // effect 运行，decoder 注册仍早于 openWindow，首帧不丢；ack 后仅 444
+    // 场景发生一次重建，若重建时已有帧到达（竞争窗口极小），新解码器等待
+    // 下一个 keyframe。
+  }, [winId, register, codec]);
 
   // canvas 像素尺寸 = 视频尺寸（decoder 内部设置）；CSS = 像素 / effectiveDpr
   const css: CSSProperties =
@@ -791,6 +800,10 @@ export function WindowGroupView({
     transformOrigin: "top left",
   };
 
+  // 按 ack.codec 选定解码 codec string（ack 前为 420 默认；444 协商命中时
+  // ack 到达后变化，触发 WindowSurface 按正确 profile 重建解码器）
+  const decoderCodec = codecStringFor(snapshot.ack?.codec);
+
   const rootSurface = (
     <WindowSurface
       winId={windowId}
@@ -799,6 +812,7 @@ export function WindowGroupView({
       effDpr={effDpr}
       pixelated={pixelated}
       style={{ left: 0, top: 0 }}
+      codec={decoderCodec}
     />
   );
 
@@ -881,6 +895,7 @@ export function WindowGroupView({
           left: `${off.x / effDpr}px`,
           top: `${off.y / effDpr}px`,
         }}
+        codec={decoderCodec}
       />
     );
   });

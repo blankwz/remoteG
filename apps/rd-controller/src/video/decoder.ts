@@ -10,6 +10,21 @@
 /** 视频帧头长度：u64 window_id + u32 seq + u64 pts_us + u8 flags + u32 len。 */
 export const VIDEO_HEADER_LEN = 25;
 
+/** H.264 Baseline 4:2:0，level 5.1（1080p60；无 description → Annex-B）。 */
+export const H264_CODEC_420 = "avc1.42E033";
+/** H.264 High 4:4:4 Predictive，level 5.1（与 probeDecodeCaps 的 444 探测一致）。 */
+export const H264_CODEC_444 = "avc1.F40033";
+
+/**
+ * OpenWindowAck 的 codec 枚举名 → WebCodecs codec string。
+ *
+ * 仅 `H264_444` 映射 High 4:4:4；其余（H264_420、未来才支持的 HEVC/AV1、
+ * `unknown(n)`、空值）一律回退 420 Baseline（默认解码路径，不破坏现状）。
+ */
+export function codecStringFor(codec: string | null | undefined): string {
+  return codec === "H264_444" ? H264_CODEC_444 : H264_CODEC_420;
+}
+
 /** 视频帧头字段（小端，05_api §3）。u64 字段用 bigint 保留精度。 */
 export interface VideoFrameHeader {
   windowId: bigint;
@@ -69,7 +84,16 @@ export class H264Decoder {
   private lastStatsEmit = 0;
   private closed = false;
 
-  constructor(canvas: HTMLCanvasElement, onStats: (stats: DecodeStats) => void) {
+  /**
+   * @param codec WebCodecs codec string；默认 420 Baseline。444 协商命中时
+   *   由调用方传 `codecStringFor(ack.codec)` 的结果（High 4:4:4），否则解码器
+   *   以错误 profile 建立会导致 444 码流解码失败（黑屏）。
+   */
+  constructor(
+    canvas: HTMLCanvasElement,
+    onStats: (stats: DecodeStats) => void,
+    codec: string = H264_CODEC_420,
+  ) {
     this.canvas = canvas;
     this.onStats = onStats;
     this.decoder = new VideoDecoder({
@@ -81,8 +105,8 @@ export class H264Decoder {
       },
     });
     this.decoder.configure({
-      // baseline profile level 5.1（1080p60）；无 description → Annex-B
-      codec: "avc1.42E033",
+      // profile/level 由协商结果决定；无 description → Annex-B
+      codec,
       optimizeForLatency: true,
       hardwareAcceleration: "prefer-hardware",
     });
