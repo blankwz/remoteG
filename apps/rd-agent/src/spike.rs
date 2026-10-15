@@ -210,7 +210,7 @@ fn encode_loop(
         };
 
         // 尺寸变化检测：以帧的实际客户区尺寸为准（`CapturedFrame.resized` 基于
-        // 捕获纹理尺寸，实测在窗口 resize 时不可靠——见报告上报事项——因此
+        // 捕获纹理尺寸（resized 信号修复前的历史绕过，保留作双保险——见
         // 这里对帧尺寸本身做差量检测，二者任一为真都触发 reconfigure + IDR）。
         let size_changed = frame.resized || last_size != Some((frame.width, frame.height));
         if size_changed {

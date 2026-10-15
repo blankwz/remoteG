@@ -1235,7 +1235,7 @@ struct FrameStep {
 
 /// 捕获帧 → H.264 AU + 无损瓦片的可测核心（不含捕获/传输 IO）。
 ///
-/// 尺寸变化检测与 spike.rs 同款（`CapturedFrame.resized` 实证不可靠，T-006，
+/// 尺寸变化检测与 spike.rs 同款（`CapturedFrame.resized` 已于 rd-capture-win 修复并真机验证；
 /// 以帧尺寸差量为准）；变化时 `reconfigure` + 重建 [`TileRefiner`]，下一帧
 /// 强制 IDR。`refine = false` 时跳过全部瓦片路径。
 struct FramePipeline {
