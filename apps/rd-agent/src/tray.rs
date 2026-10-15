@@ -185,9 +185,20 @@ mod imp {
                     let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
                     pairing.new_code()
                 };
-                // 配对码只经 MessageBox 展示,不落日志
+                // 配对码只经 MessageBox 展示,不落日志;同时复制到剪贴板
                 tracing::info!("托盘生成新配对码(5 分钟内有效)");
-                show_pair_code_dialog(code, state.local_fp.short_hex());
+                let copied = copy_to_clipboard(&code);
+                show_pair_code_dialog(
+                    if copied {
+                        format!(
+                            "{code}
+(已复制到剪贴板)"
+                        )
+                    } else {
+                        code
+                    },
+                    state.local_fp.short_hex(),
+                );
             }
             ID_DISCONNECT_ALL => disconnect_all(state),
             ID_PAUSE => {
@@ -445,6 +456,44 @@ mod imp {
                 tracing::error!(asset, "托盘图标转换失败: {err}");
                 None
             }
+        }
+    }
+    /// 把 UTF-8 文本以 `CF_UNICODETEXT` 写入剪贴板(打开失败/占用时返回 false)。
+    /// 配对码场景失败无害——弹窗仍展示明文。
+    fn copy_to_clipboard(text: &str) -> bool {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+        unsafe {
+            if OpenClipboard(None).is_err() {
+                return false;
+            }
+            let ok = (|| {
+                let _ = EmptyClipboard();
+                let mut utf16: Vec<u16> = text.encode_utf16().collect();
+                utf16.push(0); // NUL 结尾
+                let bytes = utf16.len() * 2;
+                let h = GlobalAlloc(GMEM_MOVEABLE, bytes).ok()?;
+                let p = GlobalLock(h) as *mut u16;
+                if p.is_null() {
+                    return None;
+                }
+                std::ptr::copy_nonoverlapping(utf16.as_ptr(), p, utf16.len());
+                let _ = GlobalUnlock(h);
+                if SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(h.0))).is_err() {
+                    return None;
+                }
+                Some(())
+            })()
+            .is_some();
+            let _ = CloseClipboard();
+            ok
         }
     }
 }

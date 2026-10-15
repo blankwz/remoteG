@@ -40,7 +40,7 @@ export function Devices() {
   const [showAdd, setShowAdd] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
-  const [form, setForm] = useState({ addr: "", code: "", name: "" });
+  const [form, setForm] = useState({ addr: "127.0.0.1:21118", code: "", name: "" });
 
   const refresh = useCallback(async () => {
     try {
@@ -136,7 +136,7 @@ export function Devices() {
       try {
         await pairDevice(form.addr, form.code, form.name);
         setShowAdd(false);
-        setForm({ addr: "", code: "", name: "" });
+        setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
         await refresh();
       } catch (e) {
         setFormError(errText(e));

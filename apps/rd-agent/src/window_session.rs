@@ -541,6 +541,12 @@ fn handle_open(ctx: &SessionCtx, req_id: u32, open: OpenWindow) -> anyhow::Resul
 }
 
 async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> anyhow::Result<()> {
+    // 全局串行化：open 内部多处 await（枚举/编码器创建），并发到达的两个
+    // OpenWindow 会交错出两条并存管线（StrictMode 双挂载实测），前端收到
+    // 交织的双码流必然解码失败。串行后重复打开走下方"停旧建新"幂等路径。
+    static OPEN_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _serial = OPEN_SERIAL.lock().await;
+
     let wid = open.window_id;
     // 同窗口重复打开：先按关闭语义停掉旧管线（恢复布局，避免覆盖原始 placement）
     if let Some(old) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&wid) {
