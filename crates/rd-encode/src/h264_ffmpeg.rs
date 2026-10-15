@@ -2,10 +2,13 @@
 //!
 //! 探测顺序：`h264_nvenc` → `h264_qsv` → `h264_amf` → `h264_mf`，
 //! 每个候选实际编码 1 帧验证可用性（驱动/DLL 缺失、显存不足等在探测期
-//! 暴露），第一个成功者胜出；全部失败由 `create_best` 回退 OpenH264。
+//! 暴露），第一个成功者胜出；420 全部失败由 `create_best` 回退 OpenH264
+//! （444 全部失败则明确报错，不静默回退，见 `create_best`）。
 //!
 //! 低延迟参数：`bf=0`（无 B 帧）、gop 极大（关键帧按需 IDR）、各编码器
-//! 专属 zero-latency 选项、NV12 输入。仅链接 LGPL 构建，不含 libx264。
+//! 专属 zero-latency 选项、输入 NV12（420）/ yuv444p（444，打开方式与
+//! `caps.rs` 探测一致：先带 `profile=high444p`，失败去掉 profile 重试）。
+//! 仅链接 LGPL 构建，不含 libx264。
 //!
 //! 注意：avcodec 不支持运行中改码率/尺寸，`set_bitrate` / `reconfigure`
 //! 通过重建编码器实现，重建后首帧即 IDR。
@@ -20,7 +23,7 @@ use ffmpeg_next::codec::packet::Packet as FfmpegPacket;
 use ffmpeg_next::util::frame::video::Video as FfmpegFrame;
 
 use crate::frame::{even_geometry, RawFrame};
-use crate::{EncodedAu, EncoderConfig, EncoderInfo, VideoEncoder};
+use crate::{EncodedAu, EncoderConfig, EncoderInfo, PixelFormat, VideoEncoder};
 
 /// Windows 常见硬编探测顺序（NVIDIA → Intel → AMD → 系统内置 MF）。
 pub const HW_CANDIDATES: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"];
@@ -45,10 +48,16 @@ pub struct FfmpegEncoder {
     octx: FfmpegEncoderVideo,
     frame: FfmpegFrame,
     packet: FfmpegPacket,
+    /// 输入色度采样（420 → NV12，444 → yuv444p）。
+    pix_fmt: PixelFormat,
     /// NV12 紧凑暂存（dcv 输出 → 行拷贝进 ffmpeg 帧平面，规避双平面
-    /// 同时可变借用，1080p 拷贝开销 < 0.5 ms）。
+    /// 同时可变借用，1080p 拷贝开销 < 0.5 ms；420 路径）。
     nv12_y: Vec<u8>,
     nv12_uv: Vec<u8>,
+    /// I444 紧凑三平面暂存（行距均 enc_w；444 路径）。
+    y444: Vec<u8>,
+    u444: Vec<u8>,
+    v444: Vec<u8>,
     /// MFT 等 delay 型编码器的就绪 AU 队列（按 pts 出队）。
     pending: VecDeque<EncodedAu>,
     fps: u32,
@@ -94,14 +103,25 @@ impl FfmpegEncoder {
 
     fn try_new(cfg: &EncoderConfig, codec_name: &'static str) -> Result<Self> {
         let (enc_w, enc_h, crop) = even_geometry(cfg.width, cfg.height);
-        let (octx, frame) = open_encoder(codec_name, enc_w, enc_h, cfg.fps, cfg.bitrate_kbps)?;
+        let (octx, frame) = open_encoder(
+            codec_name,
+            enc_w,
+            enc_h,
+            cfg.fps,
+            cfg.bitrate_kbps,
+            cfg.pixel_format,
+        )?;
         let mut enc = Self {
             codec_name,
             octx,
             frame,
             packet: FfmpegPacket::empty(),
+            pix_fmt: cfg.pixel_format,
             nv12_y: Vec::new(),
             nv12_uv: Vec::new(),
+            y444: Vec::new(),
+            u444: Vec::new(),
+            v444: Vec::new(),
             pending: VecDeque::new(),
             fps: cfg.fps,
             bitrate_kbps: cfg.bitrate_kbps,
@@ -122,26 +142,54 @@ impl FfmpegEncoder {
         let enc_w = self.enc_width as usize;
         let enc_h = self.enc_height as usize;
 
-        // 1) BGRA → NV12（紧凑暂存）。
-        self.nv12_y.clear();
-        self.nv12_uv.clear();
-        self.nv12_y.resize(enc_w * enc_h, 16);
-        self.nv12_uv.resize(enc_w * (enc_h / 2), 128);
-        {
-            let (y, uv) = (&mut self.nv12_y[..], &mut self.nv12_uv[..]);
-            frame.bgra_to_nv12_into(y, enc_w, uv, enc_w)?;
-        }
+        match self.pix_fmt {
+            PixelFormat::Yuv420 => {
+                // 1) BGRA → NV12（紧凑暂存）。
+                self.nv12_y.clear();
+                self.nv12_uv.clear();
+                self.nv12_y.resize(enc_w * enc_h, 16);
+                self.nv12_uv.resize(enc_w * (enc_h / 2), 128);
+                {
+                    let (y, uv) = (&mut self.nv12_y[..], &mut self.nv12_uv[..]);
+                    frame.bgra_to_nv12_into(y, enc_w, uv, enc_w)?;
+                }
 
-        // 2) 行拷贝进 ffmpeg 帧平面（帧平面可能带对齐 stride）。
-        {
-            let y_stride = self.frame.stride(0);
-            let uv_stride = self.frame.stride(1);
-            for (row, src) in self.nv12_y.chunks_exact(enc_w).enumerate() {
-                self.frame.data_mut(0)[row * y_stride..row * y_stride + enc_w].copy_from_slice(src);
+                // 2) 行拷贝进 ffmpeg 帧平面（帧平面可能带对齐 stride）。
+                {
+                    let y_stride = self.frame.stride(0);
+                    let uv_stride = self.frame.stride(1);
+                    for (row, src) in self.nv12_y.chunks_exact(enc_w).enumerate() {
+                        self.frame.data_mut(0)[row * y_stride..row * y_stride + enc_w]
+                            .copy_from_slice(src);
+                    }
+                    for (row, src) in self.nv12_uv.chunks_exact(enc_w).take(enc_h / 2).enumerate() {
+                        self.frame.data_mut(1)[row * uv_stride..row * uv_stride + enc_w]
+                            .copy_from_slice(src);
+                    }
+                }
             }
-            for (row, src) in self.nv12_uv.chunks_exact(enc_w).take(enc_h / 2).enumerate() {
-                self.frame.data_mut(1)[row * uv_stride..row * uv_stride + enc_w]
-                    .copy_from_slice(src);
+            PixelFormat::Yuv444 => {
+                // 1) BGRA → I444（紧凑三平面，行距均 enc_w；BT.601 有限范围
+                //    与 420 同口径）。
+                self.y444.clear();
+                self.u444.clear();
+                self.v444.clear();
+                self.y444.resize(enc_w * enc_h, 16);
+                self.u444.resize(enc_w * enc_h, 128);
+                self.v444.resize(enc_w * enc_h, 128);
+                {
+                    let (y, u, v) = (&mut self.y444[..], &mut self.u444[..], &mut self.v444[..]);
+                    frame.bgra_to_yuv444_into(y, u, v, enc_w)?;
+                }
+
+                // 2) 行拷贝进 ffmpeg 帧三平面。
+                for (plane, buf) in [(0usize, &self.y444), (1, &self.u444), (2, &self.v444)] {
+                    let plane_stride = self.frame.stride(plane);
+                    for (row, src) in buf.chunks_exact(enc_w).enumerate() {
+                        self.frame.data_mut(plane)[row * plane_stride..row * plane_stride + enc_w]
+                            .copy_from_slice(src);
+                    }
+                }
             }
         }
 
@@ -201,26 +249,80 @@ impl FfmpegEncoder {
 
     /// 重建内部编码器（改码率/改尺寸共用，重建后首帧即 IDR）。
     fn rebuild(&mut self, enc_w: u32, enc_h: u32) -> Result<()> {
-        let (octx, frame) =
-            open_encoder(self.codec_name, enc_w, enc_h, self.fps, self.bitrate_kbps)?;
+        let (octx, frame) = open_encoder(
+            self.codec_name,
+            enc_w,
+            enc_h,
+            self.fps,
+            self.bitrate_kbps,
+            self.pix_fmt,
+        )?;
         self.octx = octx;
         self.frame = frame;
         self.packet = FfmpegPacket::empty();
         self.nv12_y = Vec::new();
         self.nv12_uv = Vec::new();
+        self.y444 = Vec::new();
+        self.u444 = Vec::new();
+        self.v444 = Vec::new();
         self.enc_width = enc_w;
         self.enc_height = enc_h;
         Ok(())
     }
 }
 
-/// 打开指定硬编编码器并配置低延迟参数，返回编码上下文与 NV12 帧缓冲。
+/// 打开指定硬编编码器并配置低延迟参数，返回编码上下文与对应像素格式的
+/// 帧缓冲。444 打开方式与 `caps.rs` 探测一致：先带 `profile=high444p`
+/// 尝试（nvenc/qsv 支持该 profile 名），失败去掉 profile 重试（amf/mf
+/// 由像素格式自动选择 profile）。
 fn open_encoder(
     codec_name: &str,
     enc_w: u32,
     enc_h: u32,
     fps: u32,
     bitrate_kbps: u32,
+    pix_fmt: PixelFormat,
+) -> Result<(FfmpegEncoderVideo, FfmpegFrame)> {
+    let av_fmt = match pix_fmt {
+        PixelFormat::Yuv420 => ffmpeg::util::format::Pixel::NV12,
+        PixelFormat::Yuv444 => ffmpeg::util::format::Pixel::YUV444P,
+    };
+    let attempts: Vec<Vec<(&'static str, &'static str)>> = match pix_fmt {
+        PixelFormat::Yuv444 => vec![
+            codec_options_444(codec_name, true),
+            codec_options_444(codec_name, false),
+        ],
+        PixelFormat::Yuv420 => vec![codec_options(codec_name)],
+    };
+    let mut first_err = None;
+    for options in &attempts {
+        match open_encoder_with_options(
+            codec_name,
+            enc_w,
+            enc_h,
+            fps,
+            bitrate_kbps,
+            av_fmt,
+            options,
+        ) {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| anyhow::anyhow!("{codec_name} 打开失败（无可用参数组合）")))
+}
+
+/// 以确定的选项集打开编码器上下文（`open_encoder` 的单次尝试）。
+fn open_encoder_with_options(
+    codec_name: &str,
+    enc_w: u32,
+    enc_h: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    av_fmt: ffmpeg::util::format::Pixel,
+    options: &[(&'static str, &'static str)],
 ) -> Result<(FfmpegEncoderVideo, FfmpegFrame)> {
     ffmpeg_init();
     let codec = ffmpeg::codec::encoder::find_by_name(codec_name)
@@ -234,21 +336,21 @@ fn open_encoder(
         .with_context(|| format!("{codec_name} 创建视频编码上下文失败"))?;
     enc.set_width(enc_w);
     enc.set_height(enc_h);
-    enc.set_format(ffmpeg::util::format::Pixel::NV12);
+    enc.set_format(av_fmt);
     enc.set_bit_rate(bitrate_kbps.saturating_mul(1000) as usize);
     enc.set_gop(100_000);
     enc.set_frame_rate(Some(ffmpeg::Rational(fps as i32, 1)));
     enc.set_max_b_frames(0);
 
     let mut opts = ffmpeg::Dictionary::new();
-    for (key, value) in codec_options(codec_name) {
+    for (key, value) in options {
         opts.set(key, value);
     }
     let opened = enc
         .open_with(opts)
         .with_context(|| format!("{codec_name} 打开失败（驱动/硬件不可用或参数不支持）"))?;
 
-    let frame = FfmpegFrame::new(ffmpeg::util::format::Pixel::NV12, enc_w, enc_h);
+    let frame = FfmpegFrame::new(av_fmt, enc_w, enc_h);
     Ok((opened, frame))
 }
 
@@ -274,6 +376,17 @@ fn codec_options(codec_name: &str) -> Vec<(&'static str, &'static str)> {
         "h264_mf" => vec![("rate_control", "cbr")],
         _ => Vec::new(),
     }
+}
+
+/// 4:4:4 正式路径选项：与 420 相同的低延迟私有选项，另加可选
+/// `profile=high444p`（`h264_mf` 不接受显式 profile）。须与 `caps.rs`
+/// 探测选项 `options_444` 保持一致（两处同步维护）。
+fn codec_options_444(codec_name: &str, with_profile: bool) -> Vec<(&'static str, &'static str)> {
+    let mut opts = codec_options(codec_name);
+    if with_profile && codec_name != "h264_mf" {
+        opts.push(("profile", "high444p"));
+    }
+    opts
 }
 
 /// 探测用测试图案帧（与编码分辨率同尺寸的灰阶渐变 + 色块）。

@@ -189,6 +189,7 @@ fn main() -> anyhow::Result<()> {
         fps: args.fps,
         bitrate_kbps: args.bitrate_kbps,
         prefer_hw: !args.force_sw,
+        pixel_format: rd_encode::PixelFormat::default(),
     };
 
     let t0 = Instant::now();

@@ -28,7 +28,7 @@ use openh264_sys2::{
 };
 
 use crate::frame::{even_geometry, RawFrame, YuvPlanes};
-use crate::{EncodedAu, EncoderConfig, EncoderInfo, VideoEncoder};
+use crate::{EncodedAu, EncoderConfig, EncoderInfo, PixelFormat, VideoEncoder};
 
 /// OpenH264 兜底编码器的固定标识。
 pub const INFO: EncoderInfo = EncoderInfo {
@@ -49,7 +49,14 @@ pub struct OpenH264Encoder {
 
 impl OpenH264Encoder {
     /// 创建 OpenH264 编码器（编译期静态链接，创建即验证可用性）。
+    ///
+    /// # Errors
+    /// 请求 [`PixelFormat::Yuv444`] 时明确报错——OpenH264 仅支持 4:2:0，
+    /// 不做静默降级（回退决策归调用方）。
     pub fn new(cfg: &EncoderConfig) -> Result<Self> {
+        if cfg.pixel_format == PixelFormat::Yuv444 {
+            bail!("OpenH264 不支持 4:4:4（仅 4:2:0）；请改用支持 444 的硬编或回退 Yuv420");
+        }
         let (enc_w, enc_h, _) = even_geometry(cfg.width, cfg.height);
         let config = Oh264Config::new()
             .usage_type(UsageType::CameraVideoRealTime)

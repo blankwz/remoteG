@@ -194,6 +194,7 @@ fn encode_loop(
                     fps,
                     bitrate_kbps: kbps,
                     prefer_hw: true,
+                    pixel_format: rd_encode::PixelFormat::default(),
                 };
                 match create_best(&cfg) {
                     Ok(enc) => {

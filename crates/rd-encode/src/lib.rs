@@ -7,7 +7,14 @@
 //! ```no_run
 //! use rd_encode::{EncoderConfig, VideoEncoder, create_best, frame::RawFrame};
 //!
-//! let cfg = EncoderConfig { width: 1920, height: 1080, fps: 60, bitrate_kbps: 4000, prefer_hw: true };
+//! let cfg = EncoderConfig {
+//!     width: 1920,
+//!     height: 1080,
+//!     fps: 60,
+//!     bitrate_kbps: 4000,
+//!     prefer_hw: true,
+//!     pixel_format: rd_encode::PixelFormat::default(),
+//! };
 //! let mut enc = create_best(&cfg).expect("至少 OpenH264 可用");
 //! let frame = RawFrame::new(1920, 1080, 0);
 //! if let Some(au) = enc.encode(&frame, false).expect("编码成功") {
@@ -28,6 +35,20 @@ use anyhow::Result;
 
 use crate::frame::RawFrame;
 
+/// 编码输入色度采样格式（D-011 T-027 遗留：4:4:4 创建接口）。
+///
+/// [`PixelFormat::Yuv444`] 仅部分硬编支持（由 `caps::probe_encode_caps`
+/// 预先探测）；`create_best` 在 444 请求下只探测 444 硬编候选且**不做
+/// 静默回退**——是否降级 420 由调用方（协商层）决策。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelFormat {
+    /// 4:2:0（NV12/I420）。全平台可用，默认。
+    #[default]
+    Yuv420,
+    /// 4:4:4（yuv444p，H.264 High 4:4:4 Predictive）。仅限支持的硬编。
+    Yuv444,
+}
+
 /// 编码器创建参数。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EncoderConfig {
@@ -41,6 +62,8 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     /// true：优先探测硬件编码器；false：直接使用 OpenH264。
     pub prefer_hw: bool,
+    /// 编码输入色度采样（默认 4:2:0）。
+    pub pixel_format: PixelFormat,
 }
 
 /// 一个访问单元（H.264 Annex-B）。
@@ -98,16 +121,30 @@ pub trait VideoEncoder: Send {
 
 /// 按策略创建最优编码器：
 ///
-/// 1. `prefer_hw` 且启用 `ffmpeg` feature：按
-///    `h264_nvenc` → `h264_qsv` → `h264_amf` → `h264_mf` 探测
-///    （每个候选实际编码 1 帧验证），首个成功者胜出；
-/// 2. 否则/全部失败：OpenH264 软编兜底（静态编译，始终可用）。
+/// - [`PixelFormat::Yuv420`]（默认）：
+///   1. `prefer_hw` 且启用 `ffmpeg` feature：按
+///      `h264_nvenc` → `h264_qsv` → `h264_amf` → `h264_mf` 探测
+///      （每个候选实际编码 1 帧验证），首个成功者胜出；
+///   2. 否则/全部失败：OpenH264 软编兜底（静态编译，始终可用）。
+/// - [`PixelFormat::Yuv444`]：只探测 444 硬编候选（同样顺序，以
+///   `yuv444p` 输入实际编码 1 帧验证），全部失败即返回明确错误——
+///   **不静默回退 420**（回退决策归调用方，OpenH264 不支持 4:4:4）。
 ///
 /// 编码器选择会通过 `tracing` 记录 [`EncoderInfo`]。
 ///
 /// # Errors
-/// 仅当 OpenH264 也初始化失败时返回错误（理论上不应发生）。
+/// 420 路径：仅当 OpenH264 也初始化失败时返回错误（理论上不应发生）。
+/// 444 路径：所有硬编候选不支持 4:4:4、`prefer_hw=false` 或构建未启用
+/// ffmpeg 硬编时返回明确错误。
 pub fn create_best(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
+    match cfg.pixel_format {
+        PixelFormat::Yuv444 => create_best_444(cfg),
+        PixelFormat::Yuv420 => create_best_420(cfg),
+    }
+}
+
+/// 4:2:0 创建路径（硬编探测失败回退 OpenH264）。
+fn create_best_420(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
     if cfg.prefer_hw {
         #[cfg(all(windows, feature = "ffmpeg"))]
         match h264_ffmpeg::FfmpegEncoder::create(cfg, None) {
@@ -127,4 +164,32 @@ pub fn create_best(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
     let info = enc.info();
     tracing::info!(name = info.name, hardware = info.hardware, "选用视频编码器");
     Ok(Box::new(enc))
+}
+
+/// 4:4:4 创建路径：只探测支持 444 的硬编候选，全败明确报错，不回退
+/// OpenH264（其仅支持 4:2:0）。回退 420 与否由调用方决策。
+fn create_best_444(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
+    anyhow::ensure!(
+        cfg.prefer_hw,
+        "Yuv444 需要硬件编码器（prefer_hw=false 恒选 OpenH264，其不支持 4:4:4）"
+    );
+    #[cfg(all(windows, feature = "ffmpeg"))]
+    match h264_ffmpeg::FfmpegEncoder::create(cfg, None) {
+        Ok(enc) => {
+            let info = enc.info();
+            tracing::info!(
+                name = info.name,
+                hardware = info.hardware,
+                "选用 4:4:4 硬件编码器"
+            );
+            Ok(Box::new(enc))
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "4:4:4 硬编探测全部失败（OpenH264 不支持 4:4:4，不做静默回退，请由调用方决策降级 420）: {e:#}"
+        )),
+    }
+    #[cfg(not(all(windows, feature = "ffmpeg")))]
+    Err(anyhow::anyhow!(
+        "当前构建未启用 ffmpeg 硬编（非 Windows 或未启用 feature），无法创建 4:4:4 编码器（OpenH264 不支持 4:4:4）"
+    ))
 }

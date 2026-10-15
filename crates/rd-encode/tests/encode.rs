@@ -2,7 +2,7 @@
 
 use rd_encode::frame::RawFrame;
 use rd_encode::h264_openh264::OpenH264Encoder;
-use rd_encode::{EncoderConfig, VideoEncoder};
+use rd_encode::{EncoderConfig, PixelFormat, VideoEncoder};
 
 /// 生成合成 BGRA 测试帧：渐变背景 + 移动色块（保证相邻帧有差异）。
 fn make_frame(width: u32, height: u32, index: u64) -> RawFrame {
@@ -35,7 +35,41 @@ fn test_config(width: u32, height: u32) -> EncoderConfig {
         fps: 30,
         bitrate_kbps: 2_000,
         prefer_hw: false,
+        pixel_format: PixelFormat::Yuv420,
     }
+}
+
+/// OpenH264 在 Yuv444 请求下必须明确报错（不支持，不静默降级）。
+#[test]
+fn openh264_rejects_yuv444() {
+    let cfg = EncoderConfig {
+        pixel_format: PixelFormat::Yuv444,
+        ..test_config(320, 240)
+    };
+    let err = OpenH264Encoder::new(&cfg)
+        .err()
+        .expect("OpenH264 必须拒绝 4:4:4");
+    assert!(
+        err.to_string().contains("4:4:4"),
+        "错误信息应明确指出 4:4:4: {err:#}"
+    );
+}
+
+/// `create_best` 在 Yuv444 + `prefer_hw=false` 时明确报错（444 不允许
+/// 落到 OpenH264；硬编探测路径是否可用与本机硬件相关，不做断言）。
+#[test]
+fn create_best_yuv444_without_hw_is_error() {
+    let cfg = EncoderConfig {
+        pixel_format: PixelFormat::Yuv444,
+        ..test_config(320, 240)
+    };
+    let err = rd_encode::create_best(&cfg)
+        .err()
+        .expect("444 + prefer_hw=false 必须报错");
+    assert!(
+        err.to_string().contains("4:4:4"),
+        "错误信息应明确指出 4:4:4: {err:#}"
+    );
 }
 
 /// OpenH264 编码 30 帧：首帧 keyframe、输出 Annex-B（`00 00 00 01` 开头）。
@@ -149,4 +183,40 @@ fn create_best_falls_back_to_openh264() {
         .expect("编码失败")
         .expect("应有输出");
     assert!(au.keyframe);
+}
+
+/// 本机 4:4:4 硬编创建实测（信息性探针，无断言）。
+///
+/// 本机（仅 h264_mf 且不支持 444 输入、nvenc 驱动旧）预期打印 Err；
+/// 驱动升级 / 换 444 硬编后运行
+/// `cargo test -p rd-encode --test encode create_best_yuv444_local_probe
+/// -- --ignored --nocapture` 观察端到端编码结果。
+#[test]
+#[ignore = "本机硬编探测（结果信息性）"]
+fn create_best_yuv444_local_probe() {
+    let cfg = EncoderConfig {
+        prefer_hw: true,
+        pixel_format: PixelFormat::Yuv444,
+        ..test_config(320, 240)
+    };
+    match rd_encode::create_best(&cfg) {
+        Ok(mut enc) => {
+            let info = enc.info();
+            println!(
+                "create_best(Yuv444) 成功: name={} hardware={}",
+                info.name, info.hardware
+            );
+            let au = enc.encode(&make_frame(320, 240, 0), false);
+            match au {
+                Ok(Some(au)) => println!(
+                    "首帧编码成功: keyframe={} bytes={}",
+                    au.keyframe,
+                    au.data.len()
+                ),
+                Ok(None) => println!("首帧编码无输出（delay 型编码器属正常）"),
+                Err(e) => println!("首帧编码失败: {e:#}"),
+            }
+        }
+        Err(e) => println!("create_best(Yuv444) 失败: {e:#}"),
+    }
 }

@@ -63,6 +63,7 @@ async fn synthetic_loopback() -> Result<()> {
             fps: 60,
             bitrate_kbps: 8000,
             prefer_hw: false,
+            pixel_format: rd_encode::PixelFormat::default(),
         };
         let mut enc = create_best(&cfg)?;
         let mut seq = 0u32;

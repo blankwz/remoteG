@@ -60,7 +60,7 @@ use rd_encode::frame::RawFrame;
 use rd_encode::rate::RateController;
 use rd_encode::rate::RateInput;
 use rd_encode::tiles::{TileOut, TileRefiner};
-use rd_encode::{create_best, EncodedAu, EncoderConfig, VideoEncoder};
+use rd_encode::{create_best, EncodedAu, EncoderConfig, PixelFormat, VideoEncoder};
 use rd_proto::v0::envelope::Msg;
 use rd_proto::v0::window_event::Kind;
 use rd_proto::v0::{
@@ -585,6 +585,28 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         }
     };
 
+    // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
+    // proto 的 repeated Codec 在 prost 生成物中为 Vec<i32>，需转回枚举。
+    let decode_caps: Vec<Codec> = ctx
+        .hello
+        .decode_caps
+        .iter()
+        .filter_map(|&c| Codec::try_from(c).ok())
+        .collect();
+    // D-011 T-027 遗留收尾：444 不再无条件回退——ack 前以 Yuv444 实际创建
+    // 验证，失败才降级 420（resolve_codec，OpenWindowAck 不得谎报解码格式）。
+    // 协商在管线搭建前完成：编码线程与 ack 使用同一次落地结果。
+    let codec = resolve_codec(
+        &attrs,
+        effective_codec(negotiate(
+            &probe_encode_caps(),
+            &decode_caps,
+            ctx.hello.supports_444,
+        )),
+        fps,
+        kbps,
+    );
+
     let area = u64::from(attrs.rect.w).saturating_mul(u64::from(attrs.rect.h));
     let spec = PipeSpec {
         hwnd: attrs.hwnd,
@@ -595,6 +617,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         saved,
         is_root: true,
         area,
+        codec,
         owner: ctx_key(ctx),
         session_bytes: ensure_services(ctx),
     };
@@ -604,20 +627,6 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
             return send_error(ctx, req_id, ERR_NOT_CAPTURABLE, format!("{err:#}")).await;
         }
     };
-
-    // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
-    // proto 的 repeated Codec 在 prost 生成物中为 Vec<i32>，需转回枚举。
-    let decode_caps: Vec<Codec> = ctx
-        .hello
-        .decode_caps
-        .iter()
-        .filter_map(|&c| Codec::try_from(c).ok())
-        .collect();
-    let codec = effective_codec(negotiate(
-        &probe_encode_caps(),
-        &decode_caps,
-        ctx.hello.supports_444,
-    ));
 
     ctx.send(
         Msg::OpenWindowAck(OpenWindowAck {
@@ -669,6 +678,8 @@ struct PipeSpec {
     is_root: bool,
     /// 客户区面积（码率按面积比例分配的权重）。
     area: u64,
+    /// 落地的编解码器（协商 + 444 创建验证后的结果；OpenWindowAck 同源）。
+    codec: Codec,
     /// 打开者连接标识。
     owner: usize,
     /// 所属会话的发送字节累计（StatsReport 用）。
@@ -749,6 +760,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             fps: spec.fps,
             kbps: spec.kbps,
             refine: spec.refine,
+            pixel_format: pixel_format_of(spec.codec),
             errors: Arc::clone(&errors),
             cancel: cancel.clone(),
             target_kbps: Arc::clone(&target_kbps),
@@ -808,6 +820,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             owner: spec.owner,
             is_root: spec.is_root,
             area: spec.area,
+            codec: spec.codec,
             backlog,
             frames,
             target_kbps,
@@ -980,6 +993,9 @@ struct PipeHandle {
     is_root: bool,
     /// 客户区面积（码率按面积比例分配的权重）。
     area: u64,
+    /// 落地的编解码器（组成员管线沿用根窗口的协商结果，保证同一窗口组
+    /// 的解码格式一致）。
+    codec: Codec,
     /// 发送在途字节（发送任务入队 +N、写完 -N；码率自适应的积压信号）。
     backlog: Arc<AtomicU64>,
     /// 累计产出 AU 帧数（StatsReport.fps 的数据源）。
@@ -1022,6 +1038,8 @@ struct PipeRun {
     fps: u32,
     kbps: u32,
     refine: bool,
+    /// 编码输入色度采样（协商编解码器落地，420/444）。
+    pixel_format: PixelFormat,
     errors: Arc<PipeError>,
     cancel: CancellationToken,
     /// 会话分配的目标码率（kbps）；变化时经 `set_bitrate` 落到编码器。
@@ -1072,13 +1090,14 @@ fn encode_loop(run: PipeRun) {
         fps,
         kbps,
         refine,
+        pixel_format,
         errors,
         cancel,
         target_kbps,
         fps_cap,
         frames,
     } = run;
-    let mut pipe = FramePipeline::new(fps, kbps, refine, true);
+    let mut pipe = FramePipeline::new(fps, kbps, refine, true, pixel_format);
     let mut applied_kbps = kbps;
     let mut frame_seq: u32 = 0;
     // 最近一帧（瓦片 tick 需要；refine 关闭时不保留，省一帧内存）
@@ -1218,6 +1237,8 @@ struct FramePipeline {
     kbps: u32,
     refine: bool,
     prefer_hw: bool,
+    /// 编码输入色度采样（协商编解码器落地；444 创建失败已在 ack 前回退）。
+    pixel_format: PixelFormat,
     encoder: Option<Box<dyn VideoEncoder>>,
     refiner: Option<TileRefiner>,
     last_size: Option<(u32, u32)>,
@@ -1225,12 +1246,13 @@ struct FramePipeline {
 }
 
 impl FramePipeline {
-    fn new(fps: u32, kbps: u32, refine: bool, prefer_hw: bool) -> Self {
+    fn new(fps: u32, kbps: u32, refine: bool, prefer_hw: bool, pixel_format: PixelFormat) -> Self {
         Self {
             fps,
             kbps,
             refine,
             prefer_hw,
+            pixel_format,
             encoder: None,
             refiner: None,
             last_size: None,
@@ -1285,6 +1307,7 @@ impl FramePipeline {
                         fps: self.fps,
                         bitrate_kbps: self.kbps,
                         prefer_hw: self.prefer_hw,
+                        pixel_format: self.pixel_format,
                     };
                     let enc = create_best(&cfg).context("创建视频编码器失败")?;
                     self.encoder = Some(enc);
@@ -1612,6 +1635,14 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
         .or_default()
         .insert(child);
     let cfg = &ctx.state.config;
+    // 子管线沿用根窗口的协商结果（同一窗口组解码格式必须一致）；根已退出
+    // （竞态）时按 420 降级，管线随会话清理，无额外代价。
+    let codec = pipes()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .get(&root_id)
+        .map(|h| h.codec)
+        .unwrap_or(Codec::H264420);
     let spec = PipeSpec {
         hwnd: m.hwnd,
         fps: cfg.max_fps.max(1),
@@ -1621,6 +1652,7 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
         saved: None,
         is_root: false,
         area: u64::from(m.w).saturating_mul(u64::from(m.h)),
+        codec,
         owner: ctx_key(ctx),
         session_bytes: ensure_services(ctx),
     };
@@ -1775,21 +1807,54 @@ fn allocate_kbps(total: u32, areas: &[u64]) -> Vec<u32> {
         .collect()
 }
 
-/// 协商结果的"实际可用"编解码器（T-027 步骤 4）。
+/// 协商结果透传（T-027 步骤 4；D-011 收尾：rd-encode 444 创建接口已就绪）。
 ///
-/// [`rd_encode::caps::negotiate`] 依据双方能力选出目标；当前 rd-encode 的
-/// 编码器创建路径（`create_best`/`FfmpegEncoder`，NV12 输入、字段私有）尚
-/// 无 4:4:4 创建接口——该层不在本任务可写范围（见上报事项）。此时必须
-/// 诚实回退 `H264_420`：`OpenWindowAck.codec` 告知控制端以何种格式解码，
-/// 谎报 444 会导致 WebCodecs 以错误配置建解码器而失败。rd-encode 暴露
-/// 444 创建接口后改为透传协商结果即可。
+/// 4:4:4 的实际可用性不再在此无条件回退：`resolve_codec` 在 ack 前以
+/// Yuv444 配置实际创建一次编码器验证，失败才回退 `H264_420` 并 warn。
+/// 本函数保留为纯透传 + 协商日志（单测锚定"协商即生效"）。
 fn effective_codec(negotiated: Codec) -> Codec {
-    match negotiated {
-        Codec::H264444 => {
-            tracing::info!("协商结果 H264_444：rd-encode 暂无 4:4:4 编码创建路径，回退 H264_420");
+    tracing::info!(?negotiated, "编解码协商结果生效");
+    negotiated
+}
+
+/// 把协商结果落成实际可用的编解码器（D-011 T-027 遗留收尾）。
+///
+/// 协商出 `H264_444` 时以 Yuv444 配置实际创建一次编码器验证
+/// （`create_best(444)` 只探测 444 硬编且不静默回退）；失败则诚实回退
+/// `H264_420` 并 warn——`OpenWindowAck.codec` 告知控制端以何种格式解码，
+/// 谎报 444 会导致 WebCodecs 以错误配置建解码器而失败。探测出的编码器
+/// 用后即弃（正式编码器由管线在首帧按同一 pixel_format 惰性创建）。
+fn resolve_codec(attrs: &WindowAttrs, negotiated: Codec, fps: u32, kbps: u32) -> Codec {
+    if negotiated != Codec::H264444 {
+        return negotiated;
+    }
+    let cfg = EncoderConfig {
+        width: attrs.rect.w.max(2),
+        height: attrs.rect.h.max(2),
+        fps: fps.max(1),
+        bitrate_kbps: kbps.max(1),
+        prefer_hw: true,
+        pixel_format: PixelFormat::Yuv444,
+    };
+    match create_best(&cfg) {
+        Ok(probe) => {
+            let info = probe.info();
+            tracing::info!(name = info.name, "4:4:4 编码器创建验证通过");
+            drop(probe);
+            Codec::H264444
+        }
+        Err(err) => {
+            tracing::warn!("4:4:4 编码器创建失败，回退 H264_420: {err:#}");
             Codec::H264420
         }
-        other => other,
+    }
+}
+
+/// 协议编解码器 → 编码输入色度采样。
+fn pixel_format_of(codec: Codec) -> PixelFormat {
+    match codec {
+        Codec::H264444 => PixelFormat::Yuv444,
+        _ => PixelFormat::Yuv420,
     }
 }
 
@@ -1920,7 +1985,7 @@ mod tests {
 
     /// 软编管线（测试不探测硬编，稳定且快）。
     fn pipe() -> FramePipeline {
-        FramePipeline::new(30, 4000, true, false)
+        FramePipeline::new(30, 4000, true, false, PixelFormat::Yuv420)
     }
 
     #[test]
@@ -1977,7 +2042,7 @@ mod tests {
 
     #[test]
     fn refine_disabled_skips_tiles() {
-        let mut p = FramePipeline::new(30, 4000, false, false);
+        let mut p = FramePipeline::new(30, 4000, false, false, PixelFormat::Yuv420);
         let t0 = Instant::now();
         let f = frame(320, 240, 10, 0);
         p.process(&f, None, t0).expect("处理成功");
@@ -2030,7 +2095,7 @@ mod tests {
 
     #[test]
     fn retune_pipeline_noop_on_same_value() {
-        let mut p = FramePipeline::new(30, 4000, false, false);
+        let mut p = FramePipeline::new(30, 4000, false, false, PixelFormat::Yuv420);
         let target = AtomicU32::new(4000);
         assert_eq!(
             retune_pipeline(&mut p, &target, 4000),
@@ -2185,10 +2250,18 @@ mod tests {
     // ----- 编解码协商回退（T-027 步骤 4） -----
 
     #[test]
-    fn effective_codec_falls_back_to_420_when_444_unavailable() {
-        // 当前 rd-encode 无 4:4:4 创建路径：协商出 444 也必须诚实回退
-        assert_eq!(effective_codec(Codec::H264444), Codec::H264420);
+    fn effective_codec_passes_negotiated_result_through() {
+        // rd-encode 444 创建接口就绪后协商结果真实透传；实际可用性由
+        // resolve_codec 在 ack 前以 create_best(Yuv444) 验证（失败回退
+        // 420 并 warn），此处锚定"协商即生效"。
+        assert_eq!(effective_codec(Codec::H264444), Codec::H264444);
         assert_eq!(effective_codec(Codec::H264420), Codec::H264420);
+    }
+
+    #[test]
+    fn pixel_format_of_maps_codec() {
+        assert_eq!(pixel_format_of(Codec::H264444), PixelFormat::Yuv444);
+        assert_eq!(pixel_format_of(Codec::H264420), PixelFormat::Yuv420);
     }
 
     #[test]
