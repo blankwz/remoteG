@@ -5,9 +5,9 @@
 ## 当前状态
 - **M0**：完成（D-010 关卡结论：Tauri 2 + WebCodecs 维持；场景 D iPhone probe 已测，场景 A/B/C 延迟数据待用户补测）。
 - **M1**：27 张任务卡全部执行完毕（含插入的 FIX-1 修复）。自动化验收全绿：
-  - `cargo test --workspace`：35 组全 ok（约 150 用例）
+  - `cargo test --workspace`：36 组全 ok（约 180 用例）
   - `cargo clippy --workspace --all-targets -- -D warnings`：零警告
-  - `pnpm test`（控制端）：106 用例全过 + tsc 干净
+  - `pnpm test`（控制端）：114 用例全过 + tsc 干净
   - `cargo test -p rd-agent --test e2e -- --test-threads=1`：8/8（14~18s，含瓦片逐像素断言）
 - **T-026 验收**：待用户执行 `09_test/兼容性.md` 手测矩阵 + 补测场景 A/B/C 延迟 + 1 小时稳定性，然后确认 M1 完成。
 
@@ -19,10 +19,10 @@
 ## 未决事项（M1 收尾/移交 M2）
 0. **待用户手测**（09_test/兼容性.md 指南）：兼容性矩阵、场景 A/B/C 延迟、1 小时稳定性、首连出图与断线重连场景。
 1. 用户执行兼容性手测矩阵 + 场景 A/B/C 延迟（RUN_LOG 回填后关闭 P95 指标）。
-2. 协议 v0.1 建议：TerminalExit/TermClose、CloseWindow/SetViewport 回包语义、TerminalExit code。
-3. rd-encode 444 创建接口（T-027 遗留，一行透传）；NVIDIA 驱动 ≥610.00 后重跑 probe 验证 nvenc/444。
-4. T-002 `CapturedFrame.resized` 信号失效（管线已用尺寸差量绕过）；零拷贝送硬编优化。
-5. e2e 套件间歇性（10 轮 3 次单例失败：t06 前台门控/t07 清理裕量）——加固小任务待排。
+2. 协议 v0.1 建议：TerminalExit/TermClose、CloseWindow/SetViewport 回包语义（已固化至 05_api §5）。
+3. NVIDIA 驱动 ≥610.00 后重跑 444 探针验证 nvenc/444 端到端（`cargo test -p rd-encode --test encode create_best_yuv444_local_probe -- --ignored --nocapture`；创建接口与前端解码配置已就绪）。
+4. 零拷贝送硬编优化（当前 staging 读回 ~1.3ms/帧已达标）。
+5. e2e 间歇性已加固（wait_for 轮询/close 帧竞态修复，3 轮稳定）；残余单例失败如再现实测定位。
 6. macOS：cargo check 待 CI 首跑确认；keyring 身份存储待真机验证。
 7. CI 推送变绿验证：仓库尚无远端（用户提供 GitHub 私有仓库后 push）。
 8. 剪贴板同步（M1 末尾可选项）——用户未决定，默认不做。
