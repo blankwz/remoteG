@@ -1,6 +1,6 @@
 # PROJECT_STATE
 
-- 更新：2026-10-15（M1 代码完成，T-026 验收关卡）
+- 更新：2026-10-16（M1 代码完成+联调修复轮，T-026 验收关卡）
 
 ## 当前状态
 - **M0**：完成（D-010 关卡结论：Tauri 2 + WebCodecs 维持；场景 D iPhone probe 已测，场景 A/B/C 延迟数据待用户补测）。
@@ -17,6 +17,7 @@
 - 回滚：git 按 tag 回退；Agent 便携 zip 直接替换
 
 ## 未决事项（M1 收尾/移交 M2）
+0. **待用户手测**（09_test/兼容性.md 指南）：兼容性矩阵、场景 A/B/C 延迟、1 小时稳定性、首连出图与断线重连场景。
 1. 用户执行兼容性手测矩阵 + 场景 A/B/C 延迟（RUN_LOG 回填后关闭 P95 指标）。
 2. 协议 v0.1 建议：TerminalExit/TermClose、CloseWindow/SetViewport 回包语义、TerminalExit code。
 3. rd-encode 444 创建接口（T-027 遗留，一行透传）；NVIDIA 驱动 ≥610.00 后重跑 probe 验证 nvenc/444。
