@@ -75,7 +75,9 @@ pub struct CapturedFrame {
     pub data: Vec<u8>,
     /// 相对客户区的脏区；系统不支持 WGC 脏区（Win11 24H2 前）时为 `None`（由 T-010 块比对兜底）。
     pub dirty: Option<Vec<Rect>>,
-    /// 与上一帧相比捕获纹理尺寸发生了变化（首帧为 false）。
+    /// 与上一投递帧相比窗口内容尺寸（WGC `ContentSize`，含非客户区边框）发生了
+    /// 变化（首帧为 false）。信号为粘性：通道满丢旧帧时，未送达的 `resized`
+    /// 会转移到后续帧，消费端不会因背压而错过。
     pub resized: bool,
     pub captured_at: Instant,
     /// GPU→CPU 读回耗时（CopyResource + Map + 行拷贝），供 DoD「60fps 单帧读回 <8ms」验证。
@@ -154,7 +156,7 @@ impl WindowCapture {
                 staging: None,
                 staging_size: (0, 0),
                 pool_size: item_size,
-                prev_size: None,
+                delivery: DeliveryState::default(),
                 last_sent: None,
                 dirty_supported: None,
             }),
@@ -217,10 +219,23 @@ struct State {
     staging: Option<ID3D11Texture2D>,
     staging_size: (u32, u32),
     pool_size: SizeInt32,
-    prev_size: Option<(u32, u32)>,
+    delivery: DeliveryState,
     last_sent: Option<Instant>,
     /// `None` = 尚未探测；`Some(true/false)` = 系统是否支持 frame.DirtyRegions（Win11 24H2+）。
     dirty_supported: Option<bool>,
+}
+
+/// `resized` 信号的判定与背压状态。
+///
+/// - `prev_content`：上一**投递成功**帧的 `ContentSize`（基线）。帧池纹理尺寸
+///   滞后 `ContentSize` 一帧（Recreate 后才追平）且受系统对齐影响，不能作为
+///   基线——基线必须用内容尺寸，resize 瞬间即置位、无过渡误报。
+/// - `pending_resize`：已有尺寸变化信号进入通道但尚未确定被消费端取走。通道
+///   满丢旧帧时被丢帧的信号转移到顶替帧，避免 T-006 实证过的「信号被挤掉」。
+#[derive(Default)]
+struct DeliveryState {
+    prev_content: Option<(u32, u32)>,
+    pending_resize: bool,
 }
 
 fn lock_state(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -393,34 +408,76 @@ fn process_frame(
     unsafe { shared.context.Unmap(&staging, 0) };
     let readback = t0.elapsed();
 
-    let resized = {
-        let mut st = lock_state(&shared.state);
-        let r = st
-            .prev_size
-            .map(|p| p != (desc.Width, desc.Height))
-            .unwrap_or(false);
-        st.prev_size = Some((desc.Width, desc.Height));
-        r
-    };
     let dirty = extract_dirty(shared, frame, rect);
 
-    let out = CapturedFrame {
-        width: rect.w,
-        height: rect.h,
-        stride: rect.w * 4,
-        data,
-        dirty,
-        resized,
-        captured_at: now,
-        readback,
-    };
-    match shared.tx.try_send(out) {
-        Ok(()) => true,
-        Err(TrySendError::Full(out)) => {
-            // 满则丢最旧一帧，保留最新。
-            tracing::debug!("channel 满，丢旧帧");
-            let _ = shared.rx.try_recv();
-            matches!(shared.tx.try_send(out), Ok(()))
+    let mut st = lock_state(&shared.state);
+    deliver(
+        &mut st.delivery,
+        &shared.tx,
+        &shared.rx,
+        (content.Width.max(0) as u32, content.Height.max(0) as u32),
+        CapturedFrame {
+            width: rect.w,
+            height: rect.h,
+            stride: rect.w * 4,
+            data,
+            dirty,
+            resized: false,
+            captured_at: now,
+            readback,
+        },
+    )
+}
+
+/// 投递一帧并维护 `resized` 信号基线（纯逻辑，`wgc.rs` 内单测覆盖）。
+///
+/// 判定：本帧内容尺寸 != 基线（上一投递帧），或存在挂起信号。投递成功后更新
+/// 基线并清除挂起；通道满丢最旧一帧时，其未送达的 `resized` 转移到本帧。
+/// 返回是否成功投递（决定是否刷新 `last_sent` 节流时钟）。
+fn deliver(
+    st: &mut DeliveryState,
+    tx: &Sender<CapturedFrame>,
+    rx: &Receiver<CapturedFrame>,
+    content: (u32, u32),
+    mut frame: CapturedFrame,
+) -> bool {
+    let size_changed = st.prev_content.map(|p| p != content).unwrap_or(false);
+    frame.resized = size_changed || st.pending_resize;
+    if frame.resized {
+        tracing::debug!(
+            content = ?content,
+            prev = ?st.prev_content,
+            size_changed,
+            pending = st.pending_resize,
+            "resized 置位"
+        );
+    }
+
+    match tx.try_send(frame) {
+        Ok(()) => {
+            st.prev_content = Some(content);
+            st.pending_resize = false;
+            true
+        }
+        Err(TrySendError::Full(mut frame)) => {
+            // 通道满：丢最旧一帧；它尚未被消费端取走，其 resized 信号转移到本帧。
+            tracing::debug!("channel 满，丢旧帧（信号转移）");
+            if let Ok(dropped) = rx.try_recv() {
+                frame.resized |= dropped.resized;
+            }
+            match tx.try_send(frame) {
+                Ok(()) => {
+                    st.prev_content = Some(content);
+                    st.pending_resize = false;
+                    true
+                }
+                // 理论不可达（刚腾出一格）；防御性挂起信号，等通道恢复后随帧送达。
+                Err(TrySendError::Full(_)) => {
+                    st.pending_resize = true;
+                    false
+                }
+                Err(TrySendError::Disconnected(_)) => false,
+            }
         }
         Err(TrySendError::Disconnected(_)) => false,
     }
@@ -587,4 +644,71 @@ fn create_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
         factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
             .context("获取 IGraphicsCaptureItemInterop 工厂失败")?;
     unsafe { interop.CreateForWindow(hwnd) }.context("CreateForWindow 失败")
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    fn frame(resized: bool) -> CapturedFrame {
+        CapturedFrame {
+            width: 10,
+            height: 10,
+            stride: 40,
+            data: Vec::new(),
+            dirty: None,
+            resized,
+            captured_at: Instant::now(),
+            readback: Duration::ZERO,
+        }
+    }
+
+    /// 正常速率：尺寸变化帧恰好置位一次，恢复旧尺寸再次置位。
+    #[test]
+    fn resize_sets_flag_once_each_direction() {
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        let mut st = DeliveryState::default();
+
+        assert!(deliver(&mut st, &tx, &rx, (640, 480), frame(false)));
+        assert!(!rx.try_recv().unwrap().resized, "首帧为 false");
+
+        assert!(deliver(&mut st, &tx, &rx, (884, 561), frame(false)));
+        assert!(rx.try_recv().unwrap().resized, "放大置位");
+
+        assert!(deliver(&mut st, &tx, &rx, (884, 561), frame(false)));
+        assert!(!rx.try_recv().unwrap().resized, "同尺寸不重复置位");
+
+        assert!(deliver(&mut st, &tx, &rx, (640, 480), frame(false)));
+        assert!(rx.try_recv().unwrap().resized, "缩回再次置位");
+    }
+
+    /// T-006 背压场景：通道恒满、消费端慢取——resized 信号必须转移到存活帧，
+    /// 不被「丢最旧」策略挤掉。
+    #[test]
+    fn flag_survives_backpressure_drop() {
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        let mut st = DeliveryState::default();
+        let rx = rx.clone();
+
+        // 通道塞满两帧同尺寸（模拟 resize 前的稳定流，消费端未取）。
+        assert!(deliver(&mut st, &tx, &rx, (640, 480), frame(false)));
+        assert!(deliver(&mut st, &tx, &rx, (640, 480), frame(false)));
+
+        // resize 后连续投递 4 帧，期间消费端不取（编码慢）。
+        for _ in 0..4 {
+            assert!(deliver(&mut st, &tx, &rx, (624, 441), frame(false)));
+        }
+
+        // drain：必须存在 resized=true 的帧，且只投出信号不重复堆积。
+        let flags: Vec<bool> = rx.try_iter().map(|f| f.resized).collect();
+        assert!(
+            flags.iter().any(|&r| r),
+            "背压下 resized 信号被丢帧策略挤掉: {flags:?}"
+        );
+        assert_eq!(
+            flags.iter().filter(|&&r| r).count(),
+            1,
+            "信号恰好一份: {flags:?}"
+        );
+    }
 }
