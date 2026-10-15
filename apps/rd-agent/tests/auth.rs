@@ -62,10 +62,23 @@ fn spawn_agent(dir: &std::path::Path) -> Result<(AgentProc, SocketAddr)> {
     let stdout = child.stdout.take().context("未捕获 rd-agent stdout")?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        let mut line = String::new();
         let mut reader = BufReader::new(stdout);
-        let _ = reader.read_line(&mut line);
-        let _ = tx.send(line.trim().to_string());
+        let mut line = String::new();
+        // stdout 现在带彩色日志行:逐行读直到机器可读的 RD_LISTEN= 前缀
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if let Some(addr) = trimmed.strip_prefix("RD_LISTEN=") {
+                        let _ = tx.send(addr.to_string());
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
     });
     let line = rx
         .recv_timeout(Duration::from_secs(30))

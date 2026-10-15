@@ -223,9 +223,14 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
     termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // unicode11 宽字符（中文/emoji 宽度正确）
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = "unicode11";
+    // unicode11 宽字符（中文/emoji 宽度正确）；设置失败（addon 版本不匹配等）
+    // 仅回退 xterm 内置 unicode 版本，不阻塞终端创建
+    try {
+      term.loadAddon(new Unicode11Addon());
+      term.unicode.activeVersion = "unicode11";
+    } catch (e) {
+      console.warn("unicode11 addon 不可用，使用内置宽度表:", e);
+    }
     try {
       // webgl 渲染失败回退默认 DOM 渲染器（加载失败/上下文丢失均回退）
       const webgl = new WebglAddon();

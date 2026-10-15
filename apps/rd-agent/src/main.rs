@@ -23,6 +23,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tracing_subscriber::prelude::*;
+
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 
@@ -135,8 +137,9 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
     }
 
     if args.print_port {
+        // 机器可读前缀:与彩色日志行区分,解析方按行前缀过滤
         for addr in &bound {
-            println!("{addr}");
+            println!("RD_LISTEN={addr}");
         }
         let _ = std::io::stdout().flush();
     }
@@ -201,9 +204,14 @@ fn init_logging(dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(appender);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(writer)
+    // 双写:滚动文件(托盘"打开日志目录")+ stdout(控制台启动时可实时观察,
+    // 双击 exe 启动时无控制台则该层静默)。RUST_LOG=debug 可看更多细节。
+    let file_layer = tracing_subscriber::fmt::layer().with_writer(writer);
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stdout_layer)
         .init();
     guard
 }

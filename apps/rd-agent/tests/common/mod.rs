@@ -262,11 +262,25 @@ fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
         .context("启动 rd-agent 子进程失败")?;
     let stdout = child.stdout.take().context("未捕获 rd-agent stdout")?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    // 逐行读直到机器可读的 RD_LISTEN= 前缀(stdout 现在同时输出彩色日志行);
+    // 找到后**继续消费**管道,防止 Agent 的 stdout 写因读端关闭而失败。
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send(line.trim().to_string());
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // EOF:Agent 退出
+                Ok(_) => {
+                    if let Some(addr) = line.trim_end().strip_prefix("RD_LISTEN=") {
+                        let _ = tx.send(addr.to_string());
+                        // 不 break:继续排空管道
+                    }
+                }
+                Err(_) => break,
+            }
+        }
     });
     let line = rx
         .recv_timeout(Duration::from_secs(30))
