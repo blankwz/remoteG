@@ -162,6 +162,12 @@ async fn pairing_succeeds_and_survives_reconnect() -> Result<()> {
     let agent_fp = conn.peer_fingerprint();
     let (mut tx, mut rx) = conn.open_control().await?;
     send(&mut tx, &hello_envelope()).await?;
+    // Agent 对未信任连接的 Hello 回 Error{1}(05_api §1),消费后发起配对
+    let rejected = recv(&mut rx).await?;
+    assert!(
+        matches!(rejected.msg, Some(envelope::Msg::Error(ref e)) if e.code == 1),
+        "配对前期望 Error{{code:1}},实际 {rejected:?}"
+    );
 
     let (mut pairing, first_msg) =
         ControllerPairing::start(TEST_PAIR_CODE, &id.fingerprint(), &agent_fp);

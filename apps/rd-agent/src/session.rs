@@ -122,7 +122,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         .await
         .context("接受控制流失败(对端未打开 stream 0)")?;
 
-    let hello = recv_hello(&mut ctl_rx).await?;
+    let (hello, hello_req_id) = recv_hello(&mut ctl_rx).await?;
     let peer_fp = conn.peer_fingerprint();
     let local_fp = state.local_fp;
 
@@ -138,9 +138,19 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
                 tracing::warn!("刷新 last_seen 失败: {err:#}");
             }
         }
-        ctl_tx.send(&hello_ack()).await?;
+        // 沿用 Hello 的 req_id:控制端以 RPC(等响应)方式握手
+        ctl_tx.send(&hello_ack(hello_req_id)).await?;
         true
     } else {
+        // 未信任:先对 Hello 回 Error{1}(05_api §1 未鉴权;控制端以此触发配对流程),
+        // 再进入配对循环等待 PairRequest。不回包会让控制端握手 RPC 空等到超时。
+        ctl_tx
+            .send(&error_env(
+                hello_req_id,
+                ERR_UNAUTHENTICATED,
+                "未鉴权:请先完成配对",
+            ))
+            .await?;
         run_pairing(&state, &mut ctl_tx, &mut ctl_rx, &hello, local_fp, peer_fp).await?
     };
     if !authenticated {
@@ -192,14 +202,15 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     dispatch_result
 }
 
-/// 读取首条消息,必须是 `Hello`(5 s 超时)。
-async fn recv_hello(rx: &mut ControlRx) -> anyhow::Result<Hello> {
+/// 读取首条消息,必须是 `Hello`(5 s 超时);返回消息与信封 `req_id`
+/// (响应需沿用同一 `req_id`,控制端以 RPC 等响应方式握手)。
+async fn recv_hello(rx: &mut ControlRx) -> anyhow::Result<(Hello, u32)> {
     let inner = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
         .await
         .map_err(|_| anyhow::anyhow!("等待 Hello 超时({}s)", HELLO_TIMEOUT.as_secs()))?;
     let env = inner?.ok_or_else(|| anyhow::anyhow!("对端在发送 Hello 前断开"))?;
     match env.msg {
-        Some(envelope::Msg::Hello(hello)) => Ok(hello),
+        Some(envelope::Msg::Hello(hello)) => Ok((hello, env.req_id)),
         Some(other) => anyhow::bail!("首条消息必须是 Hello,实际 {other:?}"),
         None => anyhow::bail!("收到空信封(无消息体)"),
     }
@@ -302,7 +313,8 @@ async fn finish_pairing(
     }
     tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已加入信任列表");
     // HelloAck 尽力发送:对端配对成功后可能立即断开重连
-    let _ = ctl_tx.send(&hello_ack()).await;
+    // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
+    let _ = ctl_tx.send(&hello_ack(0)).await;
     Ok(())
 }
 
@@ -408,9 +420,9 @@ fn spawn_datagram_loop(ctx: &Arc<SessionCtx>) {
 
 /// `HelloAck`:主机名 + 静态编码能力(动态探测由 T-016 经 `state.identity`/
 /// rd-encode 接入后,再改此函数取 `&AgentState`)。
-fn hello_ack() -> Envelope {
+fn hello_ack(req_id: u32) -> Envelope {
     Envelope {
-        req_id: 0,
+        req_id,
         msg: Some(envelope::Msg::HelloAck(HelloAck {
             proto_ver: PROTO_VER,
             host_name: host_name(),

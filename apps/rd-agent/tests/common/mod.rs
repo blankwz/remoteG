@@ -308,6 +308,16 @@ impl Client {
         if PAIRED.swap(true, Ordering::SeqCst) {
             expect_hello_ack(&mut rx).await?;
         } else {
+            // 未信任:Agent 对 Hello 回 Error{1}(req_id 沿用),消费后再发起配对
+            let rejected = tokio::time::timeout(RECV_TIMEOUT, rx.recv())
+                .await
+                .context("等待配对前置 Error{1} 超时")?
+                .context("控制流已关闭")?
+                .context("解码信封失败")?;
+            assert!(
+                matches!(rejected.msg, Some(envelope::Msg::Error(ref e)) if e.code == 1),
+                "配对前期望 Error{{code:1}},实际 {rejected:?}"
+            );
             pair_over(&mut tx, &mut rx, agent_fp).await?;
             expect_hello_ack(&mut rx).await?;
         }
