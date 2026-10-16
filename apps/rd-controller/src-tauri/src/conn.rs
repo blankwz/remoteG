@@ -920,6 +920,11 @@ impl ConnManager {
 
     /// 登记设备连接；旧连接关闭。断线时经 `app` 自动移除并向前端发
     /// `device-disconnected` 事件（主动断开同样触发，前端以此更新离线状态）。
+    ///
+    /// 移除按**连接实例**判定（`Arc::ptr_eq`）：替换路径里 `old.close()` 同样会
+    /// 唤醒旧连接自己的断线监听任务，若按 device_id 无差别移除，会把刚登记的
+    /// 新连接清出表并误发断线事件（表现为"点设备提示未连接"）。故仅当表中该
+    /// id 登记的仍是自己这条连接时才移除、才发事件。
     pub fn put_device(
         &self,
         device_id: String,
@@ -932,11 +937,14 @@ impl ConnManager {
             let mut closed = watcher.closed();
             let _ = closed.changed().await;
             let manager = app.state::<ConnManager>();
-            let _removed = manager.take_device(&watched_id);
-            let _ = app.emit(
-                "device-disconnected",
-                serde_json::json!({ "deviceId": watched_id }),
-            );
+            // 已被更新的连接替换时返回 None：不动新连接、不发断线事件
+            let removed = manager.take_device_if(&watched_id, &watcher);
+            if removed.is_some() {
+                let _ = app.emit(
+                    "device-disconnected",
+                    serde_json::json!({ "deviceId": watched_id }),
+                );
+            }
         });
         let old = self
             .device_conns
@@ -965,6 +973,20 @@ impl ConnManager {
             .remove(device_id)
     }
 
+    /// 移除设备连接，但仅当表中该 id 当前登记的正是 `expected` 这一实例。
+    /// 返回被移除的连接；id 不存在或已被替换成其他连接时返回 None（不动表）。
+    ///
+    /// 断线监听任务（[`ConnManager::put_device`] 内 spawn）用它避免把替换后的
+    /// 新连接误当自己断线清出表。
+    pub fn take_device_if(
+        &self,
+        device_id: &str,
+        expected: &Arc<DeviceConn>,
+    ) -> Option<Arc<DeviceConn>> {
+        let mut map = self.device_conns.lock().expect("device conns");
+        remove_if_same(&mut map, device_id, expected)
+    }
+
     // ---- spike 旧路径（M0，保留）----
 
     /// 登记 spike 连接（按 addr 键），返回被替换的旧连接。
@@ -973,6 +995,20 @@ impl ConnManager {
             .lock()
             .expect("conn map must not be poisoned")
             .insert(device_id, conn)
+    }
+}
+
+/// 仅当 `map[id]` 与 `expected` 是同一实例（`Arc::ptr_eq`）时移除并返回；
+/// 否则原样保留（连接已被替换或不存在）。泛型以便脱离 QUIC 连接做单测。
+fn remove_if_same<T>(
+    map: &mut HashMap<String, Arc<T>>,
+    id: &str,
+    expected: &Arc<T>,
+) -> Option<Arc<T>> {
+    if map.get(id).is_some_and(|cur| Arc::ptr_eq(cur, expected)) {
+        map.remove(id)
+    } else {
+        None
     }
 }
 
@@ -1394,6 +1430,48 @@ mod tests {
         let (caps, s444) = both.to_codecs();
         assert_eq!(caps, vec![Codec::H264420 as i32, Codec::H264444 as i32]);
         assert!(s444);
+    }
+
+    // ---- 断线监听移除竞态（put_device 替换旧连接的根因修复） ----
+
+    #[test]
+    fn watcher_of_replaced_conn_keeps_new_connection() {
+        // 复现竞态：connA 被 connB 替换后 connA.close() 唤醒 connA 自己的
+        // 断线监听任务；按实例判定它必须认不出表中已是 connB → 不移除。
+        // （修复前按 device_id 无差别移除，会把新连接清出表并误发断线事件，
+        //  表现为"点设备提示未连接、重试无效"。）
+        let old = Arc::new(1u8);
+        let new = Arc::new(2u8);
+        let mut map: HashMap<String, Arc<u8>> = HashMap::new();
+        map.insert("d1".into(), new.clone());
+        assert!(remove_if_same(&mut map, "d1", &old).is_none());
+        // 新连接原样保留（get_device 仍可用）
+        assert!(map.get("d1").is_some_and(|cur| Arc::ptr_eq(cur, &new)));
+    }
+
+    #[test]
+    fn watcher_cleans_up_own_truly_closed_connection() {
+        // 真正断线：表中登记的正是自己这条连接 → 照常移除
+        let conn = Arc::new(3u8);
+        let mut map: HashMap<String, Arc<u8>> = HashMap::new();
+        map.insert("d1".into(), conn.clone());
+        let removed = remove_if_same(&mut map, "d1", &conn);
+        assert!(removed.is_some_and(|r| Arc::ptr_eq(&r, &conn)));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn remove_if_same_is_noop_for_missing_or_other_instance() {
+        let a = Arc::new(1u8);
+        let b = Arc::new(2u8);
+        let mut map: HashMap<String, Arc<u8>> = HashMap::new();
+        map.insert("d1".into(), a.clone());
+        map.insert("d2".into(), b.clone());
+        // id 不存在 → None 且不动其他条目（如替换竞态后再触发的旧 watcher）
+        assert!(remove_if_same(&mut map, "d3", &a).is_none());
+        // 同一 id 但实例不同 → None
+        assert!(remove_if_same(&mut map, "d1", &b).is_none());
+        assert_eq!(map.len(), 2);
     }
 
     // ---- 地址解析 ----
