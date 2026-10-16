@@ -80,7 +80,8 @@ use crate::session::{AgentState, SessionCtx};
 
 /// 协议错误码 10：窗口不存在（05_api §4）。
 const ERR_NO_WINDOW: u32 = 10;
-/// 协议错误码 11：窗口无法捕获（最小化/受保护/管线失败；05_api §4）。
+/// 协议错误码 11：窗口无法捕获（受保护/管线失败；05_api §4）。最小化已改为
+/// 自动还原后捕获（用户实测反馈 1），不再以此码拒绝。
 const ERR_NOT_CAPTURABLE: u32 = 11;
 /// 协议错误码 12：无法调整尺寸（已退化为 SCALE；05_api §4，非致命）。
 const ERR_FIT_DEGRADED: u32 = 12;
@@ -111,6 +112,10 @@ const STATS_PERIOD: Duration = Duration::from_secs(1);
 /// 弹出菜单窗口类名（rd-window-win group.rs 的 MENU_CLASS 未跨 crate 导出，
 /// 此处按同一常量复刻；修改须两处同步）。
 const MENU_CLASS: &str = "#32768";
+/// 最小化还原生效确认的轮询间隔（`ShowWindowAsync` 只投递命令，生效异步）。
+const RESTORE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// 还原确认轮询轮数上限（20 × 50 ms = 1 s；期间持有 open 串行锁）。
+const RESTORE_POLL_ROUNDS: usize = 20;
 
 // ---------------------------------------------------------------------------
 // 进程级注册表（WindowSessions 为 unit struct，接口由 session.rs 固定）
@@ -128,9 +133,38 @@ static TOP_WINDOWS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static SERVICES: OnceLock<Mutex<HashMap<usize, ServiceEntry>>> = OnceLock::new();
 /// 连接标识 → 该连接窗口组内的子窗口 id 集合（is_open 对子窗口放行）。
 static CHILD_MEMBERS: OnceLock<Mutex<HashMap<usize, HashSet<u64>>>> = OnceLock::new();
+/// 管线世代号（进程级自增）：注册表条目的身份标识。同窗口快速重开时，旧
+/// 管线的收尾任务（[`pipe_cleanup`]，由发送任务在取消后异步触发）可能与
+/// "停旧建新"并发——仅按 window_id 移除会把新注册的管线误杀（管线消失
+/// 黑屏），收尾必须比对世代号，见 [`unregister_pipe`]。
+static PIPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn pipes() -> &'static Mutex<HashMap<u64, PipeHandle>> {
     PIPES.get_or_init(Default::default)
+}
+
+/// 注册一条窗口管线，返回被顶替的旧条目（调用方负责 shutdown）。
+///
+/// `HashMap::insert` 的顶替在锁内原子完成：任何注册路径（根窗口 open、
+/// 窗口组成员接入）若与既有同窗口条目相撞，注册完成即只剩一条——
+/// "同一窗口至多一条存活管线"的注册侧兜底。
+fn register_pipe(handle: PipeHandle) -> Option<PipeHandle> {
+    pipes()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .insert(handle.hwnd, handle)
+}
+
+/// 按世代号移除窗口管线：注册条目仍是本世代时才移除并返回，否则不动注册表。
+///
+/// 旧管线的收尾与新管线的注册存在竞态（发送任务取消后的异步收尾 vs
+/// open_window 停旧建新的多次 await），世代比对保证收尾只处理自己那条。
+fn unregister_pipe(window_id: u64, serial: u64) -> Option<PipeHandle> {
+    let mut map = pipes().lock().unwrap_or_else(lock_poisoned);
+    match map.get(&window_id) {
+        Some(h) if h.serial == serial => map.remove(&window_id),
+        _ => None,
+    }
 }
 
 fn event_subs() -> &'static Mutex<HashMap<usize, mpsc::Sender<()>>> {
@@ -527,7 +561,7 @@ fn window_event_msg(ev: &WindowEventRaw) -> Option<Msg> {
 }
 
 // ---------------------------------------------------------------------------
-// Open：校验 → 保存布局 → 捕获 → 数据流 → 管线线程/任务 → ack
+// Open：校验（最小化自动还原）→ 保存布局 → 捕获 → 数据流 → 管线线程/任务 → ack
 // ---------------------------------------------------------------------------
 
 fn handle_open(ctx: &SessionCtx, req_id: u32, open: OpenWindow) -> anyhow::Result<()> {
@@ -541,9 +575,13 @@ fn handle_open(ctx: &SessionCtx, req_id: u32, open: OpenWindow) -> anyhow::Resul
 }
 
 async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> anyhow::Result<()> {
-    // 全局串行化：open 内部多处 await（枚举/编码器创建），并发到达的两个
-    // OpenWindow 会交错出两条并存管线（StrictMode 双挂载实测），前端收到
-    // 交织的双码流必然解码失败。串行后重复打开走下方"停旧建新"幂等路径。
+    // 全局串行化（D-011 收尾）：open 内部多处 await（枚举/编码器创建/流建立），
+    // 并发到达的两个 OpenWindow 若各自走完"停旧→建新"，在注册前旧条目尚不
+    // 存在、双方 remove 全部落空，产出并存双管线（StrictMode 双挂载实测，
+    // 前端收到交织双码流必然解码失败黑屏）。串行后重复打开走"停旧建新"
+    // 幂等路径。纵深防御：注册侧另有"同 wid 顶替 + 世代号收尾"兜底（见
+    // [`register_pipe`]/[`unregister_pipe`]），任何调用序列下同一窗口至多
+    // 一条存活管线。
     static OPEN_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _serial = OPEN_SERIAL.lock().await;
 
@@ -554,12 +592,56 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         old.shutdown(true);
     }
 
-    // 校验：不存在/不可捕获 → 10；最小化 → 11（WGC 会话可建但无帧，显式拒绝）
-    let attrs = {
+    // 校验：不存在/不可捕获 → 10；最小化 → 自动还原再捕获（用户实测反馈 1，
+    // 行业标准做法 RustDesk 同款；列表页 UI 已提示"将被还原"），不再拒绝。
+    let mut attrs = {
         let wins = list_windows().context("枚举窗口失败")?;
         wins.into_iter().find(|a| a.hwnd as u64 == wid)
     };
+    // 最小化自动还原（用户实测反馈 1：任何状态必须可控制）。最小化有两条
+    // 呈现路径，都必须还原后再捕获：
+    // - 在可捕获列表中（如资源管理器，最小化后客户区仍非 0）→ `minimized`
+    //   字段为 true；
+    // - 不在列表中（多数窗口最小化后客户区塌缩为 0×0，被 rd-window-win 的
+    //   尺寸过滤排除）→ 以 `IsIconic` 直接判定（不在列表即无字段可看）。
+    let minimized_now = match &attrs {
+        Some(a) => a.minimized,
+        None => is_iconic_window(wid as isize),
+    };
+    if minimized_now {
+        tracing::info!(
+            window = format!("{wid:#x}"),
+            "窗口处于最小化，自动还原后捕获"
+        );
+        restore_minimized(attrs.as_ref().map_or(wid as isize, |a| a.hwnd));
+        match after_restore(wid).await {
+            AfterRestore::Ready(a) => attrs = Some(a),
+            AfterRestore::Gone => {
+                return send_error(
+                    ctx,
+                    req_id,
+                    ERR_NO_WINDOW,
+                    format!("窗口 {wid:#x} 在还原前已关闭"),
+                )
+                .await;
+            }
+            AfterRestore::Pending => {
+                tracing::warn!(
+                    window = format!("{wid:#x}"),
+                    "还原未在限时内生效，仍按计划捕获（还原生效后 WGC 即出帧）"
+                );
+                // 最小化 rect 是 -32000 哨兵值/0×0；用布局快照的还原矩形兜底，
+                // 避免错误的 ack 尺寸与码率面积权重。
+                if let Some(a) = attrs.as_mut() {
+                    if let Ok(p) = save_placement(a.hwnd) {
+                        a.rect = p.normal_position();
+                    }
+                }
+            }
+        }
+    }
     let Some(attrs) = attrs else {
+        // 含：还原超时后窗口始终不在可捕获列表（隐藏/cloaked 等）。
         return send_error(
             ctx,
             req_id,
@@ -568,9 +650,6 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         )
         .await;
     };
-    if attrs.minimized {
-        return send_error(ctx, req_id, ERR_NOT_CAPTURABLE, "窗口处于最小化，无法捕获").await;
-    }
 
     let cfg = &ctx.state.config;
     // max_fps = min(请求, 配置)；请求 0 视为未指定，用配置默认
@@ -661,6 +740,69 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 最小化自动还原（用户实测反馈 1）
+// ---------------------------------------------------------------------------
+
+/// [`after_restore`] 的轮询结论。
+enum AfterRestore {
+    /// 已还原：携带重取后的窗口属性（最小化 rect 是 -32000 哨兵值，必须
+    /// 重取，否则 ack 尺寸与码率面积权重全错）。
+    Ready(WindowAttrs),
+    /// 轮询期间窗口消失（还原前被销毁/关闭）→ `Error{10}`。
+    Gone,
+    /// 限时内仍未还原（目标窗口线程繁忙/挂起）：按计划捕获，尽力而为，
+    /// 还原最终生效后 WGC 即出帧。
+    Pending,
+}
+
+/// hwnd 是否处于最小化（iconic）。窗口不存在时返回 false（存在性判定另行处理）。
+fn is_iconic_window(hwnd: isize) -> bool {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+    unsafe { IsIconic(HWND(hwnd as *mut c_void)) }.as_bool()
+}
+
+/// 最小化窗口投递还原命令（`ShowWindowAsync(SW_RESTORE)`）。
+///
+/// 用 Async 变体而非同步 `ShowWindow`（rd-window-win 私有 helper 同款）：
+/// 跨线程同步调用会在目标窗口线程挂起时阻塞调用方，open_window 的全局
+/// 串行锁会被单个 hung 窗口拖死；Async 只投递命令立即返回，生效与否由
+/// [`after_restore`] 轮询确认。
+fn restore_minimized(hwnd: isize) {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_RESTORE};
+    let ok = unsafe { ShowWindowAsync(HWND(hwnd as *mut c_void), SW_RESTORE) };
+    if !ok.as_bool() {
+        tracing::warn!(
+            hwnd = format!("{hwnd:#x}"),
+            "ShowWindowAsync(SW_RESTORE) 投递失败"
+        );
+    }
+}
+
+/// 还原生效确认：轮询重枚举直到窗口脱离最小化，或超时/消失。
+///
+/// 枚举放 blocking 池（与 [`handle_list`] 同理由：hung 窗口可能拖慢单次
+/// 枚举，不能卡 async 执行线程）；枚举瞬时失败继续等待（窗口此刻必然
+/// 存在，失败多为瞬时资源问题），超时返回 [`AfterRestore::Pending`]。
+async fn after_restore(wid: u64) -> AfterRestore {
+    for _ in 0..RESTORE_POLL_ROUNDS {
+        tokio::time::sleep(RESTORE_POLL_INTERVAL).await;
+        let Ok(Ok(wins)) = tokio::task::spawn_blocking(list_windows).await else {
+            continue; // 枚举瞬时失败或任务异常，下轮重试
+        };
+        match wins.into_iter().find(|a| a.hwnd as u64 == wid) {
+            None => return AfterRestore::Gone,
+            Some(a) if !a.minimized => return AfterRestore::Ready(a),
+            Some(_) => {} // 仍在还原中，继续等
+        }
+    }
+    AfterRestore::Pending
+}
+
 /// 发送任务的共享记账状态（T-027：码率自适应的在途积压信号 + 会话字节累计）。
 struct SendAccounting {
     /// 本管线在途字节（发送任务入队 +N、写完 -N）。
@@ -704,6 +846,7 @@ struct PipeStarted {
 /// 调用方决定（根窗口回 `Error{11}`，子窗口仅记日志降级）。
 async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result<PipeStarted> {
     let wid = spec.hwnd as u64;
+    let serial = PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
     let restore_on_fail = |s: &PipeSpec| restore_saved(s.hwnd, &s.saved);
     let started_capture = WindowCapture::start(spec.hwnd, CaptureOptions { max_fps: spec.fps })
         .with_context(|| format!("启动捕获失败（hwnd {wid:#x}）"));
@@ -793,7 +936,10 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         cancel.clone(),
         video_tx,
         au_rx,
-        wid,
+        PipeIdentity {
+            window_id: wid,
+            serial,
+        },
         Arc::clone(&errors),
         SendAccounting {
             backlog: Arc::clone(&backlog),
@@ -805,7 +951,10 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         cancel.clone(),
         tile_tx,
         tile_rx,
-        wid,
+        PipeIdentity {
+            window_id: wid,
+            serial,
+        },
         errors,
         SendAccounting {
             backlog: Arc::clone(&backlog),
@@ -813,27 +962,37 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         },
     ));
 
-    pipes().lock().unwrap_or_else(lock_poisoned).insert(
-        wid,
-        PipeHandle {
-            cancel: cancel.clone(),
-            capture: Some(capture),
-            enc_thread: Some(enc_thread),
-            saved: spec.saved,
-            hwnd: wid,
-            fit: spec.fit,
-            deb: Arc::new(ViewportDeb::default()),
-            owner: spec.owner,
-            is_root: spec.is_root,
-            area: spec.area,
-            codec: spec.codec,
-            backlog,
-            frames,
-            target_kbps,
-            fps_cap,
-            members: group_snapshot,
-        },
-    );
+    // 注册（含同窗口旧条目兜底顶替）：open_window 的"停旧建新"已覆盖根窗口
+    // 重复打开，此处兜底拦截一切其余路径（窗口组成员并发接入等）的同窗口
+    // 并存管线——注册完成即只剩本条，保证"同一窗口至多一条存活管线"。
+    let replaced = register_pipe(PipeHandle {
+        cancel: cancel.clone(),
+        capture: Some(capture),
+        enc_thread: Some(enc_thread),
+        saved: spec.saved,
+        hwnd: wid,
+        fit: spec.fit,
+        deb: Arc::new(ViewportDeb::default()),
+        owner: spec.owner,
+        is_root: spec.is_root,
+        area: spec.area,
+        codec: spec.codec,
+        backlog,
+        frames,
+        target_kbps,
+        fps_cap,
+        members: group_snapshot,
+        serial,
+    });
+    if let Some(old) = replaced {
+        tracing::warn!(
+            window = format!("{wid:#x}"),
+            "注册时发现同窗口旧管线，兜底关闭"
+        );
+        // 不恢复布局：恢复归 open 开头的停旧路径 / CloseWindow 负责，避免与
+        // 本次会话刚保存的布局叠加。
+        old.shutdown(false);
+    }
 
     Ok(PipeStarted {
         video_stream_id,
@@ -1012,6 +1171,9 @@ struct PipeHandle {
     fps_cap: Arc<AtomicU32>,
     /// 根窗口的窗口组快照（hwnd → 成员，diff 基准）；子窗口 None。
     members: Option<Arc<Mutex<HashMap<isize, GroupMember>>>>,
+    /// 管线世代号（[`PIPE_SEQ`]）：收尾按它确认"注册表里还是不是自己这条"，
+    /// 防止旧管线收尾误杀同窗口重开的新管线。
+    serial: u64,
 }
 
 impl PipeHandle {
@@ -1356,15 +1518,22 @@ impl FramePipeline {
 // 发送任务与收尾
 // ---------------------------------------------------------------------------
 
+/// 管线身份：注册表窗口 id + 世代号（收尾按世代号防误杀，见 [`unregister_pipe`]）。
+struct PipeIdentity {
+    window_id: u64,
+    serial: u64,
+}
+
 async fn video_send_task(
     ctx: Arc<SessionCtx>,
     cancel: CancellationToken,
     mut tx: DataTx,
     mut rx: mpsc::Receiver<(u32, EncodedAu)>,
-    window_id: u64,
+    id: PipeIdentity,
     errors: Arc<PipeError>,
     acct: SendAccounting,
 ) {
+    let PipeIdentity { window_id, serial } = id;
     let SendAccounting {
         backlog,
         session_bytes,
@@ -1397,7 +1566,7 @@ async fn video_send_task(
         }
     }
     tracing::debug!(window = format!("{window_id:#x}"), "视频发送任务退出");
-    pipe_cleanup(&ctx, window_id, errors).await;
+    pipe_cleanup(&ctx, window_id, serial, errors).await;
 }
 
 async fn tile_send_task(
@@ -1405,10 +1574,11 @@ async fn tile_send_task(
     cancel: CancellationToken,
     mut tx: DataTx,
     mut rx: mpsc::Receiver<(u32, TileOut)>,
-    window_id: u64,
+    id: PipeIdentity,
     errors: Arc<PipeError>,
     acct: SendAccounting,
 ) {
+    let PipeIdentity { window_id, serial } = id;
     let SendAccounting {
         backlog,
         session_bytes,
@@ -1442,17 +1612,16 @@ async fn tile_send_task(
         }
     }
     tracing::debug!(window = format!("{window_id:#x}"), "瓦片发送任务退出");
-    pipe_cleanup(&ctx, window_id, errors).await;
+    pipe_cleanup(&ctx, window_id, serial, errors).await;
 }
 
-/// 发送任务收尾：从注册表移除该窗口（拿到句柄者负责统一 shutdown/恢复布局），
-/// 管线自亡时把故障转为 `Error{code:11}` 回给控制端。两个发送任务并发收尾，
-/// 以注册表 remove 的互斥保证 shutdown 与错误上报各只执行一次。
-async fn pipe_cleanup(ctx: &SessionCtx, window_id: u64, errors: Arc<PipeError>) {
-    let handle = pipes()
-        .lock()
-        .unwrap_or_else(lock_poisoned)
-        .remove(&window_id);
+/// 发送任务收尾：按世代号从注册表移除该窗口（拿到句柄者负责统一
+/// shutdown/恢复布局），管线自亡时把故障转为 `Error{code:11}` 回给控制端。
+/// 两个发送任务并发收尾，世代比对保证 shutdown 与错误上报各只执行一次，
+/// 且不会误杀同窗口快速重开后注册的新管线（误杀即黑屏，见
+/// [`unregister_pipe`]）。
+async fn pipe_cleanup(ctx: &SessionCtx, window_id: u64, serial: u64, errors: Arc<PipeError>) {
+    let handle = unregister_pipe(window_id, serial);
     if let Some(handle) = handle {
         handle.shutdown(true);
     }
@@ -2290,5 +2459,84 @@ mod tests {
         assert_eq!(negotiate(&both, &both, false), Codec::H264420);
         let only420 = [Codec::H264420];
         assert_eq!(negotiate(&only420, &both, true), Codec::H264420);
+    }
+
+    // ----- 管线注册表去重（重复 open / 旧管线收尾竞态的状态机核心） -----
+
+    /// 测试用空管线句柄（不持有捕获/线程；shutdown 只取消令牌，无 Win32 副作用）。
+    fn pipe_handle(hwnd: u64, serial: u64) -> PipeHandle {
+        PipeHandle {
+            cancel: CancellationToken::new(),
+            capture: None,
+            enc_thread: None,
+            saved: None,
+            hwnd,
+            fit: 0,
+            deb: Arc::new(ViewportDeb::default()),
+            owner: 0,
+            is_root: true,
+            area: 1,
+            codec: Codec::H264420,
+            backlog: Arc::new(AtomicU64::new(0)),
+            frames: Arc::new(AtomicU64::new(0)),
+            target_kbps: Arc::new(AtomicU32::new(0)),
+            fps_cap: Arc::new(AtomicU32::new(0)),
+            members: None,
+            serial,
+        }
+    }
+
+    /// 清理注册表条目（各测试用独立 hwnd，此处防御性兜底）。
+    fn drop_pipe(wid: u64) {
+        pipes().lock().unwrap_or_else(lock_poisoned).remove(&wid);
+    }
+
+    #[test]
+    fn stale_pipe_cleanup_never_kills_newer_generation() {
+        let wid = 0x5EED_0001;
+        drop_pipe(wid);
+
+        // 第 1 次 open：注册世代 0；第 2 次 open 先停旧（世代 0 出表）再建新
+        // 注册世代 1——open_window"停旧建新"的正常序列。
+        assert!(register_pipe(pipe_handle(wid, 0)).is_none());
+        let old = pipes().lock().unwrap_or_else(lock_poisoned).remove(&wid);
+        assert_eq!(old.map(|h| h.serial), Some(0), "open 开头去重应移除旧世代");
+        assert!(register_pipe(pipe_handle(wid, 1)).is_none());
+
+        // 旧管线（世代 0）的发送任务收尾此刻才到：必须被世代比对拦下，
+        // 否则会 shutdown 新管线（误杀即黑屏）。
+        assert!(
+            unregister_pipe(wid, 0).is_none(),
+            "旧世代收尾不得移除新世代条目"
+        );
+        assert!(pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .contains_key(&wid));
+        // 新世代正常收尾出表。
+        assert_eq!(unregister_pipe(wid, 1).map(|h| h.serial), Some(1));
+        drop_pipe(wid);
+    }
+
+    #[test]
+    fn register_replaces_same_window_pipeline() {
+        let wid = 0x5EED_0002;
+        drop_pipe(wid);
+
+        // 未经 open 开头去重的重复注册（如窗口组成员并发接入）：注册侧兜底
+        // 顶替——后注册顶掉先注册，注册完成即只剩一条。
+        assert!(register_pipe(pipe_handle(wid, 7)).is_none());
+        let replaced = register_pipe(pipe_handle(wid, 8));
+        assert_eq!(
+            replaced.map(|h| h.serial),
+            Some(7),
+            "同窗口二次注册应顶掉旧条目"
+        );
+        assert!(
+            unregister_pipe(wid, 7).is_none(),
+            "被顶掉的旧世代不得再动注册表"
+        );
+        assert_eq!(unregister_pipe(wid, 8).map(|h| h.serial), Some(8));
+        drop_pipe(wid);
     }
 }
