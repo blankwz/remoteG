@@ -9,6 +9,11 @@
 //!    前台锁状态下 1、2 会被系统整体拒绝，实测该路径仍有效）。
 //!
 //! 500 ms 内对同一窗口不重复尝试，避免高频输入事件下反复抖动 Alt。
+//!
+//! 例外：弹出菜单（类名 `#32768`）弹出时本就是前台窗口，不做置前尝试——
+//! 前台锁（RDP 会话等）下置前会被系统拒绝，调用方（rd-agent input_handler）
+//! 把置前失败视为"不注入"而丢弃该次点击（e2e t06 清理阶段实测，
+//! FIX-1 评估项）。
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -18,23 +23,47 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-    SwitchToThisWindow, ASFW_ANY,
+    AllowSetForegroundWindow, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    SetForegroundWindow, SwitchToThisWindow, ASFW_ANY,
 };
 
 /// 同一窗口两次置前尝试的最小间隔。
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Alt 抖动注入后等待系统消化输入队列的时间（前台锁状态异步更新）。
 const FOREGROUND_LOCK_SETTLE: Duration = Duration::from_millis(120);
+/// Windows 系统弹出菜单窗口类名（与 rd-window-win group.rs、rd-agent
+/// window_session.rs 的同名常量为同一系统约定，修改须多处同步）。
+const MENU_CLASS: &str = "#32768";
 
 /// 上一次置前尝试：(hwnd, 时刻)。
 static LAST_ATTEMPT: Mutex<Option<(isize, Instant)>> = Mutex::new(None);
 
+/// 目标窗口类名是否应跳过置前（纯函数，供单测）。
+///
+/// 系统弹出菜单 `#32768` 弹出时本就是前台：对它置前只有害处——前台锁下
+/// 置前失败会被调用方当作"点击条件不满足"而丢弃该次点击。
+fn should_skip_foreground(class: &str) -> bool {
+    class == MENU_CLASS
+}
+
+/// 窗口类名（`GetClassNameW` 本地查询不挂起；查询失败为 None）。
+fn window_class(hwnd: isize) -> Option<String> {
+    let mut buf = [0u16; 32];
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    let len = unsafe { GetClassNameW(h, &mut buf) };
+    let n = (len.max(0) as usize).min(buf.len());
+    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+}
+
 /// 确保 `hwnd` 在前台。
 ///
-/// 已前台直接返回 `true`；否则按模块注释的分层流程置前并返回是否成功。
-/// 500 ms 内已对同一窗口尝试过时不重复注入，直接返回当前前台判定。
+/// 弹出菜单（见 [`should_skip_foreground`]）与已前台窗口直接返回 `true`；
+/// 否则按模块注释的分层流程置前并返回是否成功。500 ms 内已对同一窗口
+/// 尝试过时不重复注入，直接返回当前前台判定。
 pub fn ensure_foreground(hwnd: isize) -> bool {
+    if window_class(hwnd).is_some_and(|c| should_skip_foreground(&c)) {
+        return true;
+    }
     if foreground_hwnd() == Some(hwnd) {
         return true;
     }
@@ -122,5 +151,33 @@ fn foreground_hwnd() -> Option<isize> {
         None
     } else {
         Some(hwnd.0 as isize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_class_skips_foreground() {
+        assert!(should_skip_foreground("#32768"), "系统弹出菜单类应跳过置前");
+    }
+
+    #[test]
+    fn non_menu_classes_do_not_skip() {
+        for class in [
+            "", // 查询失败兜底（不该误伤）
+            "#32768x",
+            "x#32768", // 前后缀碰撞
+            "#32768 ", // 带空白（精确匹配）
+            "#32770",  // 对话框类
+            "Chrome_WidgetWin_1",
+            " Notepad ",
+        ] {
+            assert!(
+                !should_skip_foreground(class),
+                "非菜单类不应跳过置前: {class:?}"
+            );
+        }
     }
 }

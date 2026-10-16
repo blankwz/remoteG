@@ -1581,6 +1581,18 @@ async fn poll_groups(ctx: &Arc<SessionCtx>) {
         }
         for m in diff.moved {
             let info = child_window_info(&m);
+            // T-027 遗留收尾：moved 成员携带新几何，子管线存在时同步刷新
+            // 面积权重（码率按面积比例分配；此前沿用打开时尺寸，子窗口
+            // 变大后权重偏小）。仅尺寸变化（偏移不变）不进 moved，维持
+            // diff_group 既有语义——编码器重配置由管线内帧尺寸差量处理。
+            let area = u64::from(m.w).saturating_mul(u64::from(m.h));
+            if let Some(h) = pipes()
+                .lock()
+                .unwrap_or_else(lock_poisoned)
+                .get_mut(&(m.hwnd as u64))
+            {
+                h.area = area;
+            }
             tracing::debug!(
                 child = format!("{:#x}", m.hwnd),
                 root = format!("{root:#x}"),

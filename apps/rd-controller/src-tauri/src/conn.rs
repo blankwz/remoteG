@@ -738,7 +738,8 @@ async fn read_loop(inner: Arc<Inner>, mut rx: ControlRx) {
 async fn accept_data_loop(conn: Conn, inner: Arc<Inner>) {
     loop {
         match conn.accept_data().await {
-            Ok((StreamKind::Video, _id, rx)) => {
+            Ok((StreamKind::Video, id, rx)) => {
+                tracing::info!(stream = id, "video pump accepted (probe)");
                 tauri::async_runtime::spawn(video_pump(inner.clone(), rx));
             }
             Ok((StreamKind::Tile, _id, rx)) => {
@@ -827,6 +828,9 @@ fn deliver_frame(inner: &Inner, window_id: u64, frame: Vec<u8>) {
         let _ = ch.send(InvokeResponseBody::Raw(frame));
     }
 }
+
+static FRAME_PROBE: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+static FRAME_MISS: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
 
 /// 终端接收泵：已注册直投前端；未注册缓存（2 s TTL）。
 async fn term_rx_pump(inner: Arc<Inner>, stream_id: u64, mut rx: DataRx) {

@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
@@ -45,8 +45,22 @@ const TAG_MAC: u8 = 0x02;
 const ERR_UNAUTHENTICATED: u32 = 1;
 /// 协议错误码 30:终端启动失败(05_api §4;终端功能被关闭时沿用)。
 const ERR_TERMINAL_DISABLED: u32 = 30;
-/// Agent 侧编出的默认编码能力(硬编探测在 T-016 接入后细化)。
-const ENCODE_CAPS: [i32; 1] = [rd_proto::v0::Codec::H264420 as i32];
+/// Agent 侧编出的编码能力缓存(T-015/T-016 遗留收尾):rd-encode 动态探测
+/// 结果(`H264420` 恒有;`H264444` 以硬编实际编一帧验证,依本机环境而定)。
+static ENCODE_CAPS: OnceLock<Vec<i32>> = OnceLock::new();
+
+/// 编码能力(进程内首次调用触发 rd-encode 的 4:4:4 硬编探测并缓存)。
+///
+/// 副作用:进程首个 `HelloAck` 会等待 ~1.5s 的 ffmpeg 探测——控制端握手
+/// RPC 超时 5s,可接受;此后握手零开销。
+fn encode_caps() -> &'static [i32] {
+    ENCODE_CAPS.get_or_init(|| {
+        rd_encode::caps::probe_encode_caps()
+            .into_iter()
+            .map(|c| c as i32)
+            .collect()
+    })
+}
 
 // ---------------------------------------------------------------------------
 // 共享结构(任务卡 §6;T-016/017/018 直接使用,不再改动本文件的结构定义)
@@ -418,15 +432,14 @@ fn spawn_datagram_loop(ctx: &Arc<SessionCtx>) {
 // 消息构造辅助
 // ---------------------------------------------------------------------------
 
-/// `HelloAck`:主机名 + 静态编码能力(动态探测由 T-016 经 `state.identity`/
-/// rd-encode 接入后,再改此函数取 `&AgentState`)。
+/// `HelloAck`:主机名 + 动态探测的编码能力(见 `encode_caps`)。
 fn hello_ack(req_id: u32) -> Envelope {
     Envelope {
         req_id,
         msg: Some(envelope::Msg::HelloAck(HelloAck {
             proto_ver: PROTO_VER,
             host_name: host_name(),
-            encode_caps: ENCODE_CAPS.to_vec(),
+            encode_caps: encode_caps().to_vec(),
         })),
     }
 }
@@ -467,4 +480,35 @@ fn pair_error_reason(err: &PairError) -> String {
 /// 信任列表锁辅助(临界区不跨 await)。
 fn lock_trust(state: &AgentState) -> std::sync::MutexGuard<'_, rd_security::TrustStore> {
     state.trust.lock().expect("trust 锁中毒")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// encode_caps 内容断言:`H264420` 恒在(OpenH264 软编兜底);`H264444`
+    /// 依本机硬编探测结果(有则追加、无则缺省),且结果缓存后零开销稳定。
+    /// 首次调用触发真实 ffmpeg 探测(~1.5s,仅一次)。
+    #[test]
+    fn encode_caps_always_advertise_420() {
+        let caps = encode_caps();
+        assert!(
+            caps.contains(&(rd_proto::v0::Codec::H264420 as i32)),
+            "H264420(软编兜底)必须始终上报,实际 {caps:?}"
+        );
+        // 444 有无不依赖测试环境:只断言内容合法(仅两个已知 codec、无重复)。
+        let known = [
+            rd_proto::v0::Codec::H264420 as i32,
+            rd_proto::v0::Codec::H264444 as i32,
+        ];
+        assert!(
+            caps.iter().all(|c| known.contains(c)),
+            "只允许上报探测过的 codec,实际 {caps:?}"
+        );
+        assert!(
+            !rd_encode::caps::probe_encode_caps().is_empty(),
+            "探测结果不得为空(至少 420)"
+        );
+        assert_eq!(caps, encode_caps(), "OnceLock 缓存后结果应稳定");
+    }
 }
