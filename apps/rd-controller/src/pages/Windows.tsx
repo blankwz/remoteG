@@ -8,6 +8,11 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  connectDevice,
+  listDevices,
+  rememberLastDeviceId,
+} from "../api/devices";
+import {
   listWindows,
   subscribeWindowEvents,
   type WindowDto,
@@ -97,41 +102,44 @@ function fallbackIcon(process: string): string {
   return stem.length > 0 ? stem.charAt(0).toUpperCase() : "?";
 }
 
-type LoadStatus = "loading" | "ready" | "error";
+type LoadStatus = "connecting" | "loading" | "ready" | "error";
 
 /**
  * 窗口列表页（#/windows/:deviceId）。
  *
- * 装载次序：先订阅事件（订阅与列表返回之间到达的事件先缓冲、列表落地后
- * 补放），再拉一次列表；此后完全由事件驱动，无轮询。
+ * 装载次序：先确认设备连接（离线或上次失败后，先 connect_device 重建设备
+ * 连接；在线则跳过——对在线设备重复 connect 会触发后端连接替换清理竞态），
+ * 再订阅事件（订阅与列表返回之间到达的事件先缓冲、列表落地后补放），最后
+ * 拉一次列表；此后完全由事件驱动，无轮询。
  */
 export function Windows({ deviceId }: { deviceId: string }) {
   const [windows, setWindows] = useState<readonly WindowDto[]>([]);
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<LoadStatus>("loading");
+  const [status, setStatus] = useState<LoadStatus>("connecting");
   const [error, setError] = useState<string | null>(null);
   // 仅最新一期装载（重试 / 切换设备）的事件与列表结果生效
   const seqRef = useRef(0);
+  /** 上次装载失败后置位：重试时强制重建设备连接（应对连接表内失效连接）。 */
+  const forceConnectRef = useRef(false);
 
-  const load = useCallback(async () => {
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    setStatus("loading");
-    setError(null);
-    // 先订阅后拉列表：订阅与列表返回之间到达的事件先缓冲，列表落地后补放
-    const buffered: WindowEventDto[] = [];
-    let ready = false;
-    const subscription = subscribeWindowEvents(deviceId, (ev) => {
-      if (seqRef.current !== seq) {
-        return;
-      }
-      if (ready) {
-        setWindows((prev) => applyWindowEvent(prev, ev));
-      } else {
-        buffered.push(ev);
-      }
-    });
-    try {
+  /**
+   * 订阅窗口事件并拉取一次列表（先订阅后拉列表：订阅与列表返回之间到达
+   * 的事件先缓冲，列表落地后补放）。失败向上抛出由 load 统一处理。
+   */
+  const loadList = useCallback(
+    async (seq: number): Promise<void> => {
+      const buffered: WindowEventDto[] = [];
+      let ready = false;
+      const subscription = subscribeWindowEvents(deviceId, (ev) => {
+        if (seqRef.current !== seq) {
+          return;
+        }
+        if (ready) {
+          setWindows((prev) => applyWindowEvent(prev, ev));
+        } else {
+          buffered.push(ev);
+        }
+      });
       const list = await listWindows(deviceId);
       if (seqRef.current !== seq) {
         return;
@@ -142,15 +150,56 @@ export function Windows({ deviceId }: { deviceId: string }) {
         setWindows((prev) => applyWindowEvent(prev, ev));
       }
       await subscription; // 订阅失败同样进入错误态
+    },
+    [deviceId],
+  );
+
+  const load = useCallback(async () => {
+    const seq = seqRef.current + 1;
+    seqRef.current = seq;
+    const forceConnect = forceConnectRef.current;
+    forceConnectRef.current = false;
+    setError(null);
+    setStatus("connecting");
+    try {
+      const devices = await listDevices();
+      if (seqRef.current !== seq) {
+        return;
+      }
+      const online = devices.some((d) => d.id === deviceId && d.online);
+      if (forceConnect || !online) {
+        await connectDevice(deviceId);
+        if (seqRef.current !== seq) {
+          return;
+        }
+        // 连接替换竞态自愈（conn.rs put_device 已知问题，见本轮报告）：
+        // 若刚建立的连接被旧连接的断线监听清出连接表，立即补连一次——
+        // 此时旧连接的监听已消费，第二次连接不会被清除
+        const after = await listDevices();
+        if (seqRef.current !== seq) {
+          return;
+        }
+        if (!after.some((d) => d.id === deviceId && d.online)) {
+          await connectDevice(deviceId);
+          if (seqRef.current !== seq) {
+            return;
+          }
+        }
+      }
+      setStatus("loading");
+      await loadList(seq);
+      rememberLastDeviceId(deviceId);
       setStatus("ready");
     } catch (e) {
       if (seqRef.current !== seq) {
         return;
       }
+      // 失败后重试强制重建设备连接（避免在失效连接上反复 list_windows）
+      forceConnectRef.current = true;
       setError(errText(e));
       setStatus("error");
     }
-  }, [deviceId]);
+  }, [deviceId, loadList]);
 
   useEffect(() => {
     void load();
@@ -218,6 +267,8 @@ export function Windows({ deviceId }: { deviceId: string }) {
           </button>
         </p>
       )}
+
+      {status === "connecting" && <p className={styles.empty}>连接中…</p>}
 
       {status === "loading" && <p className={styles.empty}>正在获取窗口列表…</p>}
 

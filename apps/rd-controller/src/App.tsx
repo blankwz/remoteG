@@ -1,11 +1,15 @@
 /**
  * rd-controller 前端入口（T-005）。
  *
- * hash 路由：#/spike（视频链路 spike）/ #/devices / #/windows/:id / #/session/:id。
- * /windows 由 T-020 挂载真实页面；/devices、/session 仍为占位（T-019 遗留 / T-021 实现）。
+ * hash 路由：#/spike（M0 视频链路 spike，调试用：已从导航下架，直达路由保留）/
+ * #/devices / #/windows/:id / #/session/:id。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { probeDecodeCaps, setDecodeCaps } from "./api/devices";
+import {
+  getLastDeviceId,
+  probeDecodeCaps,
+  setDecodeCaps,
+} from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
 import { Devices } from "./pages/Devices";
@@ -138,16 +142,59 @@ export default function App() {
 
   return (
     <div className={styles.app}>
-      <nav className={styles.nav}>
-        <a href="#/spike">Spike</a>
-        <a href="#/devices">Devices</a>
-        <a href="#/windows/demo">Windows</a>
-        <a href="#/session/demo">Session</a>
-      </nav>
+      <Nav active={route.page} />
       {route.page === "spike" && <SpikePage />}
       {route.page === "devices" && <Devices />}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
       {route.page === "session" && <Session deviceId={route.deviceId} />}
     </div>
+  );
+}
+
+/** 导航上「窗口列表 / 会话」指向的最后连接设备 id；没有时链接禁用。 */
+function Nav({ active }: { active: Route["page"] }) {
+  const lastDeviceId = getLastDeviceId();
+  const linkClass = (page: Route["page"]): string =>
+    active === page ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink;
+  const disabledTitle = "先在设备页连接一台设备";
+  return (
+    <nav className={styles.nav}>
+      <a className={styles.brand} href="#/devices" title="返回设备页">
+        <span className={styles.brandMark} aria-hidden="true" />
+        rd-controller
+      </a>
+      <div className={styles.navLinks}>
+        <a className={linkClass("devices")} href="#/devices">
+          设备
+        </a>
+        {lastDeviceId !== null ? (
+          <>
+            <a className={linkClass("windows")} href={`#/windows/${lastDeviceId}`}>
+              窗口列表
+            </a>
+            <a className={linkClass("session")} href={`#/session/${lastDeviceId}`}>
+              会话
+            </a>
+          </>
+        ) : (
+          <>
+            <span
+              className={styles.navLinkDisabled}
+              aria-disabled="true"
+              title={disabledTitle}
+            >
+              窗口列表
+            </span>
+            <span
+              className={styles.navLinkDisabled}
+              aria-disabled="true"
+              title={disabledTitle}
+            >
+              会话
+            </span>
+          </>
+        )}
+      </div>
+    </nav>
   );
 }

@@ -6,6 +6,17 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8321", "--directory", "tools/webcodecs-probe"],
       "port": 8321
+    },
+    {
+      "name": "rd-controller-web",
+      "runtimeExecutable": "F:/Program Files/nodejs/node.exe",
+      "runtimeArgs": [
+        "C:/Users/blank/AppData/Local/node/corepack/v1/pnpm/12.11.2/bin/pnpm.mjs",
+        "-C",
+        "apps/rd-controller",
+        "dev"
+      ],
+      "port": 1420
     }
   ]
 }

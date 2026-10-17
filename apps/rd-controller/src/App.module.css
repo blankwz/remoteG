@@ -1,3 +1,104 @@
+/* 全局设计基座 + 顶部导航 + M0 spike 调试页样式。
+ *
+ * 设计令牌（--rd-*）挂在 :root（App 恒挂载，等价全局作用域），供各页
+ * .module.css 复用：深色主题、间距节奏 4/8/12/16px、8px 圆角、蓝色主色。
+ * 结构约束：导航栏与内容区以背景层次 + 边框分离，正文页各自滚动；
+ * 全局 reset（body 边距 / 滚动条 / 字体继承）经 :global 写入本模块。
+ */
+
+:root {
+  color-scheme: dark;
+  --rd-bg: #101216;
+  --rd-bg-deep: #0a0c0f;
+  --rd-panel: #16191e;
+  --rd-card: #1a1e25;
+  --rd-card-hover: #1f242c;
+  --rd-border: #262c35;
+  --rd-border-strong: #3a4452;
+  --rd-text: #e8ebf0;
+  --rd-text-dim: #a7b0bd;
+  --rd-text-faint: #6d7684;
+  --rd-accent: #3d7eff;
+  --rd-accent-strong: #5a91ff;
+  --rd-accent-soft: rgb(61 126 255 / 14%);
+  --rd-accent-text: #cfe0ff;
+  --rd-ok: #46d17e;
+  --rd-warn: #e5b567;
+  --rd-err: #ef6f6f;
+  --rd-radius: 8px;
+  --rd-radius-sm: 6px;
+  --rd-shadow: 0 6px 20px rgb(0 0 0 / 40%);
+  --rd-font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+}
+
+/* ---- 全局基座（reset 与元素默认值） ---- */
+
+:global(html),
+:global(body),
+:global(#root) {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+:global(body) {
+  overflow: hidden; /* 应用壳整体不滚，各页面容器自行滚动 */
+  background: var(--rd-bg);
+  color: var(--rd-text);
+  font-family:
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:global(button),
+:global(input),
+:global(select),
+:global(textarea) {
+  font-family: inherit;
+}
+
+/* 细深色滚动条（Chromium / Firefox 双写） */
+:global(::-webkit-scrollbar) {
+  width: 10px;
+  height: 10px;
+}
+
+:global(::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+:global(::-webkit-scrollbar-thumb) {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-color: #2c333d;
+  background-clip: content-box;
+}
+
+:global(::-webkit-scrollbar-thumb:hover) {
+  background-color: var(--rd-border-strong);
+}
+
+:global(*),
+:global(*::before),
+:global(*::after) {
+  scrollbar-width: thin;
+  scrollbar-color: #2c333d transparent;
+}
+
+:global(:focus-visible) {
+  outline: 2px solid var(--rd-accent);
+  outline-offset: 1px;
+}
+
+/* ---- 应用壳与导航 ---- */
+
 .app {
   display: flex;
   flex-direction: column;
@@ -7,22 +108,78 @@
 
 .nav {
   display: flex;
-  gap: 16px;
-  padding: 8px 16px;
-  border-bottom: 1px solid #333;
-  background: #1c1c1c;
+  align-items: center;
+  gap: 20px;
+  height: 46px;
+  flex: none;
+  padding: 0 16px;
+  background: var(--rd-panel);
+  border-bottom: 1px solid var(--rd-border);
 }
 
-.nav a {
-  color: #cfcfcf;
-  text-decoration: none;
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--rd-text);
+  text-decoration: none;
+  white-space: nowrap;
 }
 
-.nav a:hover {
-  color: #fff;
-  text-decoration: underline;
+.brandMark {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--rd-accent), #7ab0ff);
+  box-shadow: 0 0 8px rgb(61 126 255 / 45%);
 }
+
+.navLinks {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.navLink,
+.navLinkDisabled {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: var(--rd-radius-sm);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.navLink {
+  color: var(--rd-text-dim);
+  text-decoration: none;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.navLink:hover {
+  color: var(--rd-text);
+  background: rgb(255 255 255 / 6%);
+}
+
+.navLinkActive,
+.navLinkActive:hover {
+  color: var(--rd-accent-text);
+  background: var(--rd-accent-soft);
+}
+
+.navLinkDisabled {
+  color: var(--rd-text-faint);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* ---- M0 spike 调试页（#/spike 直达，不在导航） ---- */
 
 .spike {
   display: flex;
@@ -42,20 +199,32 @@
 .addrInput {
   flex: 0 0 240px;
   padding: 6px 10px;
-  font-family: Consolas, "Courier New", monospace;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #111;
-  color: #eee;
+  font-family: var(--rd-font-mono);
+  font-size: 13px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+}
+
+.addrInput:focus {
+  outline: none;
+  border-color: var(--rd-accent);
 }
 
 .connectBtn {
   padding: 6px 16px;
-  border: 1px solid #4a7d4a;
-  border-radius: 4px;
-  background: #245224;
-  color: #e6ffe6;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 13px;
   cursor: pointer;
+}
+
+.connectBtn:hover:not(:disabled) {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
 }
 
 .connectBtn:disabled {
@@ -64,22 +233,22 @@
 }
 
 .statusText {
-  font-family: Consolas, "Courier New", monospace;
+  font-family: var(--rd-font-mono);
   font-size: 13px;
-  color: #888;
+  color: var(--rd-text-faint);
 }
 
 .statusText[data-status="connected"] {
-  color: #7ddf7d;
+  color: var(--rd-ok);
 }
 
 .statusText[data-status="error"] {
-  color: #ff7d7d;
+  color: var(--rd-err);
 }
 
 .error {
   margin: 0;
-  color: #ff9d9d;
+  color: var(--rd-err);
   font-size: 13px;
   white-space: pre-wrap;
 }
@@ -90,15 +259,8 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  background: #000;
-  border-radius: 4px;
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
   overflow: auto;
-}
-
-.placeholder {
-  padding: 24px;
-}
-
-.placeholder h1 {
-  font-size: 20px;
 }

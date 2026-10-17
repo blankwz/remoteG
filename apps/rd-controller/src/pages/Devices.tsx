@@ -6,11 +6,14 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_DEFAULT_PORT,
+  clearLastDeviceId,
   connectDevice,
   disconnectDevice,
+  getLastDeviceId,
   listDevices,
   pairDevice,
   probeDevice,
+  rememberLastDeviceId,
   removeDevice,
   type DeviceDto,
 } from "../api/devices";
@@ -67,7 +70,13 @@ export function Devices() {
       setBusyId(d.id);
       setError(null);
       try {
-        await connectDevice(d.id);
+        // 卡片显示在线时跳过 connect：后端 connect_device 对在线设备做连接
+        // 替换（关旧连新），旧连接的断线监听会把新连接误清出连接表（conn.rs
+        // put_device 竞态），导致随后的窗口列表报“设备未连接”
+        if (!d.online) {
+          await connectDevice(d.id);
+        }
+        rememberLastDeviceId(d.id);
         window.location.hash = `#/windows/${d.id}`;
         setNotice(null);
       } catch (e) {
@@ -117,6 +126,10 @@ export function Devices() {
       setBusyId(d.id);
       try {
         await removeDevice(d.id);
+        // 删除的是“最后连接的设备”时清除导航记忆，避免快捷入口指向空设备
+        if (getLastDeviceId() === d.id) {
+          clearLastDeviceId();
+        }
         setNotice(`已删除设备「${d.name}」`);
         await refresh();
       } catch (e) {

@@ -648,6 +648,10 @@ export function WindowGroupView({
     setRootStats(null);
 
     const onFrame = (frame: ArrayBuffer) => {
+      // 临时探针：帧到达计数（诊断会话黑屏，定位后移除）
+      const w = window as unknown as { __fc?: number; __fb?: number };
+      w.__fc = (w.__fc ?? 0) + 1;
+      if (w.__fc === 1) console.log("[probe] first onFrame bytes=", frame.byteLength);
       dispatchFrame(surfacesRef.current, frame);
     };
     const sub = subscribeGroupEvents(deviceId, windowId, (ev) => {

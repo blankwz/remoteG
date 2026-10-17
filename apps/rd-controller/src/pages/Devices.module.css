@@ -1,10 +1,10 @@
-/* 设备页样式（T-019）：深色系，风格与 App.module.css 一致 */
+/* 设备页样式（T-019）：令牌见 App.module.css :root（深色 / 蓝主色 / 8px 圆角） */
 
 .page {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 16px 20px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -14,21 +14,40 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
 }
 
 .title {
   margin: 0;
-  font-size: 20px;
-  color: #eee;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--rd-text);
 }
+
+/* 主操作按钮（添加设备 / 配对） */
 
 .addBtn {
   padding: 6px 16px;
-  border: 1px solid #4a7d4a;
-  border-radius: 4px;
-  background: #245224;
-  color: #e6ffe6;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 13px;
   cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    transform 0.08s ease;
+}
+
+.addBtn:hover:not(:disabled) {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
+}
+
+.addBtn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .addBtn:disabled {
@@ -38,22 +57,33 @@
 
 .error {
   margin: 0;
-  color: #ff9d9d;
+  padding: 8px 12px;
+  border: 1px solid rgb(239 111 111 / 35%);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(239 111 111 / 8%);
+  color: var(--rd-err);
   font-size: 13px;
   white-space: pre-wrap;
 }
 
 .notice {
   margin: 0;
-  color: #9dcfe8;
+  padding: 8px 12px;
+  border: 1px solid rgb(61 126 255 / 30%);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
   font-size: 13px;
 }
 
 .empty {
-  margin: 24px 0;
-  color: #888;
+  margin: 32px 0;
+  color: var(--rd-text-faint);
   font-size: 14px;
+  line-height: 1.7;
 }
+
+/* ---- 设备卡片 ---- */
 
 .list {
   display: flex;
@@ -69,15 +99,27 @@
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid #333;
-  border-radius: 6px;
-  background: #1c1c1c;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease,
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.card:hover {
+  border-color: var(--rd-border-strong);
+  background: var(--rd-card-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--rd-shadow);
 }
 
 .mainBtn {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex: 1;
   min-width: 0;
   padding: 0;
@@ -98,12 +140,12 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #555;
+  background: var(--rd-text-faint);
 }
 
 .dot[data-online="true"] {
-  background: #7ddf7d;
-  box-shadow: 0 0 6px #7ddf7d80;
+  background: var(--rd-ok);
+  box-shadow: 0 0 6px 1px rgb(70 209 126 / 55%);
 }
 
 .info {
@@ -115,16 +157,17 @@
 
 .name {
   font-size: 14px;
-  color: #eee;
+  font-weight: 500;
+  color: var(--rd-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .addr {
-  font-family: Consolas, "Courier New", monospace;
+  font-family: var(--rd-font-mono);
   font-size: 12px;
-  color: #888;
+  color: var(--rd-text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -132,9 +175,12 @@
 
 .fp {
   flex: none;
-  font-family: Consolas, "Courier New", monospace;
+  padding: 2px 6px;
+  border: 1px solid var(--rd-border);
+  border-radius: 4px;
+  font-family: var(--rd-font-mono);
   font-size: 12px;
-  color: #6a9fd8;
+  color: var(--rd-text-dim);
 }
 
 .actions {
@@ -145,12 +191,22 @@
 
 .actionBtn {
   padding: 4px 10px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #2a2a2a;
-  color: #ccc;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
   font-size: 12px;
   cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.actionBtn:hover:not(:disabled) {
+  border-color: var(--rd-border-strong);
+  background: rgb(255 255 255 / 4%);
+  color: var(--rd-text);
 }
 
 .actionBtn:disabled {
@@ -159,15 +215,17 @@
 }
 
 .danger {
-  border-color: #6b3030;
-  color: #ff9d9d;
+  border-color: rgb(239 111 111 / 40%);
+  color: var(--rd-err);
 }
 
 .danger:hover:not(:disabled) {
-  background: #3a2020;
+  border-color: var(--rd-err);
+  background: rgb(239 111 111 / 10%);
+  color: var(--rd-err);
 }
 
-/* 添加设备对话框 */
+/* ---- 添加设备对话框 ---- */
 
 .overlay {
   position: fixed;
@@ -176,6 +234,7 @@
   align-items: center;
   justify-content: center;
   background: rgb(0 0 0 / 60%);
+  backdrop-filter: blur(2px);
   z-index: 10;
 }
 
@@ -186,16 +245,17 @@
   width: 380px;
   max-width: calc(100vw - 48px);
   padding: 20px;
-  border: 1px solid #333;
-  border-radius: 8px;
-  background: #222;
-  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 55%);
 }
 
 .dialogTitle {
   margin: 0;
   font-size: 16px;
-  color: #eee;
+  font-weight: 600;
+  color: var(--rd-text);
 }
 
 .field {
@@ -206,22 +266,24 @@
 
 .field > span {
   font-size: 12px;
-  color: #999;
+  color: var(--rd-text-dim);
 }
 
 .input {
   padding: 7px 10px;
-  font-family: Consolas, "Courier New", monospace;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #111;
-  color: #eee;
+  font-family: var(--rd-font-mono);
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
   font-size: 13px;
+  transition: border-color 0.12s ease;
 }
 
 .input:focus {
   outline: none;
-  border-color: #4a7d4a;
+  border-color: var(--rd-accent);
+  box-shadow: 0 0 0 3px var(--rd-accent-soft);
 }
 
 .dialogActions {

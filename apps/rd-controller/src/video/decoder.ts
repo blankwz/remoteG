@@ -97,7 +97,11 @@ export class H264Decoder {
     this.canvas = canvas;
     this.onStats = onStats;
     this.decoder = new VideoDecoder({
-      output: (frame) => this.onOutput(frame),
+      output: (frame) => {
+        const w = window as unknown as { __dec?: number };
+        w.__dec = (w.__dec ?? 0) + 1;
+        this.onOutput(frame);
+      },
       error: (err) => {
         // 解码器致命错误：M0 仅记录与上报，不自动重建
         console.error("VideoDecoder error", err);

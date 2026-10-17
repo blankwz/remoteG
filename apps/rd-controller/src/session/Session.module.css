@@ -1,4 +1,5 @@
-/* 会话页样式（T-021）：深色系，风格与 Windows.module.css 一致 */
+/* 会话页样式（T-021）：令牌见 App.module.css :root（深色 / 蓝主色 / 8px 圆角）。
+ * stage/stageTopLeft/stageCenter/group/surface 等结构类只调色，不动布局。 */
 
 .page {
   display: flex;
@@ -7,44 +8,98 @@
   min-height: 0;
 }
 
-/* ---- 工具栏 ---- */
+/* ---- 工具栏（返回 + 分组控件 + 提示） ---- */
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid #333;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rd-border);
+  background: var(--rd-panel);
   flex-wrap: wrap;
 }
 
-.toolBtn {
-  padding: 5px 14px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #1b1b1b;
-  color: #ddd;
+.backBtn {
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.backBtn:hover {
+  color: var(--rd-text);
+  background: rgb(255 255 255 / 6%);
+}
+
+.toolbarDivider {
+  flex: none;
+  align-self: stretch;
+  margin: 4px 8px;
+  border-left: 1px solid var(--rd-border);
+}
+
+.toolbarGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolBtn {
+  padding: 5px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background-color 0.12s ease;
 }
 
 .toolBtn:hover {
-  border-color: #4a7d4a;
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
+  background: rgb(255 255 255 / 4%);
 }
 
-.toolBtnActive {
-  border-color: #4a7d4a;
-  background: #245224;
-  color: #e6ffe6;
+.toolBtn:active {
+  transform: translateY(1px);
+}
+
+.toolBtnActive,
+.toolBtnActive:hover {
+  color: var(--rd-accent-text);
+  border-color: var(--rd-accent);
+  background: var(--rd-accent-soft);
 }
 
 .zoomSelect {
   padding: 5px 8px;
-  border: 1px solid #444;
-  border-radius: 4px;
-  background: #1b1b1b;
-  color: #ddd;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
   font-size: 13px;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.zoomSelect:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
 }
 
 .spacer {
@@ -52,12 +107,20 @@
 }
 
 .notice {
-  color: #e8b45a;
+  padding: 2px 10px;
+  border: 1px solid rgb(229 181 103 / 40%);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(229 181 103 / 10%);
+  color: var(--rd-warn);
   font-size: 12px;
 }
 
 .toast {
-  color: #9fd49f;
+  padding: 2px 10px;
+  border: 1px solid rgb(70 209 126 / 35%);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(70 209 126 / 8%);
+  color: var(--rd-ok);
   font-size: 12px;
   max-width: 420px;
   overflow: hidden;
@@ -66,7 +129,9 @@
 }
 
 .toastError {
-  color: #e07a7a;
+  border-color: rgb(239 111 111 / 40%);
+  background: rgb(239 111 111 / 10%);
+  color: var(--rd-err);
 }
 
 /* ---- 标签栏 ---- */
@@ -74,33 +139,55 @@
 .tabs {
   display: flex;
   align-items: stretch;
-  gap: 2px;
-  padding: 6px 12px 0;
-  border-bottom: 1px solid #333;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--rd-border);
   overflow-x: auto;
 }
 
 .tab,
 .tabActive {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid #333;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid transparent;
   border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  background: #161616;
-  color: #bbb;
+  border-radius: var(--rd-radius) var(--rd-radius) 0 0;
+  background: transparent;
+  color: var(--rd-text-faint);
   font-size: 13px;
   cursor: pointer;
   max-width: 240px;
   user-select: none;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
 }
 
-.tabActive {
-  background: #222;
-  color: #eee;
-  border-color: #4a7d4a;
+.tab:hover {
+  color: var(--rd-text-dim);
+  background: rgb(255 255 255 / 4%);
+}
+
+.tabActive,
+.tabActive:hover {
+  background: var(--rd-card);
+  color: var(--rd-text);
+  border-color: var(--rd-border);
+}
+
+/* 激活标签顶条：与工具栏主色呼应 */
+.tabActive::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--rd-accent);
 }
 
 .tabTitle {
@@ -110,17 +197,28 @@
 }
 
 .tabClose {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
   border: none;
+  border-radius: 4px;
   background: transparent;
-  color: #888;
+  color: var(--rd-text-faint);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
-  padding: 0 2px;
+  padding: 0;
+  transition:
+    color 0.1s ease,
+    background-color 0.1s ease;
 }
 
 .tabClose:hover {
-  color: #e07a7a;
+  color: var(--rd-err);
+  background: rgb(239 111 111 / 12%);
 }
 
 /* ---- 舞台 ---- */
@@ -130,11 +228,63 @@
   flex: 1;
   min-height: 0;
   display: flex;
+  background: var(--rd-bg-deep);
 }
+
+/* 无标签空态：标题 + 说明 + 入口按钮 */
 
 .empty {
   margin: auto;
-  color: #777;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 480px;
+  padding: 24px;
+  text-align: center;
+  color: var(--rd-text-faint);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rd-text-dim);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.emptyActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.primaryBtn {
+  padding: 7px 16px;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    transform 0.08s ease;
+}
+
+.primaryBtn:hover {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
+}
+
+.primaryBtn:active {
+  transform: translateY(1px);
 }
 
 .stage {
@@ -142,7 +292,7 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #0a0a0a;
+  background: var(--rd-bg-deep);
 }
 
 .stageTopLeft {
@@ -191,40 +341,51 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: rgb(0 0 0 / 65%);
+  background: rgb(10 12 15 / 70%);
+  backdrop-filter: blur(2px);
   z-index: 3;
 }
 
 .overlayText {
   margin: 0;
-  color: #ddd;
+  color: var(--rd-text);
   font-size: 15px;
 }
 
 .retryBtn {
   padding: 6px 22px;
-  border: 1px solid #4a7d4a;
-  border-radius: 4px;
-  background: #245224;
-  color: #e6ffe6;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent);
+  color: #fff;
   font-size: 13px;
   cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.retryBtn:hover {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
 }
 
 .hud {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 10px;
+  right: 10px;
   display: flex;
-  gap: 10px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  background: rgb(0 0 0 / 55%);
+  gap: 12px;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: var(--rd-radius);
+  background: rgb(10 12 15 / 72%);
+  backdrop-filter: blur(8px);
   z-index: 2;
 }
 
 .hudItem {
-  color: #b9e2b9;
+  color: var(--rd-text-dim);
+  font-family: var(--rd-font-mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;

@@ -33,6 +33,40 @@ export interface DecodeCapsDto {
   h264High444: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// 最后连接的设备（导航栏「窗口列表 / 会话」入口指向它；localStorage 持久化）
+// ---------------------------------------------------------------------------
+
+const LAST_DEVICE_KEY = "rd.lastDeviceId";
+
+/** 记住最后连接的设备 id（连接成功 / 窗口列表装载成功时调用）。 */
+export function rememberLastDeviceId(id: string): void {
+  try {
+    window.localStorage.setItem(LAST_DEVICE_KEY, id);
+  } catch {
+    // 存储不可用（隐私模式等）：仅失去导航快捷入口，不影响功能
+  }
+}
+
+/** 读取最后连接的设备 id；从未连接过返回 null。 */
+export function getLastDeviceId(): string | null {
+  try {
+    const id = window.localStorage.getItem(LAST_DEVICE_KEY);
+    return id !== null && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 清除记忆（删除该设备时调用，避免导航指向不存在的设备）。 */
+export function clearLastDeviceId(): void {
+  try {
+    window.localStorage.removeItem(LAST_DEVICE_KEY);
+  } catch {
+    // 同上，忽略
+  }
+}
+
 export function listDevices(): Promise<DeviceDto[]> {
   return invoke("list_devices");
 }

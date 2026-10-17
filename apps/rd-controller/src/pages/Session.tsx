@@ -1,6 +1,7 @@
 /**
- * 会话页（T-021 窗口组 + T-023 终端）：多标签。工具栏（模式 / zoom / HUD /
- * 导出）+ 标签栏（窗口标签 + “+ 终端”）+ 舞台（激活标签内容）。
+ * 会话页（T-021 窗口组 + T-023 终端）：多标签。工具栏（「← 窗口列表」返回 +
+ * 模式 / zoom 分组 + 导出分组）+ 标签栏（窗口标签 + “+ 终端”）+ 舞台（激活
+ * 标签内容）；无标签时空态提供「打开窗口列表 / 打开终端」入口。
  *
  * 标签两类：窗口组（id = windowId，随标签持有 SessionStore）与终端
  * （id = `term:<shell>`，内容为 TermView；标题取 xterm onTitleChange，
@@ -195,6 +196,11 @@ export function Session({ deviceId }: { deviceId: string }) {
       .catch((e: unknown) => showToast(`导出失败：${errText(e)}`, true));
   }, [showToast]);
 
+  /** 返回该设备的窗口列表（导航主出口）。 */
+  const goWindows = useCallback(() => {
+    window.location.hash = `#/windows/${deviceId}`;
+  }, [deviceId]);
+
   // 快捷键：Ctrl+Shift+H 切换 HUD；Ctrl+Shift+S 导出合成 PNG
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -226,35 +232,49 @@ export function Session({ deviceId }: { deviceId: string }) {
   return (
     <main className={styles.page}>
       <div className={styles.toolbar}>
-        {(["FIT", "SCALE", "NATIVE"] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            className={
-              snapshot.fit === mode
-                ? `${styles.toolBtn} ${styles.toolBtnActive}`
-                : styles.toolBtn
-            }
-            onClick={() => setFit(mode)}
-          >
-            {mode === "FIT" ? "Fit" : mode === "SCALE" ? "Scale" : "Native"}
-          </button>
-        ))}
-        <select
-          className={styles.zoomSelect}
-          aria-label="缩放倍率"
-          value={snapshot.zoom}
-          onChange={(e) => setZoom(Number(e.currentTarget.value))}
+        <button
+          type="button"
+          className={styles.backBtn}
+          onClick={goWindows}
+          title="返回该设备的窗口列表"
         >
-          {ZOOM_LEVELS.map((z) => (
-            <option key={z} value={z}>
-              {Math.round(z * 100)}%
-            </option>
-          ))}
-        </select>
-        <button type="button" className={styles.toolBtn} onClick={doExport}>
-          导出 PNG
+          ← 窗口列表
         </button>
+        <span className={styles.toolbarDivider} aria-hidden="true" />
+        <div className={styles.toolbarGroup} role="group" aria-label="显示模式与缩放">
+          {(["FIT", "SCALE", "NATIVE"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={
+                snapshot.fit === mode
+                  ? `${styles.toolBtn} ${styles.toolBtnActive}`
+                  : styles.toolBtn
+              }
+              onClick={() => setFit(mode)}
+            >
+              {mode === "FIT" ? "Fit" : mode === "SCALE" ? "Scale" : "Native"}
+            </button>
+          ))}
+          <select
+            className={styles.zoomSelect}
+            aria-label="缩放倍率"
+            value={snapshot.zoom}
+            onChange={(e) => setZoom(Number(e.currentTarget.value))}
+          >
+            {ZOOM_LEVELS.map((z) => (
+              <option key={z} value={z}>
+                {Math.round(z * 100)}%
+              </option>
+            ))}
+          </select>
+        </div>
+        <span className={styles.toolbarDivider} aria-hidden="true" />
+        <div className={styles.toolbarGroup} role="group" aria-label="会话操作">
+          <button type="button" className={styles.toolBtn} onClick={doExport}>
+            导出 PNG
+          </button>
+        </div>
         <span className={styles.spacer} />
         {snapshot.notice !== null && (
           <span className={styles.notice}>{snapshot.notice}</span>
@@ -298,10 +318,26 @@ export function Session({ deviceId }: { deviceId: string }) {
 
       <div className={styles.stageArea}>
         {activeTab === null ? (
-          <p className={styles.empty}>
-            从窗口列表打开一个远程窗口，或点击“+ 终端”开始终端会话
-            （Ctrl+Shift+H 切换 HUD，Ctrl+Shift+S 导出清晰度对比图）。
-          </p>
+          <div className={styles.empty}>
+            <p className={styles.emptyTitle}>未打开任何会话</p>
+            <p className={styles.emptyHint}>
+              从窗口列表打开一个远程窗口，或直接开始终端会话。
+              <br />
+              快捷键：Ctrl+Shift+H 切换 HUD，Ctrl+Shift+S 导出清晰度对比图。
+            </p>
+            <div className={styles.emptyActions}>
+              <button type="button" className={styles.primaryBtn} onClick={goWindows}>
+                打开窗口列表
+              </button>
+              <button
+                type="button"
+                className={styles.toolBtn}
+                onClick={() => openTermTab(DEFAULT_TERM_SHELL)}
+              >
+                打开终端
+              </button>
+            </div>
+          </div>
         ) : activeTab.kind === "term" ? (
           <div className={styles.stage}>
             <TermView
