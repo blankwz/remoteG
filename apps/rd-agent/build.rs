@@ -8,8 +8,10 @@
 //! 借用 embed-resource 的 Windows SDK 探测(`find_windows_sdk_tool`)。
 //!
 //! **注意**:rc.exe 是 ANSI 程序,无法处理含非 ASCII(如中文)的路径;
-//! 因此 manifest/rc/输出全部放在系统临时目录下以绝对路径引用,
-//! 避免仓库路径含中文时构建失败。
+//! 因此 rc 编译放在系统临时目录下以绝对路径引用,避免仓库路径含中文时构建失败。
+//! 但最终 `.lib` 产物会复制进 `OUT_DIR` 并从那里链接:`OUT_DIR` 在 `target/` 内、
+//! 归 cargo 指纹管理,不会像系统临时目录那样被独立清理(清理后指纹仍新鲜、
+//! build 脚本不重跑,链接就会找不到输入文件)。
 
 use std::path::Path;
 
@@ -49,6 +51,11 @@ fn main() {
         panic!("rc.exe 编译 rd-agent.manifest 失败({})", rc_exe.display());
     }
 
-    println!("cargo:rustc-link-search=native={}", work.display());
+    // 产物入 OUT_DIR(cargo 管理);链接器从 OUT_DIR 找,不依赖临时目录存活
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    std::fs::copy(&lib, Path::new(&out_dir).join("rd-agent-manifest.lib"))
+        .expect("复制 manifest 资源库到 OUT_DIR 失败");
+
+    println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=static=rd-agent-manifest");
 }
