@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 bytes = "1"
+if-addrs = "0.13"
 qoi = "0.4"
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }

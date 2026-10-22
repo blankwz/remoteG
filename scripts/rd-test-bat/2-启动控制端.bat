@@ -6,6 +6,12 @@ echo   rd 控制端启动中（首次约 1~3 分钟编译，请等待）
 echo   完成后自动弹出 rd-controller 窗口
 echo   本窗口不要关闭（关了控制端就退出）
 echo ============================================
+if exist "C:\rd\apps\rd-controller\src-tauri\target\release\rd-controller.exe" (
+  start "" "C:\rd\apps\rd-controller\src-tauri\target\release\rd-controller.exe"
+  exit
+)
+echo First run needs a one-time build, about 5-10 minutes. Please wait...
 cd /d "C:\rd\apps\rd-controller"
-"F:\Program Files\nodejs\node.exe" "C:\Users\blank\AppData\Local\node\corepack\v1\pnpm\12.11.2\bin\pnpm.mjs" tauri dev
+"F:\Program Files\nodejs\node.exe" "C:\Users\blank\AppData\Local\node\corepack\v1\pnpm\12.11.2\bin\pnpm.mjs" tauri build
+start "" "C:\rd\apps\rd-controller\src-tauri\target\release\rd-controller.exe"
 pause

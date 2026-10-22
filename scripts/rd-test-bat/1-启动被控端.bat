@@ -4,7 +4,7 @@ echo ============================================
 echo   rd 被控端 Agent 启动中...
 echo   托盘出现图标即成功。本窗口可关闭。
 echo ============================================
-start "" "C:\rd\target\release\rd-agent.exe" run --listen 127.0.0.1:21118
+start "" "C:\rd\target\release\rd-agent.exe"
 timeout /t 3 >nul
 tasklist | findstr /i "rd-agent" >nul && (
   echo [成功] Agent 已运行，托盘有图标。直接进行下一步即可。

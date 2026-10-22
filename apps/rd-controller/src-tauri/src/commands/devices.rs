@@ -24,6 +24,108 @@ const CODE_LEN: usize = 6;
 /// probe 连接测试超时。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// UDP 局域网发现端口（Agent 侧 `discover.rs` 同步定义）。
+const DISCOVER_PORT: u16 = 21119;
+/// 发现探测报文。
+const DISCOVER_QUERY: &[u8] = b"RD_DISCOVER";
+/// 收集应答窗口。
+const DISCOVER_WINDOW: Duration = Duration::from_millis(1500);
+
+// ---------------------------------------------------------------------------
+// UDP 局域网发现（D-013 包1）：免手填 IP
+// ---------------------------------------------------------------------------
+
+/// 局域网发现的 Agent（未配对，仅提供"添加设备"建议地址）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredDeviceDto {
+    /// Agent 主机名。
+    pub name: String,
+    /// 建议地址（应答来源 IP:QUIC 端口）。
+    pub addr: String,
+    /// 对端指纹短 hex（16 字符，辅助辨认，非安全凭据）。
+    pub fingerprint_short_hex: String,
+}
+
+/// 解析 Agent 应答 `RD_AGENT_v1|主机名|指纹短hex|QUIC端口`，地址取 UDP 来源 IP。
+fn parse_discover_reply(buf: &[u8], peer: std::net::SocketAddr) -> Option<DiscoveredDeviceDto> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let mut parts = text.split('|');
+    if parts.next()? != "RD_AGENT_v1" {
+        return None;
+    }
+    let name = parts.next()?.to_string();
+    let fp = parts.next()?;
+    let port: u16 = parts.next()?.parse().ok()?;
+    Some(DiscoveredDeviceDto {
+        name,
+        addr: format!("{}:{port}", peer.ip()),
+        fingerprint_short_hex: fp.chars().take(16).collect(),
+    })
+}
+
+/// 广播发现局域网内的 rd-agent：向受限广播 + 各私网接口定向广播发送探测，
+/// 收集 1.5s 内的应答（发现 ≠ 信任，配对仍需被控端 6 位码）。
+#[tauri::command]
+pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
+    use std::collections::{BTreeSet, HashMap};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::net::UdpSocket;
+    use tokio::time::{timeout, Instant};
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("创建发现 socket 失败:{e}"))?;
+    socket
+        .set_broadcast(true)
+        .map_err(|e| format!("启用广播失败:{e}"))?;
+
+    // 受限广播(255.255.255.255)不跨子网;多子网/VPN 场景补各接口定向广播
+    let mut targets: BTreeSet<SocketAddr> = BTreeSet::from([SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::BROADCAST),
+        DISCOVER_PORT,
+    )]);
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            if let if_addrs::IfAddr::V4(v4) = iface.addr {
+                if v4.ip.is_loopback() {
+                    continue;
+                }
+                let mask = u32::from(v4.netmask);
+                if mask == 0 {
+                    continue;
+                }
+                let broadcast = Ipv4Addr::from(u32::from(v4.ip) | !mask);
+                targets.insert(SocketAddr::new(IpAddr::V4(broadcast), DISCOVER_PORT));
+            }
+        }
+    }
+    for target in &targets {
+        let _ = socket.send_to(DISCOVER_QUERY, target).await;
+    }
+
+    let deadline = Instant::now() + DISCOVER_WINDOW;
+    let mut found: HashMap<String, DiscoveredDeviceDto> = HashMap::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let remain = deadline.saturating_duration_since(Instant::now());
+        if remain.is_zero() {
+            break;
+        }
+        match timeout(remain, socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, peer))) => {
+                if let Some(dev) = parse_discover_reply(&buf[..n], peer) {
+                    found.entry(dev.addr.clone()).or_insert(dev);
+                }
+            }
+            _ => break,
+        }
+    }
+    let mut list: Vec<DiscoveredDeviceDto> = found.into_values().collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name).then(a.addr.cmp(&b.addr)));
+    Ok(list)
+}
+
 // ---------------------------------------------------------------------------
 // DTO
 // ---------------------------------------------------------------------------

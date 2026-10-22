@@ -27,6 +27,13 @@ export interface HelloAckDto {
   encodeCaps: string[];
 }
 
+/** UDP 局域网发现的设备（未配对，仅提供"添加设备"建议地址）。 */
+export interface DiscoveredDeviceDto {
+  name: string;
+  addr: string;
+  fingerprintShortHex: string;
+}
+
 /** 本机解码能力（前端探测后上报，连接握手时填入 Hello）。 */
 export interface DecodeCapsDto {
   h264Baseline420: boolean;
@@ -69,6 +76,11 @@ export function clearLastDeviceId(): void {
 
 export function listDevices(): Promise<DeviceDto[]> {
   return invoke("list_devices");
+}
+
+/** 广播扫描局域网内的 rd-agent（约 1.5s，发现≠信任）。 */
+export function discoverDevices(): Promise<DiscoveredDeviceDto[]> {
+  return invoke("discover_devices");
 }
 
 export function pairDevice(addr: string, code: string, name: string): Promise<DeviceDto> {

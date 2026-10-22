@@ -38,6 +38,7 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use anyhow::Context as _;
     use tray_icon::menu::{
         CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     };
@@ -63,10 +64,14 @@ mod imp {
     const ID_CONNECTED: &str = "connected";
     const ID_DISCONNECT_ALL: &str = "disconnect-all";
     const ID_PAUSE: &str = "pause";
+    const ID_AUTOSTART: &str = "autostart";
     const ID_OPEN_LOGS: &str = "open-logs";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
     const DEVICE_ID_PREFIX: &str = "device-";
+    /// HKCU Run 自启键(D-013 包1:用户态自启,免 UAC 免服务)。
+    const AUTOSTART_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const AUTOSTART_VALUE: &str = "rd-agent";
 
     /// 配对码弹窗互斥:同一时刻至多一个(防连点堆叠)。
     static CODE_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
@@ -80,6 +85,7 @@ mod imp {
         device_items: Vec<MenuItem>,
         disconnect_all_item: MenuItem,
         paused_item: CheckMenuItem,
+        autostart_item: CheckMenuItem,
         /// 上次设备列表签名(变化才重建子菜单,避免每秒重建)。
         peers_signature: String,
         connected_count: usize,
@@ -97,6 +103,8 @@ mod imp {
         let connected = Submenu::with_id(ID_CONNECTED, "已连接:0", false);
         let disconnect_all_item = MenuItem::with_id(ID_DISCONNECT_ALL, "断开所有", false, None);
         let paused_item = CheckMenuItem::with_id(ID_PAUSE, "暂停共享", true, false, None);
+        let autostart_item =
+            CheckMenuItem::with_id(ID_AUTOSTART, "开机自启", true, autostart_enabled(), None);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
@@ -106,6 +114,7 @@ mod imp {
         let _ = menu.append(&disconnect_all_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&paused_item);
+        let _ = menu.append(&autostart_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&open_logs);
         let _ = menu.append(&quit_item);
@@ -133,6 +142,7 @@ mod imp {
             device_items: Vec::new(),
             disconnect_all_item,
             paused_item,
+            autostart_item,
             peers_signature: String::new(),
             connected_count: 0,
             active: false,
@@ -188,17 +198,39 @@ mod imp {
                 // 配对码只经 MessageBox 展示,不落日志;同时复制到剪贴板
                 tracing::info!("托盘生成新配对码(5 分钟内有效)");
                 let copied = copy_to_clipboard(&code);
-                show_pair_code_dialog(
-                    if copied {
-                        format!(
-                            "{code}
-(已复制到剪贴板)"
-                        )
-                    } else {
-                        code
-                    },
-                    state.local_fp.short_hex(),
-                );
+                let code_line = if copied {
+                    format!("{code}(已复制到剪贴板)")
+                } else {
+                    code
+                };
+                // 首行展示本机可达地址(D-013:码+地址同屏,家人只需念两条信息)
+                let addrs: Vec<String> = state
+                    .listen_addrs
+                    .lock()
+                    .expect("listen_addrs 锁中毒")
+                    .iter()
+                    .filter(|a| !a.ip().is_loopback())
+                    .map(|a| a.to_string())
+                    .collect();
+                let addr_lines = if addrs.is_empty() {
+                    "(监听地址未就绪,稍后再试)".to_string()
+                } else {
+                    addrs.join("\n")
+                };
+                show_pair_code_dialog(format!(
+                    "把下面地址填进控制端「添加设备」:\n{addr_lines}\n\n配对码:{code_line}"
+                ));
+            }
+            ID_AUTOSTART => {
+                let enable = ui.autostart_item.is_checked();
+                match set_autostart(enable) {
+                    Ok(()) => tracing::info!(enable, "开机自启已更新"),
+                    Err(err) => {
+                        tracing::error!("设置开机自启失败: {err:#}");
+                        // 回滚勾选,与注册表实际状态一致
+                        ui.autostart_item.set_checked(!enable);
+                    }
+                }
             }
             ID_DISCONNECT_ALL => disconnect_all(state),
             ID_PAUSE => {
@@ -324,15 +356,16 @@ mod imp {
         }
     }
 
-    /// 弹出配对码对话框(独立线程,模态于该线程不阻塞托盘循环)。
-    fn show_pair_code_dialog(code: String, local_fp_hex: String) {
+    /// 弹出配对对话框(独立线程,模态于该线程不阻塞托盘循环)。
+    ///
+    /// 文案 = 本机可达地址(多条逐行)+ 配对码;指纹不再展示(D-013:MITM
+    /// 防护由 SPAKE2 MAC 绑定指纹保证,与是否肉眼比对无关,概念最小化)。
+    fn show_pair_code_dialog(text: String) {
         if CODE_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
             return;
         }
         std::thread::spawn(move || {
-            let text = HSTRING::from(format!(
-                "配对码 {code},5 分钟内有效\n\n本机指纹(前 8 字节):{local_fp_hex}"
-            ));
+            let text = HSTRING::from(text);
             let title = HSTRING::from("rd 远程控制 · 配对");
             unsafe {
                 MessageBoxW(
@@ -344,6 +377,30 @@ mod imp {
             }
             CODE_DIALOG_OPEN.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// HKCU Run 自启当前是否已登记。
+    fn autostart_enabled() -> bool {
+        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .open_subkey(AUTOSTART_RUN_KEY)
+            .and_then(|key| key.get_value::<String, _>(AUTOSTART_VALUE))
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 写/删 HKCU Run 自启项(指向当前 exe;免 UAC、用户登录即拉起)。
+    fn set_autostart(enable: bool) -> anyhow::Result<()> {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let key = hkcu.open_subkey_with_flags(AUTOSTART_RUN_KEY, winreg::enums::KEY_SET_VALUE)?;
+        if enable {
+            let exe = std::env::current_exe().context("定位当前 exe 失败")?;
+            key.set_value(AUTOSTART_VALUE, &exe.to_string_lossy().to_string())
+                .context("写入 Run 键失败")?;
+        } else {
+            key.delete_value(AUTOSTART_VALUE)
+                .context("删除 Run 键失败")?;
+        }
+        Ok(())
     }
 
     /// 用资源管理器打开日志目录。

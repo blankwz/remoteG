@@ -19,9 +19,10 @@ pub const DEFAULT_LISTEN_PORT: u16 = 21118;
 pub struct Config {
     /// 监听端口(`listen_addrs` 自动发现时使用;显式 `--listen` 地址含端口时不适用)。
     pub listen_port: u16,
-    /// 显式监听地址(IP 列表,端口取 `listen_port`);空 = 自动(Tailscale 优先,见 server.rs)。
+    /// 显式监听地址(IP 列表,端口取 `listen_port`);空 = 自动(见 server.rs)。
     pub listen_addrs: Vec<IpAddr>,
-    /// 是否额外绑定私网地址(默认仅 Tailscale `100.64.0.0/10`)。
+    /// 是否额外绑定私网地址(默认 true:同 WiFi 直连是小白场景的主要路径,
+    /// 安全由配对码+信任列表兜底,D-013 评审确认;设 false 收窄为仅 Tailscale)。
     pub allow_lan: bool,
     /// 终端功能开关(11_security:信任设备才可开,此处为总开关)。
     pub terminal_enabled: bool,
@@ -38,7 +39,7 @@ impl Default for Config {
         Self {
             listen_port: DEFAULT_LISTEN_PORT,
             listen_addrs: Vec::new(),
-            allow_lan: false,
+            allow_lan: true,
             terminal_enabled: true,
             refine_enabled: true,
             max_fps: 60,

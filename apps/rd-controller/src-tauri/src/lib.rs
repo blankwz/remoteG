@@ -32,6 +32,7 @@ pub fn run() {
             commands::spike::spike_connect,
             // T-019：设备
             commands::devices::list_devices,
+            commands::devices::discover_devices,
             commands::devices::pair_device,
             commands::devices::remove_device,
             commands::devices::connect_device,

@@ -55,3 +55,10 @@
 - 根因：apps/rd-agent/build.rs 为绕开 rc.exe 的 ANSI 路径限制，把 .lib 产出到固定 `%TEMP%\rd-agent-manifest-build`；`rerun-if-changed` 只盯 rd-agent.manifest，Temp 被系统清理后 build 脚本指纹仍"新鲜"不重跑 → 链接输入消失。**教训：构建产物凡落在 cargo 指纹管理之外（Temp、家目录等），清理后必然出现"指纹新鲜但产物不存在"的幽灵断裂。**
 - 决定：rc.exe 编译仍在 Temp（保中文路径兼容），.lib 复制进 OUT_DIR 并从 OUT_DIR 链接——OUT_DIR 在 target/ 内、归 cargo 指纹管理，随 cargo clean 同生共死。前端按 lockfile `CI=true pnpm install` 重建。排查 rd-proto/src-tauri 的 build.rs 无同类问题。
 - 影响：环境清理不再破坏构建；无协议/行为变化。验证：workspace 36 组 + e2e 8/8 + clippy/fmt + 前端 114 全绿（2026-10-22）。
+
+## D-013 五专家联合评审与全量四批改进立项（用户确认 2026-10-22）
+- 背景：用户要求「找五个远程控制专家评判此软件，加强它、简化操作、小白也能用、可借鉴开源」。五个只读评审 Agent（小白可用性/开源架构/网络弱网/安全/Windows 平台）完成交叉验证，报告要点存 RUN_LOG 2026-10-22 行。
+- 共识定性：窗口级+1:1 反向适配为真实护城河（维持）；短板集中在可达性（Tailscale 前提、被控端形态）与失控场景（会话边界/弱网/断线/被控端感知）。
+- 决定：全量四批连做——包1 小白可用（allow_lan 默认 true、双击即用、自报地址、HKCU Run 自启、UDP 发现、节点共享引导等）、包2 可靠性（保活、陈旧帧丢弃、持续退避重连、冻结看门狗、UIPI 反馈、销毁收场等）、包3 安全（暂停盖终端、撤销信任入口、连接提示、配对超时等）、包4 协议 v0.1（剪贴板同步、view-only、SessionState 关闭原因、窗口状态事件、码控阈值化、砍 zstd-BGRA 双瓦片格式）。
+- 共识不做（防过度工程）：自建中继/ID 服务器、L1 UIA、M3 DOM 镜像、#32768 菜单真实画面、AV1/SCC、账号体系、窗口缩略图、服务化/UAC 接管（列 M2 决策点）。
+- 改进项全部有 file:line 证据；执行中沿用各专家「已处理好勿改清单」（帧池排空、PIPE_SEQ、DPI 归一化等）。

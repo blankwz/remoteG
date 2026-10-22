@@ -17,6 +17,42 @@
   gap: 12px;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 局域网扫描分组标题 */
+.scanHeading {
+  padding: 8px 2px 0;
+  color: var(--rd-text-faint);
+  font-size: 12px;
+}
+
+/* 发现设备圆点:扫描结果(未配对)与已配对区分 */
+.dotScan {
+  background: var(--rd-accent);
+  box-shadow: 0 0 6px 1px var(--rd-accent-soft);
+}
+
+/* 页脚帮助文案(Tailscale 引导等) */
+.hint {
+  margin: 4px 0 0;
+  color: var(--rd-text-faint);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.hint a {
+  color: var(--rd-accent-text);
+  text-decoration: none;
+}
+
+.hint a:hover {
+  text-decoration: underline;
+}
+
 .title {
   margin: 0;
   font-size: 18px;

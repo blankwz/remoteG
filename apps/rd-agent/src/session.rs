@@ -82,6 +82,9 @@ pub struct AgentState {
     pub paused: AtomicBool,
     /// 连接 id → 在线对端(托盘显示与断开清理用)。
     pub peers: Mutex<HashMap<u64, PeerInfo>>,
+    /// 实际 QUIC 监听地址(bind 后由 main 回填;托盘"本机地址"展示用,
+    /// 构建期未知故为 Mutex+空初始化)。
+    pub listen_addrs: Mutex<Vec<std::net::SocketAddr>>,
 }
 
 /// 一台在线控制端(name/fp/since 由 T-018 托盘消费;cancel 为本连接取消令牌)。

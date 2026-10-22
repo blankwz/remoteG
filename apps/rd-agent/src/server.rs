@@ -3,8 +3,10 @@
 //! 地址选择(05_api §1、11_security「暴露到公网」对策):
 //! - `--listen <addr>`:显式覆盖(测试/调试);
 //! - 配置 `listen_addrs` 非空:按配置绑定;
-//! - 自动:仅绑定 Tailscale 网段 `100.64.0.0/10`;`allow_lan = true` 时额外绑定
-//!   私网地址(RFC1918)。一个可用地址都没有则报错退出并提示安装 Tailscale。
+//! - 自动:绑定本机回环(同机控制/测试,不出网卡无暴露面)+ Tailscale 网段
+//!   `100.64.0.0/10`;`allow_lan`(默认 true)时额外绑定私网地址(RFC1918,
+//!   D-013:同 WiFi 直连是小白主路径,安全由配对码+信任列表兜底)。
+//!   一个可用地址都没有则报错退出并提示安装 Tailscale。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -41,10 +43,11 @@ pub fn resolve_listen_addrs(
         .collect())
 }
 
-/// 自动发现:Tailscale(CGNAT `100.64.0.0/10`)必选;`allow_lan` 时加 RFC1918 私网。
+/// 自动发现:回环必选(不出网卡,同机控制/测试用);Tailscale(CGNAT
+/// `100.64.0.0/10`)与 `allow_lan` 时的 RFC1918 私网按接口枚举。
 fn auto_ips(allow_lan: bool) -> anyhow::Result<Vec<IpAddr>> {
     let interfaces = if_addrs::get_if_addrs().context("枚举网络接口失败(自动监听地址需要)")?;
-    let mut out = Vec::new();
+    let mut out = vec![IpAddr::from([127, 0, 0, 1])];
     for iface in interfaces {
         let IpAddr::V4(v4) = iface.ip() else {
             continue;
@@ -56,7 +59,8 @@ fn auto_ips(allow_lan: bool) -> anyhow::Result<Vec<IpAddr>> {
             out.push(IpAddr::V4(v4));
         }
     }
-    if out.is_empty() {
+    // 回环已必选,理论上不会走到;保留兜底以防极端环境
+    if out.len() <= 1 {
         let hint = if allow_lan {
             "Tailscale(100.64.0.0/10)或私网地址"
         } else {
@@ -64,7 +68,7 @@ fn auto_ips(allow_lan: bool) -> anyhow::Result<Vec<IpAddr>> {
         };
         anyhow::bail!(
             "未找到可监听的{hint}。请安装并登录 Tailscale,或在 agent.toml 的 \
-             listen_addrs 中显式配置监听地址(或启动时加 --allow-lan 对应的 allow_lan = true)。"
+             listen_addrs 中显式配置监听地址。"
         );
     }
     Ok(out)

@@ -1,10 +1,13 @@
+// release 构建隐藏控制台窗口(小白双击即用,无黑框不闪退);日志已双写文件,
+// stdout 层在无控制台时静默。debug/测试构建保留控制台(RD_LISTEN 解析依赖 stdout)。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! rd-agent — Windows 被控端。
 //!
-//! - `run`:正式服务(T-015)——配置加载、QUIC 监听、Hello/鉴权/配对、消息分发;
-//!   托盘由 T-018 填充,窗口/输入/终端 handler 由 T-016/T-017 填充;
-//! - `spike`:M0 Spike 管线(T-006,仅 Windows,保留)。
+//! 无参数(双击)等价 `run`:自动发现监听地址 + 托盘;命令行子命令保留给
+//! 测试与调试(`run --print-port`、`spike`)。
 
 mod config;
+mod discover;
 mod input_handler;
 mod server;
 mod session;
@@ -39,8 +42,10 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         #[cfg(windows)]
-        Commands::Spike(args) => spike::run(args),
-        Commands::Run(args) => run_app(args),
+        Some(Commands::Spike(args)) => spike::run(args),
+        Some(Commands::Run(args)) => run_app(args),
+        // 无参数(双击启动)= 正式服务
+        None => run_app(RunArgs::default()),
     }
 }
 
@@ -48,7 +53,7 @@ fn main() -> anyhow::Result<()> {
 #[command(name = "rd-agent", about = "窗口级远程控制被控端")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -61,7 +66,7 @@ enum Commands {
 }
 
 /// `run` 子命令参数。
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct RunArgs {
     /// 配置/身份/信任列表目录(默认 %LOCALAPPDATA%\rd;日志在其下 logs/)。
     #[arg(long)]
@@ -106,6 +111,7 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         injector: Mutex::new(input_handler::Injector::new()),
         paused: AtomicBool::new(false),
         peers: Mutex::new(HashMap::new()),
+        listen_addrs: Mutex::new(Vec::new()),
     });
 
     #[cfg(debug_assertions)]
@@ -130,10 +136,20 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         "QUIC 监听就绪"
     );
     {
+        // 托盘弹窗"本机地址"消费:bind 之前已构建 AgentState,bind 后回填
+        *state.listen_addrs.lock().expect("listen_addrs 锁中毒") = bound.clone();
+    }
+    {
         let state = Arc::clone(&state);
         rt.spawn(async move {
             server::serve_all(state, servers).await;
         });
+    }
+
+    {
+        // UDP 局域网发现应答(21119):失败仅降级(不影响 QUIC 服务)
+        let state = Arc::clone(&state);
+        rt.spawn(async move { discover::serve(state).await });
     }
 
     if args.print_port {

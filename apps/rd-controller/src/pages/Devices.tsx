@@ -1,14 +1,14 @@
 /**
- * 设备页（T-019）：设备卡片（在线圆点/指纹前 8 字节）+ “添加设备”对话框
- * （地址可填 MagicDNS 名，默认端口 21118 由 Rust 侧补全）+ 连接跳转 /devices → /windows/:id。
+ * 设备页（T-019）：设备卡片 + 「添加设备」对话框 + 局域网扫描（D-013 包1：
+ * 免手填 IP）+ 指纹不匹配一键重配对 + Tailscale 节点共享引导。
  */
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  AGENT_DEFAULT_PORT,
   clearLastDeviceId,
   connectDevice,
   disconnectDevice,
+  discoverDevices,
   getLastDeviceId,
   listDevices,
   pairDevice,
@@ -16,6 +16,7 @@ import {
   rememberLastDeviceId,
   removeDevice,
   type DeviceDto,
+  type DiscoveredDeviceDto,
 } from "../api/devices";
 import styles from "./Devices.module.css";
 
@@ -44,6 +45,9 @@ export function Devices() {
   const [formError, setFormError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
   const [form, setForm] = useState({ addr: "127.0.0.1:21118", code: "", name: "" });
+  /** 局域网扫描结果（发现 ≠ 信任，点击仅预填添加对话框）。 */
+  const [discovered, setDiscovered] = useState<DiscoveredDeviceDto[] | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -80,7 +84,15 @@ export function Devices() {
         window.location.hash = `#/windows/${d.id}`;
         setNotice(null);
       } catch (e) {
-        setError(errText(e));
+        const msg = errText(e);
+        // 指纹不匹配（对端重装/换证书）→ 一键重配对：预填地址打开添加对话框
+        if (msg.includes("指纹不匹配")) {
+          setShowAdd(true);
+          setForm({ addr: d.addr, code: "", name: d.name });
+          setFormError("对端证书已变化（可能已重装）。请让对方在托盘点「生成配对码」，输入新配对码完成重新配对。");
+        } else {
+          setError(msg);
+        }
         await refresh();
       } finally {
         setBusyId(null);
@@ -88,6 +100,27 @@ export function Devices() {
     },
     [refresh],
   );
+
+  /** 扫描局域网（约 1.5s）；结果点击仅预填添加对话框，不自动连接。 */
+  const onScan = useCallback(async () => {
+    setScanning(true);
+    setNotice(null);
+    setError(null);
+    try {
+      setDiscovered(await discoverDevices());
+    } catch (e) {
+      setError(`扫描失败：${errText(e)}`);
+    } finally {
+      setScanning(false);
+    }
+  }, []);
+
+  /** 把发现的设备预填进添加对话框（需再输配对码完成配对）。 */
+  const onPickDiscovered = useCallback((d: DiscoveredDeviceDto) => {
+    setShowAdd(true);
+    setForm({ addr: d.addr, code: "", name: d.name });
+    setFormError(null);
+  }, []);
 
   const onDisconnect = useCallback(
     async (d: DeviceDto) => {
@@ -176,9 +209,19 @@ export function Devices() {
     <main className={styles.page}>
       <header className={styles.header}>
         <h1 className={styles.title}>设备</h1>
-        <button type="button" className={styles.addBtn} onClick={() => setShowAdd(true)}>
-          添加设备
-        </button>
+        <div className={styles.headerActions}>
+          <button
+            type="button"
+            className={styles.actionBtn}
+            onClick={() => void onScan()}
+            disabled={scanning || busyId !== null}
+          >
+            {scanning ? "扫描中…" : "扫描局域网"}
+          </button>
+          <button type="button" className={styles.addBtn} onClick={() => setShowAdd(true)}>
+            添加设备
+          </button>
+        </div>
       </header>
 
       {error !== null && <p className={styles.error}>{error}</p>}
@@ -186,7 +229,7 @@ export function Devices() {
 
       {devices.length === 0 ? (
         <p className={styles.empty}>
-          还没有设备。点击右上角“添加设备”，输入被控端地址与托盘显示的 6 位配对码。
+          还没有设备。点「扫描局域网」自动发现同网段被控电脑，或点「添加设备」手动输入地址与托盘显示的 6 位配对码。
         </p>
       ) : (
         <ul className={styles.list}>
@@ -197,16 +240,13 @@ export function Devices() {
                 className={styles.mainBtn}
                 onClick={() => void onConnect(d)}
                 disabled={busyId !== null}
-                title="连接设备"
+                title={`连接 ${d.name}（指纹 ${d.fingerprintHex.slice(0, 16)}…）`}
               >
                 <span className={styles.dot} data-online={d.online} aria-hidden="true" />
                 <span className={styles.info}>
                   <span className={styles.name}>{d.name}</span>
                   <span className={styles.addr}>{d.addr}</span>
                 </span>
-                <code className={styles.fp} title="对端证书指纹（前 8 字节）">
-                  {d.fingerprintHex.slice(0, 16)}
-                </code>
               </button>
               <div className={styles.actions}>
                 <button
@@ -236,8 +276,49 @@ export function Devices() {
               </div>
             </li>
           ))}
+          {discovered !== null && discovered.length > 0 && (
+            <>
+              <li className={styles.scanHeading}>
+                局域网发现（发现≠信任，添加后仍需托盘配对码）
+              </li>
+              {discovered.map((d) => (
+                <li key={d.addr} className={styles.card}>
+                  <button
+                    type="button"
+                    className={styles.mainBtn}
+                    onClick={() => onPickDiscovered(d)}
+                    title="添加该设备（需再输托盘配对码）"
+                  >
+                    <span className={`${styles.dot} ${styles.dotScan}`} aria-hidden="true" />
+                    <span className={styles.info}>
+                      <span className={styles.name}>{d.name}</span>
+                      <span className={styles.addr}>{d.addr}</span>
+                    </span>
+                  </button>
+                  <div className={styles.actions}>
+                    <button
+                      type="button"
+                      className={styles.actionBtn}
+                      onClick={() => onPickDiscovered(d)}
+                    >
+                      添加
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </>
+          )}
         </ul>
       )}
+
+      <footer className={styles.hint}>
+        对方没装 Tailscale？同一 WiFi 可直接用局域网 IP 连接（先「扫描局域网」）。跨网络用
+        Tailscale：
+        <a href="https://tailscale.com/kb/1461/sharing" target="_blank" rel="noreferrer">
+          节点共享
+        </a>
+        （发邀请链接给对方，对方用自己的账号接受，无需登你的账号）。
+      </footer>
 
       {showAdd && (
         <div className={styles.overlay} onClick={closeAdd}>
@@ -253,7 +334,7 @@ export function Devices() {
                 className={styles.input}
                 value={form.addr}
                 onChange={(e) => updateForm("addr", e.currentTarget.value)}
-                placeholder={`my-pc:${AGENT_DEFAULT_PORT} 或 192.168.1.10`}
+                placeholder="托盘弹窗里的地址，如 100.x.y.z:21118 或 192.168.1.10"
                 spellCheck={false}
                 autoFocus
               />
