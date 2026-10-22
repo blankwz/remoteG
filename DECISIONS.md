@@ -49,3 +49,9 @@
 - 缺陷 1（P0）：rd-agent 进程内瓦片精修链路零产出（e2e t03 SKIP）——独立复现同库同参数正常，指向 encode_loop 的 Timeout→tick 路径或 TileRefiner since 刷新逻辑。阻断 US-03 文字清晰核心验收，**必须 T-026 前修复**。
 - 缺陷 2（P1）：**WGC 无法捕获 #32768 弹出菜单窗口**（CreateForWindow 返回 0x80070057，Windows 平台硬限制）——架构 §3.3"每个子窗口独立 WGC 流"对菜单类不可行。修复：CHILD_ADDED 与管线建立解耦（发现成员即发事件）；菜单成员无视频流，控制端显示占位。**架构降级记录**：US-04 的"菜单可见"降级为"菜单可交互感知"，真实画面依赖根窗口重绘（多数应用菜单为浮层不在根客户区）——完整菜单画面列为 M2 后评估方案（如窗口放大截取/辅助屏镜像）。
 - 决定：插入 FIX-1 小任务（A4，改 window_session.rs），完成后 e2e 8/8 转绿（t03/t06 恢复断言）。
+
+## D-012 插入修复小任务 FIX-2：manifest 资源库产出入 OUT_DIR（Orchestrator 裁决 2026-10-22）
+- 现象：闲置一周后回归验收，`cargo test --workspace` 全部 rd-agent 目标链接失败 LNK1181（找不到 rd-agent-manifest.lib）。前端 vitest 包同批丢失（node_modules 部分被清理）。
+- 根因：apps/rd-agent/build.rs 为绕开 rc.exe 的 ANSI 路径限制，把 .lib 产出到固定 `%TEMP%\rd-agent-manifest-build`；`rerun-if-changed` 只盯 rd-agent.manifest，Temp 被系统清理后 build 脚本指纹仍"新鲜"不重跑 → 链接输入消失。**教训：构建产物凡落在 cargo 指纹管理之外（Temp、家目录等），清理后必然出现"指纹新鲜但产物不存在"的幽灵断裂。**
+- 决定：rc.exe 编译仍在 Temp（保中文路径兼容），.lib 复制进 OUT_DIR 并从 OUT_DIR 链接——OUT_DIR 在 target/ 内、归 cargo 指纹管理，随 cargo clean 同生共死。前端按 lockfile `CI=true pnpm install` 重建。排查 rd-proto/src-tauri 的 build.rs 无同类问题。
+- 影响：环境清理不再破坏构建；无协议/行为变化。验证：workspace 36 组 + e2e 8/8 + clippy/fmt + 前端 114 全绿（2026-10-22）。
