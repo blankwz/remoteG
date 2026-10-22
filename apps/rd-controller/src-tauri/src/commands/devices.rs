@@ -491,9 +491,15 @@ pub async fn connect_device(
             .ok_or_else(|| "设备不存在".to_string())?
     };
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
-    let conn = DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp))
-        .await
-        .map_err(|e| describe_connect_error(&e))?;
+    // 握手 3s 超时（D-013 包2）：对不可达地址 QUIC 握手可拖到 ~10s，
+    // 自动重连循环会被单次慢失败拖住——快速失败让退避节奏生效。
+    let conn = tokio::time::timeout(
+        Duration::from_secs(3),
+        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp)),
+    )
+    .await
+    .map_err(|_| format!("连接 {} 超时（3s）", entry.addr))?
+    .map_err(|e| describe_connect_error(&e))?;
     let ack = match conn.handshake(state.decode_caps()).await {
         Ok(ack) => ack,
         Err(e) => {

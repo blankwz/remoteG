@@ -174,6 +174,9 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         return Ok(());
     }
 
+    // 会话保活(D-013 包2):有受信任连接期间阻止屏保/息屏/睡眠
+    crate::power::acquire();
+
     // --- Authenticated:构造上下文、注册对端、启动 datagram 循环、分发 ---
     // 连接序号:Agent 进程内自增(rd-transport 未暴露 quinn stable_id;
     // 仅用于本进程内 peers 表/托盘展示,唯一性在进程内成立即可)
@@ -208,6 +211,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     let dispatch_result = dispatch_loop(&ctx, &mut ctl_rx).await;
 
     // --- 断开清理(任务卡步骤 5)---
+    crate::power::release();
     window_session::on_disconnect(&ctx);
     input_handler::on_disconnect(&ctx);
     term_handler::on_disconnect(&ctx);
@@ -357,22 +361,35 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
                 &ctx.peer_name,
                 window_session::handle(ctx, env.req_id, WindowMsg::Viewport(m)),
             ),
-            // 输入 → T-017(无需回包)
+            // 输入 → T-017;UIPI 拦截(管理员窗口)按 30s 去抖回一次性 Error
             envelope::Msg::Key(m) => {
-                handle_soft(&ctx.peer_name, input_handler::handle(ctx, InputMsg::Key(m)))
+                if let Some((code, message)) =
+                    input_handler::handle_with_notify(ctx, InputMsg::Key(m))
+                {
+                    ctx.send(envelope::Msg::Error(error_msg(code, &message)), env.req_id)
+                        .await?;
+                }
             }
-            envelope::Msg::MouseBtn(m) => handle_soft(
-                &ctx.peer_name,
-                input_handler::handle(ctx, InputMsg::MouseButton(m)),
-            ),
+            envelope::Msg::MouseBtn(m) => {
+                if let Some((code, message)) =
+                    input_handler::handle_with_notify(ctx, InputMsg::MouseButton(m))
+                {
+                    ctx.send(envelope::Msg::Error(error_msg(code, &message)), env.req_id)
+                        .await?;
+                }
+            }
             envelope::Msg::Wheel(m) => handle_soft(
                 &ctx.peer_name,
                 input_handler::handle(ctx, InputMsg::MouseWheel(m)),
             ),
-            envelope::Msg::Text(m) => handle_soft(
-                &ctx.peer_name,
-                input_handler::handle(ctx, InputMsg::TextInput(m)),
-            ),
+            envelope::Msg::Text(m) => {
+                if let Some((code, message)) =
+                    input_handler::handle_with_notify(ctx, InputMsg::TextInput(m))
+                {
+                    ctx.send(envelope::Msg::Error(error_msg(code, &message)), env.req_id)
+                        .await?;
+                }
+            }
             // 终端 → T-017(总开关在分发处统一拦截)
             envelope::Msg::OpenTerm(m) => {
                 if ctx.state.config.terminal_enabled {

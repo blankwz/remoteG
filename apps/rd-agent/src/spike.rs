@@ -32,7 +32,7 @@ pub struct SpikeArgs {
     #[arg(long)]
     pub title: String,
     /// 监听地址。
-    #[arg(long, default_value = "0.0.0.0:21118")]
+    #[arg(long, default_value = "127.0.0.1:21118")]
     pub listen: SocketAddr,
     /// 目标帧率。
     #[arg(long, default_value_t = 60)]

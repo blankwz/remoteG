@@ -9,6 +9,7 @@
 mod config;
 mod discover;
 mod input_handler;
+mod power;
 mod server;
 mod session;
 mod term_handler;
@@ -150,6 +151,14 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         // UDP 局域网发现应答(21119):失败仅降级(不影响 QUIC 服务)
         let state = Arc::clone(&state);
         rt.spawn(async move { discover::serve(state).await });
+    }
+
+    {
+        // encode_caps 预热(D-013 包2):ffmpeg 444 探测 ~1.5s,提前到启动时
+        // 后台执行,消除首个 HelloAck 的同步等待(控制端 RPC 超时 5s)
+        rt.spawn(async move {
+            let _ = tokio::task::spawn_blocking(rd_encode::caps::probe_encode_caps).await;
+        });
     }
 
     if args.print_port {

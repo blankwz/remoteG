@@ -79,10 +79,10 @@ import styles from "./Session.module.css";
 
 /** Fit 视口上报去抖（任务卡步骤 6；Agent 侧另有 150ms trailing 去抖）。 */
 const VIEWPORT_DEBOUNCE_MS = 150;
-/** 断线自动重连次数。 */
-const RECONNECT_ATTEMPTS = 3;
-/** 重连退避基数（第 n 次失败后等待 n 倍基数再试）。 */
+/** 断线自动重连退避基数（第 n 次失败后等待 min(n×基数, 上限) 再试）。 */
 const RECONNECT_BACKOFF_MS = 800;
+/** 重连退避上限（D-013 包2：睡眠唤醒/Agent 重启场景持续重试直到恢复）。 */
+const RECONNECT_BACKOFF_MAX_MS = 30_000;
 
 /** 隐藏的键盘捕获 textarea（任务卡步骤 5）：1px 透明，不参与指针命中。 */
 const CAPTURE_STYLE: CSSProperties = {
@@ -305,6 +305,8 @@ export function WindowGroupView({
   const surfacesRef = useRef(new Map<string, SurfaceHandle>());
   const [phase, setPhase] = useState<Phase>("connecting");
   const [error, setError] = useState<string | null>(null);
+  /** 当前是第几次重连尝试（遮罩文案用；0 = 不在重连中）。 */
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   /** 重开代数：重连成功/模式切换需重建会话时递增。 */
   const [epoch, setEpoch] = useState(0);
   const [rootStats, setRootStats] = useState<DecodeStats | null>(null);
@@ -709,14 +711,16 @@ export function WindowGroupView({
     };
   }, [deviceId]);
 
-  // 自动重连：最多 3 次，成功后递增 epoch 重建会话（重开窗口）
+  // 自动重连：持续指数退避（上限 30s），成功后递增 epoch 重建会话。
+  // D-013 包2：不再 3 次放弃——被控端睡眠唤醒/Agent 重启需要等待对方恢复，
+  // 放弃意味着必须有人守在控制端手动点重试。
   useEffect(() => {
     if (phase !== "reconnecting") {
       return undefined;
     }
     let cancelled = false;
     const run = async () => {
-      for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS; attempt += 1) {
+      for (let attempt = 1; ; attempt += 1) {
         try {
           await connectDevice(deviceId);
           if (cancelled) {
@@ -726,12 +730,14 @@ export function WindowGroupView({
           setPhase("open");
           return;
         } catch {
-          await delay(RECONNECT_BACKOFF_MS * attempt);
+          if (cancelled) {
+            return;
+          }
+          setReconnectAttempt(attempt);
+          await delay(
+            Math.min(RECONNECT_BACKOFF_MS * attempt, RECONNECT_BACKOFF_MAX_MS),
+          );
         }
-      }
-      if (!cancelled) {
-        setError("自动重连 3 次失败");
-        setPhase("failed");
       }
     };
     void run();
@@ -739,6 +745,13 @@ export function WindowGroupView({
       cancelled = true;
     };
   }, [phase, deviceId]);
+
+  // 重连成功回 open 时清零次数显示
+  useEffect(() => {
+    if (phase === "open") {
+      setReconnectAttempt(0);
+    }
+  }, [phase]);
 
   // Fit 模式视口上报：初始一次 + ResizeObserver 去抖 + zoom 变化/重开后重报
   useEffect(() => {
@@ -857,7 +870,9 @@ export function WindowGroupView({
           {phase === "connecting"
             ? "正在打开会话…"
             : phase === "reconnecting"
-              ? "已断开，重连中…"
+              ? reconnectAttempt > 3
+                ? `连接不上，正在持续重试（第 ${reconnectAttempt} 次）…请确认对方电脑已开机、rd-agent 在运行`
+                : "已断开，重连中…"
               : (error ?? "会话失败")}
         </p>
         {phase === "failed" && (

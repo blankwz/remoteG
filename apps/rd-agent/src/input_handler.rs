@@ -101,6 +101,141 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     }
 }
 
+/// 协议错误码 40:UIPI 拦截(05_api §4 追加;管理员窗口静默丢注入的可感知化)。
+#[cfg(windows)]
+const ERR_UIPI_BLOCKED: u32 = 40;
+
+/// UIPI 反馈去抖:连打/连点场景 30 s 只提示一次。
+#[cfg(windows)]
+static LAST_UIPI_NOTIFY: LazyLock<Mutex<Option<std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// [`handle`] + UIPI 可感知化(D-013 包2):SendInput 被 UIPI 拦截时返回值
+/// 多半仍"成功"(MSDN 明示不反映在返回值),控制端只会看到键鼠无声无效——
+/// 前台窗口完整性高于自身时按 30 s 去抖回一次性 `Error{40}`,由调用方发给
+/// 控制端。内部错误仍按 `handle_soft` 语义只记日志,不打断会话。
+pub fn handle_with_notify(ctx: &SessionCtx, msg: InputMsg) -> Option<(u32, String)> {
+    match handle(ctx, msg) {
+        Ok(()) => uipi_check_notify(ctx),
+        Err(err) => {
+            tracing::warn!(name = %ctx.peer_name, "消息处理失败: {err:#}");
+            None
+        }
+    }
+}
+
+/// 前台窗口完整性级别高于自身进程 → 本次注入(以及此前的)已被系统丢弃。
+#[cfg(windows)]
+fn uipi_check_notify(ctx: &SessionCtx) -> Option<(u32, String)> {
+    if !uipi_blocked_now() {
+        return None;
+    }
+    let due = match LAST_UIPI_NOTIFY.lock() {
+        Ok(mut last) => {
+            let now = std::time::Instant::now();
+            let due = last.is_none_or(|t| now.duration_since(t).as_secs() >= 30);
+            if due {
+                *last = Some(now);
+            }
+            due
+        }
+        Err(_) => false,
+    };
+    if !due {
+        return None;
+    }
+    tracing::warn!(
+        name = %ctx.peer_name,
+        "前台窗口受 UIPI 保护(管理员权限),注入被系统丢弃"
+    );
+    Some((
+        ERR_UIPI_BLOCKED,
+        "对方窗口以管理员权限运行,系统禁止注入。请对方右键「以管理员身份运行」rd-agent 后重试,或在该窗口手动操作".to_string(),
+    ))
+}
+
+#[cfg(not(windows))]
+fn uipi_check_notify(_ctx: &SessionCtx) -> Option<(u32, String)> {
+    None
+}
+
+/// 前台窗口进程完整性 > 本进程 → UIPI 拦截成立。
+#[cfg(windows)]
+fn uipi_blocked_now() -> bool {
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::Security::{TOKEN_ACCESS_MASK, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    /// 本进程完整性 RID(进程生命周期内不变,一次缓存)。
+    static OWN_RID: LazyLock<Option<u32>> =
+        LazyLock::new(|| unsafe { integrity_rid(GetCurrentProcess()) });
+
+    let Some(own) = *OWN_RID else {
+        return false; // 自身完整性拿不到:宁可放行也不误报
+    };
+    let Some(fg) = foreground_hwnd() else {
+        return false;
+    };
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(HWND(fg as isize as *mut core::ffi::c_void), Some(&mut pid));
+    }
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let Ok(proc_h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false; // 打不开(权限/退出):无法判定,不拦
+        };
+        let mut token = HANDLE::default();
+        if OpenProcessToken(proc_h, TOKEN_ACCESS_MASK(TOKEN_QUERY.0), &mut token).is_err() {
+            return false;
+        }
+        let fg_rid = integrity_rid(token);
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+        matches!(fg_rid, Some(rid) if rid > own)
+    }
+}
+
+/// 读进程 token 的完整性级别 RID(MandatoryLabel SID 最后一个 SubAuthority)。
+#[cfg(windows)]
+unsafe fn integrity_rid(token: windows::Win32::Foundation::HANDLE) -> Option<u32> {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL,
+    };
+    unsafe {
+        let mut ret_len = 0u32;
+        // 第一次调用探测所需缓冲区长度(预期失败,仅取 ret_len)
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut ret_len);
+        if ret_len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; ret_len as usize];
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr().cast()),
+            ret_len,
+            &mut ret_len,
+        )
+        .ok()?;
+        let label = &*(buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+        let sid = label.Label.Sid;
+        if sid.is_invalid() {
+            return None;
+        }
+        let count = GetSidSubAuthorityCount(sid);
+        if count.is_null() || *count == 0 {
+            return None;
+        }
+        Some(*GetSidSubAuthority(sid, u32::from(*count) - 1))
+    }
+}
+
 /// 鼠标点击:仅限已打开窗口;按下前置前(见模块注释)。
 fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
     if !ctx.windows.is_open(m.window_id) {

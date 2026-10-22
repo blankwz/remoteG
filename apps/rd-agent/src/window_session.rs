@@ -47,7 +47,7 @@
 //! 未收到 ack 前对同一窗口发后续窗口消息，此为 M1 的既定约束。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -598,6 +598,16 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         let wins = list_windows().context("枚举窗口失败")?;
         wins.into_iter().find(|a| a.hwnd as u64 == wid)
     };
+    // 布局快照先于还原（D-013 包2）：还原后 showCmd 已变为普通态，
+    // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
+    // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
+    let saved = match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
+        Ok(p) => Some(p),
+        Err(err) => {
+            tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
+            None
+        }
+    };
     // 最小化自动还原（用户实测反馈 1：任何状态必须可控制）。最小化有两条
     // 呈现路径，都必须还原后再捕获：
     // - 在可捕获列表中（如资源管理器，最小化后客户区仍非 0）→ `minimized`
@@ -661,14 +671,6 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     .max(1);
     let kbps = cfg.start_kbps.max(1);
     let refine = cfg.refine_enabled;
-
-    let saved = match save_placement(attrs.hwnd) {
-        Ok(p) => Some(p),
-        Err(err) => {
-            tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
-            None
-        }
-    };
 
     // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
     // proto 的 repeated Codec 在 prost 生成物中为 Vec<i32>，需转回枚举。
@@ -809,6 +811,9 @@ struct SendAccounting {
     backlog: Arc<AtomicU64>,
     /// 本会话累计发送字节（StatsReport.kbps 数据源）。
     session_bytes: Arc<AtomicU64>,
+    /// 陈旧帧丢弃标志（D-013 包2）：发送任务跳帧后置位，编码循环消费——
+    /// 引用链已断，下一帧必须 IDR，否则后续 P 帧全部无法解码。
+    drop_to_idr: Arc<AtomicBool>,
 }
 
 /// 一条窗口管线的搭建参数（根窗口 OpenWindow 与窗口组成员共用）。
@@ -886,6 +891,8 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     let frames = Arc::new(AtomicU64::new(0));
     let target_kbps = Arc::new(AtomicU32::new(spec.kbps));
     let fps_cap = Arc::new(AtomicU32::new(spec.fps));
+    // 陈旧帧丢弃→IDR 恢复(D-013 包2):视频发送任务置位、编码循环消费
+    let drop_to_idr = Arc::new(AtomicBool::new(false));
     // 根窗口预置组快照（仅含根自身）：首次轮询 diff 时根不会误报为新增。
     let group_snapshot = spec.is_root.then(|| {
         Arc::new(Mutex::new(HashMap::from([(
@@ -915,6 +922,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             target_kbps: Arc::clone(&target_kbps),
             fps_cap: Arc::clone(&fps_cap),
             frames: Arc::clone(&frames),
+            drop_to_idr: Arc::clone(&drop_to_idr),
         };
         match std::thread::Builder::new()
             .name(format!("rd-enc-{wid:#x}"))
@@ -944,6 +952,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         SendAccounting {
             backlog: Arc::clone(&backlog),
             session_bytes: Arc::clone(&spec.session_bytes),
+            drop_to_idr: Arc::clone(&drop_to_idr),
         },
     ));
     tokio::spawn(tile_send_task(
@@ -959,6 +968,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         SendAccounting {
             backlog: Arc::clone(&backlog),
             session_bytes: Arc::clone(&spec.session_bytes),
+            drop_to_idr: Arc::clone(&drop_to_idr),
         },
     ));
 
@@ -1216,6 +1226,8 @@ struct PipeRun {
     fps_cap: Arc<AtomicU32>,
     /// 累计产出 AU 帧数（StatsReport 用）。
     frames: Arc<AtomicU64>,
+    /// 陈旧帧丢弃标志：发送任务跳帧后置位，编码循环消费（下帧 force IDR）。
+    drop_to_idr: Arc<AtomicBool>,
 }
 
 /// 管线故障槽：编码线程写入，发送任务收尾时读取并转 `Error` 回控制端。
@@ -1260,6 +1272,7 @@ fn encode_loop(run: PipeRun) {
         refine,
         pixel_format,
         errors,
+        drop_to_idr,
         cancel,
         target_kbps,
         fps_cap,
@@ -1316,6 +1329,10 @@ fn encode_loop(run: PipeRun) {
                 }
                 // 应用码率决策（编码器创建/重配置即用最新值）
                 applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
+                // 发送任务丢过陈旧帧 → 引用链已断，本帧必须 IDR（D-013 包2）
+                if drop_to_idr.swap(false, Ordering::Relaxed) {
+                    pipe.force_key = true;
+                }
                 let raw = RawFrame {
                     width: frame.width,
                     height: frame.height,
@@ -1537,6 +1554,7 @@ async fn video_send_task(
     let SendAccounting {
         backlog,
         session_bytes,
+        drop_to_idr,
     } = acct;
     loop {
         tokio::select! {
@@ -1544,6 +1562,31 @@ async fn video_send_task(
             msg = rx.recv() => match msg {
                 None => break, // 编码线程退出（通道关闭）
                 Some((seq, au)) => {
+                    // 陈旧帧丢弃（D-013 包2）：通道里已积压 ≥2 帧时，发送侧
+                    // 带宽已低于编码速率，FIFO 全发只会让接收端延迟单调增长
+                    // （弱网下雪崩到秒级）。跳到最新一帧；丢帧后引用链断裂，
+                    // 置位 drop_to_idr 让编码循环下帧出 IDR 恢复。
+                    let mut current = (seq, au);
+                    let mut dropped = 0u32;
+                    while !current.1.keyframe {
+                        match rx.try_recv() {
+                            Ok((s2, au2)) => {
+                                dropped += 1;
+                                current = (s2, au2);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if dropped > 0 {
+                        drop_to_idr.store(true, Ordering::Relaxed);
+                        tracing::debug!(
+                            window = format!("{window_id:#x}"),
+                            dropped,
+                            seq = current.0,
+                            "发送积压：丢弃陈旧帧，下帧 IDR"
+                        );
+                    }
+                    let (seq, au) = current;
                     let header = VideoHeader {
                         window_id,
                         seq,
@@ -1582,6 +1625,7 @@ async fn tile_send_task(
     let SendAccounting {
         backlog,
         session_bytes,
+        drop_to_idr: _, // 瓦片无引用链，不参与陈旧帧丢弃
     } = acct;
     loop {
         tokio::select! {
@@ -1733,6 +1777,13 @@ async fn poll_groups(ctx: &Arc<SessionCtx>) {
             };
             for h in stale {
                 teardown_child(ctx, root, h, false).await;
+            }
+            // 根管线本身一并收场（D-013 包2：此前只清子窗口，根管线滞留
+            // 注册表 → 控制端冻结帧 + 孤儿管线直到断连）。DESTROYED 事件
+            // 已走推送路径，这里只做资源收场，不再额外通知。
+            if let Some(h) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&root) {
+                tracing::info!(root = format!("{root:#x}"), "根窗口已销毁，收场根管线");
+                h.shutdown(false);
             }
             continue;
         }
