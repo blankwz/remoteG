@@ -22,7 +22,7 @@
 - 回滚：git 按 tag 回退；Agent 便携 zip 直接替换
 
 ## 未决事项（M1 收尾/移交 M2）
-0. **待用户手测**（09_test/兼容性.md + C:\rd-test bat 包，需先按 1fb7d00 时代说明重建 C:\rd 联接）：兼容性矩阵（**扩充项**：扫描局域网→配对、连接确认框、暂停→终端终止、锁屏横幅、剪贴板互传、只看不控）、场景 A/B/C 延迟、1 小时稳定性。
+0. **待用户手测**（09_test/兼容性.md 已重写为含 D-013 新功能的完整版；release 产物已预构建、C:\rd 联接与 C:\rd-test bat 已恢复）：兼容性矩阵（**扩充项**：扫描局域网→配对、连接确认框、暂停→终端终止、锁屏横幅、剪贴板互传、只看不控、撤销信任）、场景 A/B/C 延迟、1 小时稳定性。
 1. 用户执行兼容性手测矩阵 + 场景 A/B/C 延迟（RUN_LOG 回填后关闭 P95 指标）。
 2. 协议 v0.2 候选（05_api §6.4）：TerminalExit/TermClose、Agent 剪贴板变化推送、WindowEvent 状态事件、FitApplied、BBR 拥塞 A/B。
 3. NVIDIA 驱动 ≥610.00 后重跑 444 探针验证 nvenc/444 端到端（`cargo test -p rd-encode --test encode create_best_yuv444_local_probe -- --ignored --nocapture`；创建接口与前端解码配置已就绪。2026-10-22 实测驱动 572.70，仍阻塞）。
@@ -31,7 +31,6 @@
 6. macOS：cargo check 待 CI 首跑确认；keyring 身份存储待真机验证。
 7. CI 推送变绿验证：仓库尚无远端（用户提供 GitHub 私有仓库后 push）。
 8. 服务化（SCM+崩溃重启）为 M2 决策点（E5 建议，E1/E2 认为现阶段 HKCU Run 自启已覆盖帮家人场景）。
-9. 杂散 package-lock.json（空壳 npm 产物）待用户手动删除（AI 删除被权限策略拦截）。
 
 ## 关键决策索引
 DECISIONS.md D-001~D-013（自研、Tailscale、Tauri 2、文字清晰不依赖 4:4:4、终端只接管自启会话、免费 Apple ID、React 前端、仓库分离、CloseWindow 补全、M0 结论、FIX-1 插入、FIX-2 产出入 OUT_DIR、五专家评审与全量四批改进）。
