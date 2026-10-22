@@ -6,6 +6,7 @@
 //! 无参数(双击)等价 `run`:自动发现监听地址 + 托盘;命令行子命令保留给
 //! 测试与调试(`run --print-port`、`spike`)。
 
+mod clipboard;
 mod config;
 mod discover;
 mod input_handler;

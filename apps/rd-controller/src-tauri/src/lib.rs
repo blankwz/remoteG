@@ -39,6 +39,8 @@ pub fn run() {
             commands::devices::disconnect_device,
             commands::devices::probe_device,
             commands::devices::set_decode_caps,
+            commands::devices::send_clipboard,
+            commands::devices::request_clipboard,
             // T-020：窗口
             commands::windows::list_windows,
             commands::windows::subscribe_window_events,
@@ -47,6 +49,7 @@ pub fn run() {
             commands::session::close_window,
             commands::session::set_viewport,
             commands::session::subscribe_group_events,
+            commands::session::subscribe_session_state,
             // T-022：输入
             commands::input::mouse_move,
             commands::input::mouse_button,

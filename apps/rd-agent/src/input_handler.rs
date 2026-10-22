@@ -236,13 +236,21 @@ unsafe fn integrity_rid(token: windows::Win32::Foundation::HANDLE) -> Option<u32
     }
 }
 
-/// 鼠标点击:仅限已打开窗口;按下前置前(见模块注释)。
+/// 鼠标点击:仅限已打开窗口;按下前置前(见模块注释);只看不控窗口丢弃。
 fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
     if !ctx.windows.is_open(m.window_id) {
         tracing::warn!(
             name = %ctx.peer_name,
             window_id = m.window_id,
             "丢弃鼠标点击:窗口未打开"
+        );
+        return Ok(());
+    }
+    if ctx.windows.is_view_only(m.window_id) {
+        tracing::debug!(
+            name = %ctx.peer_name,
+            window_id = m.window_id,
+            "丢弃鼠标点击:窗口为只看不控"
         );
         return Ok(());
     }
@@ -263,8 +271,17 @@ fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("注入鼠标按键失败: {err:#}"))
 }
 
-/// 滚轮:仅限已打开窗口;无按下语义,不置前(滚动落在光标下的目标窗口)。
+/// 滚轮:仅限已打开窗口;无按下语义,不置前(滚动落在光标下的目标窗口);
+/// 只看不控窗口丢弃(严格只读)。
 fn mouse_wheel(ctx: &SessionCtx, m: &MouseWheel) -> anyhow::Result<()> {
+    if ctx.windows.is_view_only(m.window_id) {
+        tracing::debug!(
+            name = %ctx.peer_name,
+            window_id = m.window_id,
+            "丢弃滚轮:窗口为只看不控"
+        );
+        return Ok(());
+    }
     if !ctx.windows.is_open(m.window_id) {
         tracing::warn!(
             name = %ctx.peer_name,
@@ -281,10 +298,14 @@ fn mouse_wheel(ctx: &SessionCtx, m: &MouseWheel) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("注入滚轮失败: {err:#}"))
 }
 
-/// 键盘:无 window_id,以前台窗口为准,且前台必须属于本会话已打开窗口。
-/// 修饰键由控制端作为独立 KeyEvent 扫描码事件下发,`modifiers` 位图仅作
-/// 信息参考,不在此换算。
+/// 键盘:无 window_id,以前台窗口为准,且前台必须属于本会话已打开窗口
+/// (只看不控窗口丢弃)。修饰键由控制端作为独立 KeyEvent 扫描码事件下发,
+/// `modifiers` 位图仅作信息参考,不在此换算。
 fn key_event(ctx: &SessionCtx, m: &KeyEvent) -> anyhow::Result<()> {
+    if foreground_view_only(ctx) {
+        tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口为只看不控");
+        return Ok(());
+    }
     if !foreground_open(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口不属于本会话");
         return Ok(());
@@ -299,6 +320,10 @@ fn key_event(ctx: &SessionCtx, m: &KeyEvent) -> anyhow::Result<()> {
 
 /// 文本(IME 结果/软键盘):准入条件同 [`key_event`]。
 fn text_input(ctx: &SessionCtx, m: &TextInput) -> anyhow::Result<()> {
+    if foreground_view_only(ctx) {
+        tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口为只看不控");
+        return Ok(());
+    }
     if !foreground_open(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口不属于本会话");
         return Ok(());
@@ -393,6 +418,10 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     if !accept_seq(ctx, mv.window_id, mv.seq) {
         return Ok(());
     }
+    // 只看不控窗口丢弃移动(严格只读;datagram 高频只记 debug 防刷屏)
+    if ctx.windows.is_view_only(mv.window_id) {
+        return Ok(());
+    }
     ctx.state
         .injector
         .lock()
@@ -435,6 +464,11 @@ fn foreground_hwnd() -> Option<u64> {
 /// 前台窗口是否属于本会话已打开的窗口(键盘/文本注入的准入条件)。
 fn foreground_open(ctx: &SessionCtx) -> bool {
     matches!(foreground_hwnd(), Some(fg) if ctx.windows.is_open(fg))
+}
+
+/// 前台窗口是否为只看不控(v0.1/D-013 包4;键盘/文本注入的前置否决)。
+fn foreground_view_only(ctx: &SessionCtx) -> bool {
+    matches!(foreground_hwnd(), Some(fg) if ctx.windows.is_view_only(fg))
 }
 
 /// 确保 `hwnd` 置前(鼠标按下前调用);失败(前台锁拒绝等)返回 false。

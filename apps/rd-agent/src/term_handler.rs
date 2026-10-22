@@ -65,6 +65,13 @@ pub struct TermAttachments;
 pub fn handle(ctx: &SessionCtx, req_id: u32, msg: TermMsg) -> anyhow::Result<()> {
     match msg {
         TermMsg::Open(m) => {
+            // 共享暂停时拒绝新终端(D-013 包3):暂停语义 = 一切控制通道停止
+            if ctx.state.paused.load(std::sync::atomic::Ordering::SeqCst) {
+                let rt = tokio::runtime::Handle::current();
+                return tokio::task::block_in_place(|| {
+                    rt.block_on(send_error(ctx, req_id, "共享已暂停,请对方先在托盘取消暂停"))
+                });
+            }
             let rt = tokio::runtime::Handle::current();
             tokio::task::block_in_place(|| rt.block_on(open_terminal(ctx, req_id, m)))
         }
@@ -90,6 +97,22 @@ pub fn on_disconnect(ctx: &SessionCtx) {
         }
         tracing::debug!(name = %ctx.peer_name, "终端挂接已全部脱离(会话交由 rd-term 空闲回收)");
     }
+}
+
+/// 「暂停共享」时调用(D-013 包3/E4 评审 P1):此前暂停只覆盖画面与注入,
+/// 已挂接的活 shell 仍双向收发且断开后保留 10 分钟可 resume——家人按了
+/// 暂停仍有一个可用通道。现在取消全部连接的挂接并杀掉全部 rd-term 会话,
+/// 暂停语义完整;恢复共享后由控制端重新打开终端。
+pub fn pause_all(state: &AgentState) {
+    let all: Vec<CancellationToken> = {
+        let mut map = ATTACHMENTS.lock().expect("attachments 锁中毒");
+        map.drain().flat_map(|(_, v)| v).collect()
+    };
+    for token in all {
+        token.cancel();
+    }
+    state.terms.close_all();
+    tracing::info!("共享已暂停:终端挂接与全部会话已终止");
 }
 
 // ---------------------------------------------------------------------------

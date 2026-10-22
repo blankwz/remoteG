@@ -39,6 +39,7 @@ mod imp {
     use std::sync::Arc;
 
     use anyhow::Context as _;
+    use rd_transport::Fingerprint;
     use tray_icon::menu::{
         CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     };
@@ -69,6 +70,8 @@ mod imp {
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
     const DEVICE_ID_PREFIX: &str = "device-";
+    /// 信任设备菜单项 id 前缀,完整形式 `{TRUST_PREFIX}<fp_hex>`(点击撤销信任)。
+    const TRUST_PREFIX: &str = "trust-";
     /// HKCU Run 自启键(D-013 包1:用户态自启,免 UAC 免服务)。
     const AUTOSTART_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     const AUTOSTART_VALUE: &str = "rd-agent";
@@ -86,6 +89,11 @@ mod imp {
         disconnect_all_item: MenuItem,
         paused_item: CheckMenuItem,
         autostart_item: CheckMenuItem,
+        /// 信任设备子菜单(点击条目撤销信任,D-013 包3/E4)。
+        trust: Submenu,
+        trust_items: Vec<MenuItem>,
+        /// 上次信任列表签名(变化才重建子菜单)。
+        trust_signature: String,
         /// 上次设备列表签名(变化才重建子菜单,避免每秒重建)。
         peers_signature: String,
         connected_count: usize,
@@ -105,6 +113,7 @@ mod imp {
         let paused_item = CheckMenuItem::with_id(ID_PAUSE, "暂停共享", true, false, None);
         let autostart_item =
             CheckMenuItem::with_id(ID_AUTOSTART, "开机自启", true, autostart_enabled(), None);
+        let trust = Submenu::with_id("trust", "信任设备", true);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
@@ -115,6 +124,8 @@ mod imp {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&paused_item);
         let _ = menu.append(&autostart_item);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&open_logs);
         let _ = menu.append(&quit_item);
@@ -143,6 +154,9 @@ mod imp {
             disconnect_all_item,
             paused_item,
             autostart_item,
+            trust,
+            trust_items: Vec::new(),
+            trust_signature: String::new(),
             peers_signature: String::new(),
             connected_count: 0,
             active: false,
@@ -238,8 +252,12 @@ mod imp {
                 let paused = ui.paused_item.is_checked();
                 state.paused.store(paused, Ordering::SeqCst);
                 if paused {
-                    tracing::info!("共享已暂停(画面/输入停止)");
+                    // 终端一并终止(D-013 包3/E4):活 shell 不能在暂停后存活
+                    crate::term_handler::pause_all(state);
+                    broadcast_session_state(state, SESSION_STATE_PAUSED, "共享已暂停");
+                    tracing::info!("共享已暂停(画面/输入/终端全部停止)");
                 } else {
+                    broadcast_session_state(state, SESSION_STATE_RESUMED, "");
                     tracing::info!("共享已恢复");
                 }
             }
@@ -259,6 +277,8 @@ mod imp {
                         tracing::info!(conn = conn_id, name = %peer.name, "托盘断开该设备");
                         peer.cancel.cancel();
                     }
+                } else if let Some(fp_hex) = other.strip_prefix(TRUST_PREFIX) {
+                    revoke_trust(state, fp_hex);
                 }
             }
         }
@@ -312,6 +332,49 @@ mod imp {
                     .map(|item| item as &dyn IsMenuItem)
                     .collect();
                 let _ = ui.connected.append_items(&items);
+            }
+        }
+
+        // 信任设备子项(D-013 包3):列表变化才重建;点击条目撤销信任
+        let trusted: Vec<(String, String)> = {
+            let trust = state.trust.lock().expect("trust 锁中毒");
+            trust
+                .list()
+                .into_iter()
+                .map(|p| (p.fingerprint_hex, p.name))
+                .collect()
+        };
+        let t_sig: String = trusted
+            .iter()
+            .map(|(fp, name)| format!("{fp}:{name};"))
+            .collect();
+        if t_sig != ui.trust_signature {
+            ui.trust_signature = t_sig;
+            for old in std::mem::take(&mut ui.trust_items) {
+                let _ = ui.trust.remove(&old);
+            }
+            ui.trust_items = trusted
+                .iter()
+                .map(|(fp, name)| {
+                    MenuItem::with_id(
+                        format!("{TRUST_PREFIX}{fp}"),
+                        format!("{name} (撤销信任)"),
+                        true,
+                        None,
+                    )
+                })
+                .collect();
+            if ui.trust_items.is_empty() {
+                let hint = MenuItem::with_id("trust-empty", "(空)", false, None);
+                let _ = ui.trust.append(&hint);
+                ui.trust_items.push(hint);
+            } else {
+                let items: Vec<&dyn IsMenuItem> = ui
+                    .trust_items
+                    .iter()
+                    .map(|item| item as &dyn IsMenuItem)
+                    .collect();
+                let _ = ui.trust.append_items(&items);
             }
         }
 
@@ -379,6 +442,45 @@ mod imp {
         });
     }
 
+    /// 撤销对某设备的信任(D-013 包3/E4:被控端此前无撤销入口,控制端设备
+    /// 丢失后家人无法断绝信任):移除信任条目并断开其在线连接。
+    fn revoke_trust(state: &AgentState, fp_hex: &str) {
+        let Some(fp) = fp_from_hex(fp_hex) else {
+            tracing::warn!(len = fp_hex.len(), "撤销信任:指纹格式非法");
+            return;
+        };
+        let removed = {
+            let mut trust = state.trust.lock().expect("trust 锁中毒");
+            trust.remove(&fp).is_ok()
+        };
+        // 在线连接一并断开:撤销必须立即生效,否则对方在旧连接里仍是全权
+        let cut: Vec<_> = {
+            let mut map = state.peers.lock().expect("peers 锁中毒");
+            let ids: Vec<u64> = map
+                .iter()
+                .filter(|(_, p)| p.fp.hex() == fp.hex())
+                .map(|(k, _)| *k)
+                .collect();
+            ids.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+        for peer in &cut {
+            peer.cancel.cancel();
+        }
+        tracing::info!(removed, online_cut = cut.len(), "撤销信任完成");
+    }
+
+    /// 64 字符 hex → 指纹(托盘菜单 id 携带的完整指纹还原)。
+    fn fp_from_hex(hex: &str) -> Option<Fingerprint> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(Fingerprint(bytes))
+    }
+
     /// HKCU Run 自启当前是否已登记。
     fn autostart_enabled() -> bool {
         winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
@@ -428,14 +530,64 @@ mod imp {
         }
     }
 
-    /// 取消并清空所有连接(托盘"断开所有"/退出)。
+    /// SessionState.Kind 原始值(v0.1,proto SessionState::Kind)。
+    const SESSION_STATE_AGENT_CLOSING: i32 = 1;
+    const SESSION_STATE_PAUSED: i32 = 2;
+    const SESSION_STATE_RESUMED: i32 = 3;
+
+    /// 对全部在线控制端推会话状态(托盘线程非 runtime 线程,经 PeerInfo.rt
+    /// block_on;发送失败静默——对端多半已断)。
+    fn broadcast_session_state(state: &AgentState, kind: i32, reason: &str) {
+        let peers: Vec<_> = state
+            .peers
+            .lock()
+            .expect("peers 锁中毒")
+            .values()
+            .cloned()
+            .collect();
+        for peer in peers {
+            let reason = reason.to_string();
+            let ctl = Arc::clone(&peer.ctl);
+            peer.rt.block_on(async move {
+                let mut ctl = ctl.lock().await;
+                let _ = ctl
+                    .send(&rd_proto::v0::Envelope {
+                        req_id: 0,
+                        msg: Some(rd_proto::v0::envelope::Msg::SessionState(
+                            rd_proto::v0::SessionState { kind, reason },
+                        )),
+                    })
+                    .await;
+            });
+        }
+    }
+
+    /// 取消并清空所有连接(托盘"断开所有"/退出):先推 AGENT_CLOSING 让控制端
+    /// 区分「Agent 退出」与「网络断」(v0.1/D-013 包4),再取消令牌。
     fn disconnect_all(state: &AgentState) {
         let peers = {
             let mut peers = state.peers.lock().expect("peers 锁中毒");
             std::mem::take(&mut *peers)
         };
         let count = peers.len();
-        for (_conn_id, peer) in peers {
+        for peer in peers.values() {
+            let ctl = Arc::clone(&peer.ctl);
+            peer.rt.block_on(async move {
+                let mut ctl = ctl.lock().await;
+                let _ = ctl
+                    .send(&rd_proto::v0::Envelope {
+                        req_id: 0,
+                        msg: Some(rd_proto::v0::envelope::Msg::SessionState(
+                            rd_proto::v0::SessionState {
+                                kind: SESSION_STATE_AGENT_CLOSING,
+                                reason: "被控端已退出 rd-agent".into(),
+                            },
+                        )),
+                    })
+                    .await;
+            });
+        }
+        for peer in peers.into_values() {
             peer.cancel.cancel();
         }
         if count > 0 {

@@ -537,6 +537,7 @@ pub async fn open_window(c: &mut Client, hwnd: u64) -> Result<WindowStreams> {
             fit: rd_proto::v0::FitMode::Fit as i32,
             max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
             max_fps: 30,
+            view_only: false,
         }))
         .await?;
     let ack = match reply.msg {

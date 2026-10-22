@@ -64,8 +64,8 @@ use rd_encode::{create_best, EncodedAu, EncoderConfig, PixelFormat, VideoEncoder
 use rd_proto::v0::envelope::Msg;
 use rd_proto::v0::window_event::Kind;
 use rd_proto::v0::{
-    CloseWindow, Codec, Error, FitMode, ListWindows, OpenWindow, OpenWindowAck, RenderLevel,
-    StatsReport, ViewportInfo, WindowEvent, WindowInfo, WindowList,
+    session_state, CloseWindow, Codec, Error, FitMode, ListWindows, OpenWindow, OpenWindowAck,
+    RenderLevel, SessionState, StatsReport, ViewportInfo, WindowEvent, WindowInfo, WindowList,
 };
 use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
@@ -287,6 +287,16 @@ impl WindowSessions {
             .unwrap_or_else(lock_poisoned)
             .values()
             .any(|set| set.contains(&id))
+    }
+
+    /// 窗口（根）是否以只看不控模式打开（v0.1/D-013 包4）。
+    /// 非根/未打开 → false（注入准入由 `is_open` 另行把关）。
+    pub fn is_view_only(&self, id: u64) -> bool {
+        pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .get(&id)
+            .is_some_and(|h| h.view_only)
     }
 }
 
@@ -707,6 +717,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         codec,
         owner: ctx_key(ctx),
         session_bytes: ensure_services(ctx),
+        view_only: open.view_only,
     };
     let started = match start_pipeline(ctx, spec).await {
         Ok(s) => s,
@@ -837,6 +848,8 @@ struct PipeSpec {
     owner: usize,
     /// 所属会话的发送字节累计（StatsReport 用）。
     session_bytes: Arc<AtomicU64>,
+    /// 只看不控（v0.1/D-013 包4）：注册表存位，注入路径经 `is_view_only` 拦截。
+    view_only: bool,
 }
 
 /// 管线搭建结果（供 ack / CHILD_ADDED 使用的流 id）。
@@ -987,6 +1000,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         is_root: spec.is_root,
         area: spec.area,
         codec: spec.codec,
+        view_only: spec.view_only,
         backlog,
         frames,
         target_kbps,
@@ -1171,6 +1185,8 @@ struct PipeHandle {
     /// 落地的编解码器（组成员管线沿用根窗口的协商结果，保证同一窗口组
     /// 的解码格式一致）。
     codec: Codec,
+    /// 只看不控（v0.1/D-013 包4）：注入路径经 `WindowSessions::is_view_only` 拦截。
+    view_only: bool,
     /// 发送在途字节（发送任务入队 +N、写完 -N；码率自适应的积压信号）。
     backlog: Arc<AtomicU64>,
     /// 累计产出 AU 帧数（StatsReport.fps 的数据源）。
@@ -1708,9 +1724,15 @@ fn spawn_session_tick(
         // StatsReport 差分基线
         let mut prev_bytes = 0u64;
         let mut prev_frames = 0u64;
+        // 锁屏检测状态(v0.1/D-013 包4):变化沿才发 SessionState
+        let mut last_locked: Option<bool> = None;
+        let mut next_lock_check = Instant::now();
 
         loop {
-            let wake = next_rate.min(next_group).min(next_stats);
+            let wake = next_rate
+                .min(next_group)
+                .min(next_stats)
+                .min(next_lock_check);
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 // 菜单弹出/窗口创建：立即跑一轮组轮询（250 ms 轮询为兜底）
@@ -1731,6 +1753,30 @@ fn spawn_session_tick(
             if now >= next_stats {
                 next_stats = now + STATS_PERIOD;
                 send_stats(&ctx, &bytes_sent, &mut prev_bytes, &mut prev_frames).await;
+            }
+            if now >= next_lock_check {
+                next_lock_check = now + Duration::from_secs(1);
+                let locked = workstation_locked();
+                if last_locked != Some(locked) {
+                    last_locked = Some(locked);
+                    let kind = if locked {
+                        session_state::Kind::Locked
+                    } else {
+                        session_state::Kind::Unlocked
+                    } as i32;
+                    if let Err(err) = ctx
+                        .send(
+                            Msg::SessionState(SessionState {
+                                kind,
+                                reason: String::new(),
+                            }),
+                            0,
+                        )
+                        .await
+                    {
+                        tracing::debug!("SessionState(锁屏)发送失败: {err:#}");
+                    }
+                }
             }
         }
         services()
@@ -1873,14 +1919,16 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
         .or_default()
         .insert(child);
     let cfg = &ctx.state.config;
-    // 子管线沿用根窗口的协商结果（同一窗口组解码格式必须一致）；根已退出
-    // （竞态）时按 420 降级，管线随会话清理，无额外代价。
-    let codec = pipes()
-        .lock()
-        .unwrap_or_else(lock_poisoned)
-        .get(&root_id)
-        .map(|h| h.codec)
-        .unwrap_or(Codec::H264420);
+    // 子管线沿用根窗口的协商结果与只读位（同一窗口组解码格式/注入策略必须
+    // 一致）；根已退出（竞态）时按 420 降级，管线随会话清理，无额外代价。
+    let (codec, view_only) = {
+        pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .get(&root_id)
+            .map(|h| (h.codec, h.view_only))
+            .unwrap_or((Codec::H264420, false))
+    };
     let spec = PipeSpec {
         hwnd: m.hwnd,
         fps: cfg.max_fps.max(1),
@@ -1893,6 +1941,7 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
         codec,
         owner: ctx_key(ctx),
         session_bytes: ensure_services(ctx),
+        view_only,
     };
     match start_pipeline(ctx, spec).await {
         Ok(started) => {
@@ -2201,6 +2250,49 @@ async fn send_stats(
     if let Err(err) = ctx.send(Msg::Stats(report), 0).await {
         tracing::debug!("StatsReport 发送失败（连接可能已断）: {err:#}");
     }
+}
+
+/// 输入桌面名 == Winlogon → 工作站已锁定（安全桌面）。检测纯本地 Win32，
+/// 失败保守返回 false（宁可少提示也不误报）。
+#[cfg(windows)]
+fn workstation_locked() -> bool {
+    use windows::Win32::Foundation::{GENERIC_ACCESS_RIGHTS, GENERIC_ALL};
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_ACCESS_FLAGS,
+        DESKTOP_CONTROL_FLAGS, UOI_NAME,
+    };
+
+    unsafe {
+        let Ok(desktop) = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(GENERIC_ACCESS_RIGHTS(GENERIC_ALL.0).0),
+        ) else {
+            return true; // 输入桌面打不开：通常意味着正在切换/锁定
+        };
+        let mut buf = [0u16; 64];
+        let mut needed = 0u32;
+        let ok = GetUserObjectInformationW(
+            windows::Win32::Foundation::HANDLE(desktop.0),
+            UOI_NAME,
+            Some(buf.as_mut_ptr().cast()),
+            u32::try_from(buf.len() * 2).unwrap_or(u32::MAX),
+            Some(&mut needed),
+        );
+        let _ = CloseDesktop(desktop);
+        if ok.is_err() {
+            return false;
+        }
+        let len = (needed as usize / 2).min(buf.len());
+        String::from_utf16_lossy(&buf[..len])
+            .trim_end_matches('\0')
+            .eq_ignore_ascii_case("Winlogon")
+    }
+}
+
+#[cfg(not(windows))]
+fn workstation_locked() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -2528,6 +2620,7 @@ mod tests {
             is_root: true,
             area: 1,
             codec: Codec::H264420,
+            view_only: false,
             backlog: Arc::new(AtomicU64::new(0)),
             frames: Arc::new(AtomicU64::new(0)),
             target_kbps: Arc::new(AtomicU32::new(0)),

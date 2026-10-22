@@ -36,9 +36,13 @@ import {
 import {
   closeWindow,
   openWindow,
+  requestClipboard,
   savePngToDownloads,
+  sendClipboard,
+  sessionStateText,
   setViewport,
   subscribeGroupEvents,
+  subscribeSessionState,
 } from "../api/session";
 import {
   hitWindow,
@@ -307,6 +311,10 @@ export function WindowGroupView({
   const [error, setError] = useState<string | null>(null);
   /** 当前是第几次重连尝试（遮罩文案用；0 = 不在重连中）。 */
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  /** 只看不控（v0.1/D-013 包4）：变更即重开会话。 */
+  const [viewOnly, setViewOnly] = useState(false);
+  /** Agent 会话级状态横幅（锁屏/暂停/退出；null = 不显示）。 */
+  const [banner, setBanner] = useState<string | null>(null);
   /** 重开代数：重连成功/模式切换需重建会话时递增。 */
   const [epoch, setEpoch] = useState(0);
   const [rootStats, setRootStats] = useState<DecodeStats | null>(null);
@@ -672,8 +680,9 @@ export function WindowGroupView({
       }
     });
     // M1 固定以 Fit 打开（远端 1:1 适配默认）；切 Scale/Native 只停止视口
-    // 上报并本地缩放，切回 Fit 无需重开（open.fit 恒为 FIT）
-    openWindow(deviceId, windowId, "FIT", 0, onFrame)
+    // 上报并本地缩放，切回 Fit 无需重开（open.fit 恒为 FIT）。
+    // viewOnly（v0.1）变更需重开会话（注入门在 Agent 侧按打开参数判定）。
+    openWindow(deviceId, windowId, "FIT", 0, viewOnly, onFrame)
       .then((ack) => {
         if (cancelled) {
           return;
@@ -697,7 +706,62 @@ export function WindowGroupView({
       // Agent 对未打开窗口的 CloseWindow 静默忽略，重复发送安全
       void closeWindow(deviceId, windowId).catch(() => undefined);
     };
-  }, [deviceId, windowId, epoch, store]);
+  }, [deviceId, windowId, epoch, store, viewOnly]);
+
+  // 会话级状态（v0.1）：锁屏/暂停/Agent 退出 → 顶部横幅
+  useEffect(() => {
+    if (phase === "failed") {
+      return undefined;
+    }
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    void subscribeSessionState(deviceId, (s) => {
+      if (!alive) {
+        return;
+      }
+      setBanner(sessionStateText(s));
+    })
+      .then((fn) => {
+        if (alive) {
+          unlisten = fn;
+        } else {
+          fn();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [deviceId, phase]);
+
+  /** 工具条:只看不控切换(重开会话)/剪贴板互传(v0.1)。 */
+  const onToggleViewOnly = useCallback(() => {
+    setViewOnly((v) => !v);
+    setEpoch((n) => n + 1);
+  }, []);
+
+  const onCopyToRemote = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text.length > 0) {
+        await sendClipboard(deviceId, text);
+      }
+    } catch (e) {
+      setError(`复制到远端失败：${errText(e)}`);
+    }
+  }, [deviceId]);
+
+  const onCopyFromRemote = useCallback(async () => {
+    try {
+      const text = await requestClipboard(deviceId);
+      if (text.length > 0) {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch (e) {
+      setError(`从远端复制失败：${errText(e)}`);
+    }
+  }, [deviceId]);
 
   // 断线感知：device-disconnected 事件 → 遮罩 + 自动重连
   useEffect(() => {
@@ -952,6 +1016,33 @@ export function WindowGroupView({
 
   return (
     <div className={styles.stage} ref={containerRef}>
+      {/* 会话工具条(v0.1/D-013 包4):只看不控 + 剪贴板互传 */}
+      <div className={styles.sessionBar}>
+        <label
+          className={styles.sessionBarItem}
+          title="开启后只能观看画面,键鼠注入被被控端拦截(防误操作/只监控场景)"
+        >
+          <input type="checkbox" checked={viewOnly} onChange={onToggleViewOnly} />
+          只看不控
+        </label>
+        <button
+          type="button"
+          className={styles.sessionBarBtn}
+          onClick={() => void onCopyToRemote()}
+          title="把控制端剪贴板文本发送到远端(远端 Ctrl+V 粘贴)"
+        >
+          复制到远端
+        </button>
+        <button
+          type="button"
+          className={styles.sessionBarBtn}
+          onClick={() => void onCopyFromRemote()}
+          title="取回远端剪贴板文本到控制端"
+        >
+          从远端复制
+        </button>
+      </div>
+      {banner !== null && <div className={styles.banner}>{banner}</div>}
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
         <div
           className={styles.group}

@@ -29,8 +29,6 @@ pub const FMT_INVALIDATE: u8 = 255;
 
 /// 行内合并的块数上限（256 / 64）。
 const MAX_MERGE_BLOCKS: u32 = 4;
-/// zstd 压缩等级（任务卡：level 1）。
-const ZSTD_LEVEL: i32 = 1;
 
 /// 一张瓦片（或一条失效清除）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,26 +261,20 @@ pub fn extract_bgra(f: &RawFrame, rect: &Rect) -> Vec<u8> {
     out
 }
 
-/// 编码一张瓦片：QOI 与 zstd(level 1) 双编码，取字节数更小者。
+/// 编码一张瓦片：QOI 单格式（D-013 包4/E2：与 zstd-BGRA 双格式相比，压缩率
+/// 收益仅个位数百分比，却让解码/测试矩阵翻倍——fmt=1 不再产出；解码端
+/// `decode_tile` 保留 fmt=1 分支以兼容旧流量）。
 fn encode_tile(f: &RawFrame, rect: &Rect) -> anyhow::Result<TileOut> {
     let bgra = extract_bgra(f, rect);
     let qoi_bytes = qoi::encode_to_vec(&bgra, rect.w, rect.h)
         .with_context(|| format!("QOI 编码失败 ({}x{})", rect.w, rect.h))?;
-    let zstd_bytes = zstd::bulk::compress(&bgra, ZSTD_LEVEL)
-        .with_context(|| format!("zstd 压缩失败 ({}x{})", rect.w, rect.h))?;
-
-    let (fmt, data) = if qoi_bytes.len() <= zstd_bytes.len() {
-        (FMT_QOI, qoi_bytes)
-    } else {
-        (FMT_ZSTD_BGRA, zstd_bytes)
-    };
     Ok(TileOut {
         x: rect.x as u16,
         y: rect.y as u16,
         w: rect.w as u16,
         h: rect.h as u16,
-        fmt,
-        data,
+        fmt: FMT_QOI,
+        data: qoi_bytes,
     })
 }
 

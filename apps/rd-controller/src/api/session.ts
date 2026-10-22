@@ -82,17 +82,71 @@ export interface GroupEventDto {
  * 打开窗口会话（先注册帧路由再 RPC OpenWindow，Rust 侧保证顺序）。
  *
  * `maxFps` 传 0 表示未指定（Agent 用配置默认值）；帧异步到达 `onFrame`。
+ * `viewOnly`（v0.1）= 只看不控：Agent 侧丢弃对该窗口的键鼠注入。
  */
 export function openWindow(
   deviceId: string,
   windowId: string,
   fit: FitMode,
   maxFps: number,
+  viewOnly: boolean,
   onFrame: (frame: ArrayBuffer) => void,
 ): Promise<OpenWindowAckDto> {
   const on_frame = new Channel<ArrayBuffer>();
   on_frame.onmessage = onFrame;
-  return invoke("open_window", { deviceId, windowId, fit, maxFps, onFrame: on_frame });
+  return invoke("open_window", {
+    deviceId,
+    windowId,
+    fit,
+    maxFps,
+    viewOnly,
+    onFrame: on_frame,
+  });
+}
+
+/** SessionState（v0.1）：Agent 会话级状态通知。 */
+export interface SessionStateDto {
+  /** proto SessionState.Kind：1=AGENT_CLOSING 2=PAUSED 3=RESUMED 4=LOCKED 5=UNLOCKED */
+  kind: number;
+  reason: string;
+}
+
+/** SessionState → 用户可读文案。 */
+export function sessionStateText(s: SessionStateDto): string | null {
+  switch (s.kind) {
+    case 1:
+      return s.reason || "被控端已退出 rd-agent";
+    case 2:
+      return "对方已暂停共享（画面/输入/终端全部停止）";
+    case 3:
+      return null; // 恢复：清横幅
+    case 4:
+      return "对方已锁屏，画面暂停；解锁后自动恢复";
+    case 5:
+      return null;
+    default:
+      return null;
+  }
+}
+
+/** 订阅 Agent 会话级状态（断开时任务自动退出）。 */
+export function subscribeSessionState(
+  deviceId: string,
+  onState: (s: SessionStateDto) => void,
+): Promise<() => void> {
+  const ch = new Channel<SessionStateDto>();
+  ch.onmessage = onState;
+  return invoke("subscribe_session_state", { deviceId, onState: ch });
+}
+
+/** 发送文本到被控端剪贴板（v0.1）。 */
+export function sendClipboard(deviceId: string, text: string): Promise<void> {
+  return invoke("send_clipboard", { deviceId, text });
+}
+
+/** 读取被控端剪贴板文本（v0.1；超时 2s）。 */
+export function requestClipboard(deviceId: string): Promise<string> {
+  return invoke("request_clipboard", { deviceId });
 }
 
 /** 关闭窗口会话（撤销帧路由 + 单向 CloseWindow；重复关闭安全）。 */

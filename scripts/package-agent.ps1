@@ -34,5 +34,11 @@ if ($license) { Copy-Item $license.FullName $stage } else { Write-Warning "ffmpe
 $zip = "$root\dist\rd-agent-$version-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $stage -DestinationPath $zip
+
+# Integrity: SHA256 alongside the zip (D-013 pack-3 / E4: zip is shared via
+# IM/cloud; receiver compares hash before running)
+$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+"$hash  $(Split-Path -Leaf $zip)" | Set-Content -Encoding ascii "$zip.sha256"
 Write-Host "== Output: $zip =="
+Write-Host "== SHA256: $hash (also saved to $zip.sha256) =="
 Get-Item $zip | Select-Object Name, Length

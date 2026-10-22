@@ -90,8 +90,13 @@ impl RateController {
             self.max_fps
         };
         let frame_bytes = (self.kbps as usize) * 125 / (fps.max(1) as usize);
-        let congested =
-            i.queued_bytes > frame_bytes || rtt > baseline * RTT_SPIKE_RATIO || i.lost_ratio > 0.0;
+        // 丢包阈值(D-013 包3/E3):任何丢包即降码率对 tailnet/DERP 的单包
+        // 抖动过敏——码率被反复砸到几百 kbps 再缓慢爬升。>2% 窗口丢包才
+        // 视为拥塞;积压与 RTT 尖峰仍为即时信号。
+        const LOST_RATIO_THRESHOLD: f32 = 0.02;
+        let congested = i.queued_bytes > frame_bytes
+            || rtt > baseline * RTT_SPIKE_RATIO
+            || i.lost_ratio > LOST_RATIO_THRESHOLD;
 
         if congested {
             self.kbps = clamp_kbps(self.kbps * DROP_NUM / DROP_DEN);

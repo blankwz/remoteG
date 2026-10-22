@@ -7,7 +7,10 @@ message Envelope { uint32 req_id = 1; oneof msg {
   OpenWindow open_window = 13; OpenWindowAck open_window_ack = 14; CloseWindow close_window = 15;
   ViewportInfo viewport = 16; KeyEvent key = 20; MouseButton mouse_btn = 21; MouseWheel wheel = 22; TextInput text = 23;
   OpenTerminal open_term = 30; TerminalOpened term_opened = 31; TerminalResize term_resize = 32;
-  StatsReport stats = 40; Error error = 99; } }
+  StatsReport stats = 40; Error error = 99;
+  // v0.1(D-013 包4;05_api §6):向后兼容追加——新 oneof tag、新字段
+  ClipboardData clipboard = 41;
+  SessionState session_state = 42; } }
 
 message Hello { uint32 proto_ver = 1; string device_name = 2; repeated Codec decode_caps = 3; bool supports_444 = 4; }
 message HelloAck { uint32 proto_ver = 1; string host_name = 2; repeated Codec encode_caps = 3; }
@@ -20,7 +23,9 @@ message WindowEvent { enum Kind { CREATED=0; DESTROYED=1; MOVED=2; TITLE=3; CHIL
 
 enum FitMode { FIT = 0; SCALE = 1; NATIVE = 2; }
 enum RenderLevel { L0_PIXEL = 0; L1_HYBRID = 1; L2_SEMANTIC = 2; }
-message OpenWindow { uint64 window_id = 1; FitMode fit = 2; RenderLevel max_level = 3; uint32 max_fps = 4; }
+// v0.1: view_only(=5)只看不控——Agent 对该窗口丢弃键鼠/文本注入(滚轮除外?
+// 否:滚轮同弃,严格只读);控制端会话工具栏开关切换需 Close+Open 重开。
+message OpenWindow { uint64 window_id = 1; FitMode fit = 2; RenderLevel max_level = 3; uint32 max_fps = 4; bool view_only = 5; }
 message OpenWindowAck { uint64 window_id = 1; RenderLevel level = 2; uint32 video_stream_id = 3; uint32 tile_stream_id = 4; Codec codec = 5; uint32 w = 6; uint32 h = 7; }
 message CloseWindow { uint64 window_id = 1; }
 message ViewportInfo { uint64 window_id = 1; uint32 css_w = 2; uint32 css_h = 3; float dpr = 4; }
@@ -37,3 +42,25 @@ message TerminalResize { string term_id = 1; uint32 cols = 2; uint32 rows = 3; }
 enum Codec { H264_420 = 0; H264_444 = 1; HEVC_444 = 2; AV1 = 3; }
 message StatsReport { uint32 fps = 1; uint32 rtt_ms = 2; uint32 kbps = 3; uint32 decode_ms = 4; }
 message Error { uint32 code = 1; string message = 2; }
+
+// ---------------------------------------------------------------------------
+// v0.1(D-013 包4)
+// ---------------------------------------------------------------------------
+
+// 剪贴板同步(文本起步)。
+// 控制端→Agent:write=true  写 Agent 本机剪贴板为 text;
+//             write=false 请求 Agent 回读(Agent 回 write=false 帧携带当前文本)。
+// Agent→控制端:write=false,text=Agent 剪贴板当前文本(回读应答或本机变化推送;
+//             首版不含监听推送,变化推送列 v0.2 候选)。
+message ClipboardData { bool write = 1; string text = 2; }
+
+// 会话级状态通知(Agent→控制端,req_id=0):控制端据此区分「网络断/Agent 退出/
+// 被控端锁屏/共享暂停」,替代只显示"已断开"的盲态。
+message SessionState { enum Kind {
+  CONNECTED = 0;    // 会话建立完成(信息性)
+  AGENT_CLOSING = 1; // Agent 即将退出(托盘退出/系统关机),reason 说明
+  PAUSED = 2;       // 共享已暂停(画面/输入/终端全停)
+  RESUMED = 3;      // 共享已恢复
+  LOCKED = 4;       // 被控端已锁屏(画面冻结属预期,解锁自动恢复)
+  UNLOCKED = 5;     // 被控端已解锁
+} Kind kind = 1; string reason = 2; }

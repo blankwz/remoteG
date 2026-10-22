@@ -295,6 +295,63 @@
   background: var(--rd-bg-deep);
 }
 
+/* 会话工具条(只看不控/剪贴板互传,v0.1):悬浮在画面左上,不占布局 */
+.sessionBar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(0 0 0 / 55%);
+  backdrop-filter: blur(6px);
+}
+
+.sessionBarItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--rd-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sessionBarBtn {
+  padding: 2px 8px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sessionBarBtn:hover {
+  border-color: var(--rd-border-strong);
+  color: var(--rd-text);
+}
+
+/* Agent 会话级状态横幅(锁屏/暂停/退出,v0.1) */
+.banner {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 6px 14px;
+  border: 1px solid rgb(240 180 60 / 40%);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(240 180 60 / 12%);
+  color: rgb(255 214 130);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .stageTopLeft {
   width: 100%;
   height: 100%;

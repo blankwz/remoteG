@@ -17,7 +17,7 @@
 
 use rd_proto::v0::{
     envelope, window_event, CloseWindow, FitMode, OpenWindow, OpenWindowAck, RenderLevel,
-    StatsReport, ViewportInfo, WindowInfo, Envelope,
+    SessionState, StatsReport, ViewportInfo, WindowInfo, Envelope,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -250,6 +250,7 @@ pub async fn open_window(
     window_id: String,
     fit: FitDto,
     max_fps: u32,
+    view_only: bool,
     on_frame: Channel<InvokeResponseBody>,
     state: State<'_, ConnManager>,
 ) -> Result<OpenWindowAckDto, String> {
@@ -265,6 +266,8 @@ pub async fn open_window(
         // M1 只做像素级渲染（L0），能力协商上限即 L0
         max_level: RenderLevel::L0Pixel as i32,
         max_fps,
+        // 只看不控（v0.1/D-013 包4）：Agent 侧注入门按此位拦截
+        view_only,
     });
     let reply = match conn.rpc(msg).await {
         Ok(reply) => reply,
@@ -391,6 +394,53 @@ pub async fn subscribe_group_events(
         }
     });
     Ok(())
+}
+
+/// 会话级状态订阅（v0.1/D-013 包4）：把 Agent 的 SessionState（锁屏/暂停/
+/// Agent 退出等）转发给前端；连接结束或前端 Channel 关闭时任务退出。
+#[tauri::command]
+pub async fn subscribe_session_state(
+    device_id: String,
+    on_state: Channel<SessionStateDto>,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let conn = get_conn(&state, &device_id)?;
+    let mut rx = conn.subscribe();
+    let mut closed = conn.closed();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = closed.changed() => break,
+                ev = rx.recv() => match ev {
+                    Ok(env) => {
+                        let Some(envelope::Msg::SessionState(s)) = &env.msg else {
+                            continue;
+                        };
+                        let dto = SessionStateDto {
+                            kind: s.kind,
+                            reason: s.reason.clone(),
+                        };
+                        if on_state.send(dto).is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("SessionState 订阅积压溢出，跳过 {skipped} 条");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// SessionState 前端 DTO（kind = proto 枚举原始 i32）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStateDto {
+    pub kind: i32,
+    pub reason: String,
 }
 
 // ---------------------------------------------------------------------------

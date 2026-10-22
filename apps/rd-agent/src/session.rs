@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use rd_proto::v0::{envelope, Envelope, Error, Hello, HelloAck, PairResult};
+use rd_proto::v0::{envelope, ClipboardData, Envelope, Error, Hello, HelloAck, PairResult};
 use rd_security::{AgentPairing, PairError, PairStep};
 use rd_term::TermManager;
 use rd_transport::{Conn, ControlRx, ControlTx, Fingerprint, Identity};
@@ -45,9 +45,74 @@ const TAG_MAC: u8 = 0x02;
 const ERR_UNAUTHENTICATED: u32 = 1;
 /// 协议错误码 30:终端启动失败(05_api §4;终端功能被关闭时沿用)。
 const ERR_TERMINAL_DISABLED: u32 = 30;
+/// 协议错误码 50:剪贴板操作失败(05_api §4,v0.1 追加)。
+const ERR_CLIPBOARD: u32 = 50;
+/// 连接确认等待时长:超时未确认视为拒绝。
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 被控端确认框:独立线程弹 MessageBox(Yes/No),30s 超时视为拒绝。
+/// 模态于该线程,不阻塞 Agent 其余会话。
+async fn confirm_connection(peer_name: &str, peer_fp: &Fingerprint) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let name = peer_name.to_string();
+    let fp = peer_fp.short_hex();
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST,
+                MB_YESNO,
+            };
+            let text = HSTRING::from(format!(
+                "设备「{name}」({fp}…) 请求远程控制这台电脑。\n\n允许这次连接吗?"
+            ));
+            let title = HSTRING::from("rd 远程控制 · 连接请求");
+            let yes = unsafe {
+                MessageBoxW(
+                    None,
+                    &text,
+                    &title,
+                    MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST | MB_DEFBUTTON2,
+                ) == IDYES
+            };
+            let _ = tx.send(yes);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (name.clone(), fp.clone(), tx);
+        }
+    });
+    tokio::time::timeout(CONFIRM_TIMEOUT, rx)
+        .await
+        .unwrap_or(Ok(false))
+        .unwrap_or(false)
+}
+
+/// device_name 消毒:trim + 去控制字符 + 限长 64,空值回落占位
+/// (D-013 包3/E4:防日志伪造与存储塞爆)。
+fn sanitize_device_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
 /// Agent 侧编出的编码能力缓存(T-015/T-016 遗留收尾):rd-encode 动态探测
 /// 结果(`H264420` 恒有;`H264444` 以硬编实际编一帧验证,依本机环境而定)。
 static ENCODE_CAPS: OnceLock<Vec<i32>> = OnceLock::new();
+/// 配对空闲超时(D-013 包3):每条消息间隔上限,超时断开未鉴权连接。
+const PAIRING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 同进程并发配对数上限(D-013 包3):防垃圾报文洪水中配对循环堆积。
+const PAIRING_MAX: usize = 4;
+/// 当前并发配对数。
+static PAIRING_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 编码能力(进程内首次调用触发 rd-encode 的 4:4:4 硬编探测并缓存)。
 ///
@@ -88,7 +153,7 @@ pub struct AgentState {
 }
 
 /// 一台在线控制端(name/fp/since 由 T-018 托盘消费;cancel 为本连接取消令牌)。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PeerInfo {
     pub name: String,
@@ -96,6 +161,10 @@ pub struct PeerInfo {
     pub since: SystemTime,
     /// 该连接的取消令牌:T-016/017 的流任务应 `select` 它,托盘"断开"亦用它。
     pub cancel: CancellationToken,
+    /// 控制流发送端(托盘"断开所有"/暂停共享前推 SessionState,v0.1)。
+    pub ctl: Arc<tokio::sync::Mutex<ControlTx>>,
+    /// 所属 runtime(托盘线程为非 runtime 线程,block_on 用)。
+    pub rt: tokio::runtime::Handle,
 }
 
 /// 单连接上下文:分发给各 handler 的只读视图 + 控制流发送端。
@@ -103,8 +172,9 @@ pub struct SessionCtx {
     pub state: Arc<AgentState>,
     pub conn: Arc<Conn>,
     /// 控制流发送端。用 tokio Mutex:`send` 需要跨 await 持锁(分发循环、
-    /// datagram 任务、T-016/017 的流任务都可能并发回包,std 互斥无法做到)。
-    pub ctl: tokio::sync::Mutex<ControlTx>,
+    /// datagram 任务、T-016/017 的流任务都可能并发回包,std 互斥无法做到);
+    /// Arc 包装:PeerInfo(托盘推 SessionState)共享同一发送端。
+    pub ctl: Arc<tokio::sync::Mutex<ControlTx>>,
     pub peer_name: String,
     /// 对端 `Hello`(含 decode_caps,供 T-016 编码选路)。
     #[allow(dead_code)]
@@ -139,7 +209,10 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         .await
         .context("接受控制流失败(对端未打开 stream 0)")?;
 
-    let (hello, hello_req_id) = recv_hello(&mut ctl_rx).await?;
+    let (mut hello, hello_req_id) = recv_hello(&mut ctl_rx).await?;
+    // device_name 消毒(D-013 包3/E4):原样进日志/信任列表/托盘,可换行伪造
+    // 日志行、塞爆存储——trim + 去控制字符 + 限长 64,空值回落占位。
+    hello.device_name = sanitize_device_name(&hello.device_name);
     let peer_fp = conn.peer_fingerprint();
     let local_fp = state.local_fp;
 
@@ -174,6 +247,14 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         return Ok(());
     }
 
+    // 连接确认(D-013 包3/E4:消除"静默被控"——信任设备此前连上即得
+    // 屏幕+输入+终端全权,唯一信号是托盘图标变色)。30s 未确认即断开;
+    // debug 构建默认关(e2e),生产默认开。
+    if state.config.confirm_connection && !confirm_connection(&hello.device_name, &peer_fp).await {
+        tracing::info!(peer = peer_fp.short_hex(), "对方未确认控制请求,断开");
+        return Ok(());
+    }
+
     // 会话保活(D-013 包2):有受信任连接期间阻止屏保/息屏/睡眠
     crate::power::acquire();
 
@@ -183,27 +264,32 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
     let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
     let cancel = CancellationToken::new();
-    {
-        state.peers.lock().expect("peers 锁中毒").insert(
-            conn_id,
-            PeerInfo {
-                name: hello.device_name.clone(),
-                fp: peer_fp,
-                since: SystemTime::now(),
-                cancel: cancel.clone(),
-            },
-        );
-    }
+    // 控制流发送端 Arc:SessionCtx(分发回包)与 PeerInfo(托盘推 SessionState)共享
+    let ctl_shared = Arc::new(tokio::sync::Mutex::new(ctl_tx));
 
     let ctx = Arc::new(SessionCtx {
         state: Arc::clone(&state),
         conn: Arc::new(conn),
-        ctl: tokio::sync::Mutex::new(ctl_tx),
+        ctl: Arc::clone(&ctl_shared),
         peer_name: hello.device_name.clone(),
         hello,
         windows: WindowSessions,
         terms: TermAttachments,
     });
+
+    {
+        state.peers.lock().expect("peers 锁中毒").insert(
+            conn_id,
+            PeerInfo {
+                name: ctx.peer_name.clone(),
+                fp: peer_fp,
+                since: SystemTime::now(),
+                cancel: cancel.clone(),
+                ctl: Arc::clone(&ctl_shared),
+                rt: tokio::runtime::Handle::current(),
+            },
+        );
+    }
 
     spawn_datagram_loop(&ctx);
 
@@ -239,6 +325,10 @@ async fn recv_hello(rx: &mut ControlRx) -> anyhow::Result<(Hello, u32)> {
 
 /// Pairing 状态循环:只接受 `PairRequest`,成功时回 `HelloAck` 并转 Authenticated。
 /// 返回是否进入已鉴权状态。
+///
+/// 资源防护(D-013 包3/E4):每连接空闲 60s 未完成配对即断开(此前可无限
+/// 挂);同进程并发配对数上限 [`PAIRING_MAX`](恶意节点用垃圾报文把配对锁
+/// 死的洪水面)。
 async fn run_pairing(
     state: &Arc<AgentState>,
     ctl_tx: &mut ControlTx,
@@ -247,11 +337,29 @@ async fn run_pairing(
     local_fp: Fingerprint,
     peer_fp: Fingerprint,
 ) -> anyhow::Result<bool> {
+    if PAIRING_COUNT.load(Ordering::Relaxed) >= PAIRING_MAX {
+        tracing::warn!(peer = peer_fp.short_hex(), "并发配对数已达上限,拒绝");
+        return Ok(false);
+    }
+    struct PairingGuard;
+    impl Drop for PairingGuard {
+        fn drop(&mut self) {
+            PAIRING_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    PAIRING_COUNT.fetch_add(1, Ordering::Relaxed);
+    let _guard = PairingGuard;
+
     tracing::info!(peer = peer_fp.short_hex(), "未受信任设备,进入配对流程");
     loop {
-        let env = match ctl_rx.recv().await? {
-            Some(env) => env,
-            None => return Ok(false),
+        let env = match tokio::time::timeout(PAIRING_IDLE_TIMEOUT, ctl_rx.recv()).await {
+            Ok(Ok(Some(env))) => env,
+            Ok(Ok(None)) => return Ok(false),
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                tracing::info!(peer = peer_fp.short_hex(), "配对空闲超时,断开");
+                return Ok(false);
+            }
         };
         match env.msg {
             Some(envelope::Msg::PairReq(req)) => {
@@ -409,12 +517,17 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
                 &ctx.peer_name,
                 term_handler::handle(ctx, env.req_id, TermMsg::Resize(m)),
             ),
+            // 剪贴板同步(v0.1/D-013 包4)
+            envelope::Msg::Clipboard(m) => handle_clipboard(ctx, env.req_id, m).await?,
             // 其余消息:静默/记录,不打断会话
             envelope::Msg::Stats(m) => {
                 tracing::debug!(name = %ctx.peer_name, fps = m.fps, rtt_ms = m.rtt_ms, kbps = m.kbps, "控制端统计(码率自适应 T-016 接入)");
             }
             envelope::Msg::Error(m) => {
                 tracing::debug!(name = %ctx.peer_name, code = m.code, "控制端报告错误: {}", m.message);
+            }
+            envelope::Msg::SessionState(m) => {
+                tracing::debug!(name = %ctx.peer_name, kind = m.kind, "忽略反向 SessionState");
             }
             envelope::Msg::Hello(_) | envelope::Msg::PairReq(_) => {
                 tracing::debug!(name = %ctx.peer_name, "已鉴权状态下忽略重复 Hello/PairRequest");
@@ -433,6 +546,32 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
 fn handle_soft(peer: &str, result: anyhow::Result<()>) {
     if let Err(err) = result {
         tracing::warn!(name = peer, "消息处理失败: {err:#}");
+    }
+}
+
+/// 剪贴板同步(v0.1/D-013 包4):write=写本机剪贴板;read=回发当前文本。
+/// 内容绝不落日志(DoD 同按键纪律),只记操作与字符数。
+async fn handle_clipboard(ctx: &SessionCtx, req_id: u32, m: ClipboardData) -> anyhow::Result<()> {
+    if m.write {
+        let chars = m.text.chars().count();
+        let ok = crate::clipboard::write_text(&m.text);
+        tracing::info!(name = %ctx.peer_name, ok, chars, "写入本机剪贴板");
+        if !ok {
+            ctx.send(
+                envelope::Msg::Error(error_msg(ERR_CLIPBOARD, "写入被控端剪贴板失败")),
+                req_id,
+            )
+            .await?;
+        }
+        Ok(())
+    } else {
+        let text = crate::clipboard::read_text().unwrap_or_default();
+        tracing::info!(name = %ctx.peer_name, chars = text.chars().count(), "回读本机剪贴板");
+        ctx.send(
+            envelope::Msg::Clipboard(ClipboardData { write: false, text }),
+            req_id,
+        )
+        .await
     }
 }
 

@@ -61,12 +61,22 @@ fn rtt_spike_drops_bitrate() {
 #[test]
 fn packet_loss_drops_bitrate() {
     let mut rc = RateController::new(4000, 60);
-    // 任何丢包（lost_ratio > 0）即视为拥塞。
+    // 丢包阈值化（D-013 包4/E3）：≤2% 视为 tailnet/DERP 抖动，不降码率。
     assert_eq!(
         rc.update(RateInput {
             rtt_ms: 20,
             queued_bytes: 0,
             lost_ratio: 0.02
+        })
+        .kbps,
+        4000
+    );
+    // >2% 真实拥塞 → 降档。
+    assert_eq!(
+        rc.update(RateInput {
+            rtt_ms: 20,
+            queued_bytes: 0,
+            lost_ratio: 0.05
         })
         .kbps,
         2800

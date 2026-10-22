@@ -148,6 +148,19 @@ impl TermManager {
         }
     }
 
+    /// 关闭并移除全部会话，杀掉全部子进程（被控端「暂停共享」时调用，
+    /// 保证暂停后不存在仍可交互的活 shell——D-013 包3/E4 评审）。
+    pub fn close_all(&self) {
+        let sessions: Vec<_> = {
+            let mut map = self.lock_sessions();
+            map.drain().map(|(_, s)| s).collect()
+        };
+        for s in sessions {
+            s.exited.store(true, Ordering::SeqCst);
+            let _ = s.child.lock().unwrap().kill();
+        }
+    }
+
     fn lock_sessions(&self) -> MutexGuard<'_, HashMap<String, Arc<TermSession>>> {
         self.sessions.lock().unwrap()
     }

@@ -518,6 +518,54 @@ pub async fn connect_device(
     })
 }
 
+/// 取在线连接（本模块私有，同 session.rs/term.rs 的同名辅助）。
+fn get_conn(state: &ConnManager, device_id: &str) -> Result<std::sync::Arc<DeviceConn>, String> {
+    state
+        .get_device(device_id)
+        .ok_or_else(|| "设备未连接".to_string())
+}
+
+/// 发送文本到被控端剪贴板（v0.1/D-013 包4）。fire-and-forget；失败由
+/// Agent 回 Error{50}（订阅路径日志）。
+#[tauri::command]
+pub async fn send_clipboard(
+    device_id: String,
+    text: String,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let conn = get_conn(&state, &device_id)?;
+    conn.send(envelope::Msg::Clipboard(rd_proto::v0::ClipboardData {
+        write: true,
+        text,
+    }))
+    .await
+    .map_err(|e| format!("发送剪贴板失败:{e}"))
+}
+
+/// 读取被控端剪贴板文本（RPC 等回读应答；超时 2s）。
+#[tauri::command]
+pub async fn request_clipboard(
+    device_id: String,
+    state: State<'_, ConnManager>,
+) -> Result<String, String> {
+    let conn = get_conn(&state, &device_id)?;
+    let env = tokio::time::timeout(
+        Duration::from_secs(2),
+        conn.rpc(envelope::Msg::Clipboard(rd_proto::v0::ClipboardData {
+            write: false,
+            text: String::new(),
+        })),
+    )
+    .await
+    .map_err(|_| "读取被控端剪贴板超时".to_string())?
+    .map_err(|e| format!("读取被控端剪贴板失败:{e}"))?;
+    match env.msg {
+        Some(envelope::Msg::Clipboard(rd_proto::v0::ClipboardData { text, .. })) => Ok(text),
+        Some(envelope::Msg::Error(e)) => Err(e.message),
+        _ => Err("被控端剪贴板应答格式异常".into()),
+    }
+}
+
 /// 断开指定设备。
 #[tauri::command]
 pub async fn disconnect_device(id: String, state: State<'_, ConnManager>) -> Result<(), String> {
