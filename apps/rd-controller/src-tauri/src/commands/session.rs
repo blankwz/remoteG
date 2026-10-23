@@ -16,12 +16,12 @@
 //! window_id 沿用 T-020 约定：前端十进制字符串，Rust 侧解析 u64。
 
 use rd_proto::v0::{
-    envelope, window_event, CloseWindow, FitMode, OpenWindow, OpenWindowAck, RenderLevel,
-    SessionState, StatsReport, ViewportInfo, WindowInfo, Envelope,
+    CloseWindow, Envelope, FitMode, OpenWindow, OpenWindowAck, RenderLevel, StatsReport,
+    ViewportInfo, WindowInfo, envelope, window_event,
 };
 use serde::{Deserialize, Serialize};
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::broadcast;
 
 use crate::conn::{ConnManager, DeviceConn};
@@ -600,8 +600,11 @@ mod tests {
 
     #[test]
     fn child_added_event_carries_child_info() {
-        let dto = group_event(&event(window_event::Kind::ChildAdded, Some(window(9, 3, 4)), 7), 7)
-            .expect("应转发");
+        let dto = group_event(
+            &event(window_event::Kind::ChildAdded, Some(window(9, 3, 4)), 7),
+            7,
+        )
+        .expect("应转发");
         assert_eq!(dto.kind, "CHILD_ADDED");
         let info = dto.info.expect("info");
         assert_eq!(info.id, "9");
@@ -611,9 +614,21 @@ mod tests {
 
     #[test]
     fn events_of_other_roots_are_dropped() {
-        assert!(group_event(&event(window_event::Kind::ChildAdded, Some(window(9, 0, 0)), 999), 7).is_none());
+        assert!(
+            group_event(
+                &event(window_event::Kind::ChildAdded, Some(window(9, 0, 0)), 999),
+                7
+            )
+            .is_none()
+        );
         // 顶层事件（root_id=0）由 T-020 的列表页订阅，组订阅不消费
-        assert!(group_event(&event(window_event::Kind::Created, Some(window(7, 0, 0)), 0), 7).is_none());
+        assert!(
+            group_event(
+                &event(window_event::Kind::Created, Some(window(7, 0, 0)), 0),
+                7
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -659,7 +674,15 @@ mod tests {
         let dto = group_event(&env, 7).expect("Stats 应转发");
         assert_eq!(dto.kind, "STATS");
         let stats = dto.stats.expect("stats");
-        assert_eq!(stats, StatsDto { fps: 58, rtt_ms: 12, kbps: 7800, decode_ms: 3 });
+        assert_eq!(
+            stats,
+            StatsDto {
+                fps: 58,
+                rtt_ms: 12,
+                kbps: 7800,
+                decode_ms: 3
+            }
+        );
     }
 
     #[test]
@@ -669,7 +692,10 @@ mod tests {
             msg: Some(envelope::Msg::OpenWindowAck(OpenWindowAck::default())),
         };
         assert!(group_event(&env, 7).is_none());
-        let env = Envelope { req_id: 0, msg: None };
+        let env = Envelope {
+            req_id: 0,
+            msg: None,
+        };
         assert!(group_event(&env, 7).is_none());
     }
 
@@ -690,9 +716,15 @@ mod tests {
 
     #[test]
     fn agent_error_includes_code_and_message() {
-        let e = PbError { code: 11, message: "窗口处于最小化".into() };
+        let e = PbError {
+            code: 11,
+            message: "窗口处于最小化".into(),
+        };
         assert_eq!(agent_error(&e), "对端错误 11: 窗口处于最小化");
-        let e = PbError { code: 10, message: String::new() };
+        let e = PbError {
+            code: 10,
+            message: String::new(),
+        };
         assert_eq!(agent_error(&e), "对端错误 10");
     }
 }

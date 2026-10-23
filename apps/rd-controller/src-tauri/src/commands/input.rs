@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use bytes::BufMut;
-use rd_proto::v0::{envelope, KeyEvent, MouseButton, MouseWheel, TextInput};
+use rd_proto::v0::{KeyEvent, MouseButton, MouseWheel, TextInput, envelope};
 use tauri::State;
 
 use crate::commands::session::parse_window_id;

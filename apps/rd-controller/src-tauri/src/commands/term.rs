@@ -10,10 +10,10 @@
 //! - `term_resize`：`TerminalResize` 单向上报（Agent 侧 `ResizePseudoConsole`，
 //!   不回包，与 ViewportInfo 同款 req_id=0 语义）。
 
-use rd_proto::v0::{envelope, Error as PbError, OpenTerminal, TerminalResize, TerminalOpened};
+use rd_proto::v0::{Error as PbError, OpenTerminal, TerminalOpened, TerminalResize, envelope};
 use serde::Serialize;
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 use crate::conn::{ConnManager, DeviceConn};
 
@@ -131,9 +131,13 @@ pub async fn term_resize(
     state: State<'_, ConnManager>,
 ) -> Result<(), String> {
     let conn = get_conn(&state, &device_id)?;
-    conn.send(envelope::Msg::TermResize(TerminalResize { term_id, cols, rows }))
-        .await
-        .map_err(|e| format!("调整终端尺寸失败：{e:#}"))
+    conn.send(envelope::Msg::TermResize(TerminalResize {
+        term_id,
+        cols,
+        rows,
+    }))
+    .await
+    .map_err(|e| format!("调整终端尺寸失败：{e:#}"))
 }
 
 // ---------------------------------------------------------------------------

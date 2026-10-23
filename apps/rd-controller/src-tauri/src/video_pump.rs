@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
-use rd_transport::framing::{encode_video_header, VIDEO_HEADER_LEN};
+use rd_transport::framing::{VIDEO_HEADER_LEN, encode_video_header};
 use rd_transport::{DataFrame, DataRx};
 use tauri::ipc::{Channel, InvokeResponseBody};
 

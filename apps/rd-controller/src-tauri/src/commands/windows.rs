@@ -8,10 +8,10 @@
 //! window_id 以十进制字符串进 DTO（u64 可能超出 JS number 安全整数范围，
 //! URL 参数 `#/session/:id?open=<windowId>` 也天然是字符串）。
 
-use rd_proto::v0::{envelope, window_event, Envelope, ListWindows, WindowInfo};
+use rd_proto::v0::{Envelope, ListWindows, WindowInfo, envelope, window_event};
 use serde::Serialize;
-use tauri::ipc::Channel;
 use tauri::State;
+use tauri::ipc::Channel;
 use tokio::sync::broadcast;
 
 use crate::conn::ConnManager;
@@ -145,7 +145,9 @@ fn top_level_window_event(env: &Envelope) -> Option<WindowEventDto> {
     };
     let info = ev.info.as_ref().map(to_dto);
     let is_top = ev.root_id == 0
-        || info.as_ref().is_some_and(|w| w.id == ev.root_id.to_string());
+        || info
+            .as_ref()
+            .is_some_and(|w| w.id == ev.root_id.to_string());
     if !is_top {
         return None;
     }
@@ -324,8 +326,9 @@ mod tests {
     #[test]
     fn top_level_when_root_id_zero() {
         // 顶层窗口不属于任何组：root_id = 0
-        let dto = top_level_window_event(&event(window_event::Kind::Created, Some(window(7, "A")), 0))
-            .expect("root_id=0 应为顶层");
+        let dto =
+            top_level_window_event(&event(window_event::Kind::Created, Some(window(7, "A")), 0))
+                .expect("root_id=0 应为顶层");
         assert_eq!(dto.kind, "CREATED");
         assert_eq!(dto.info.as_ref().expect("info").id, "7");
         assert_eq!(dto.root_id, "0");
@@ -334,8 +337,9 @@ mod tests {
     #[test]
     fn top_level_when_root_id_self_referencing() {
         // 顶层窗口自身是组根：root_id == info.id
-        let dto = top_level_window_event(&event(window_event::Kind::Title, Some(window(7, "A")), 7))
-            .expect("自引用应为顶层");
+        let dto =
+            top_level_window_event(&event(window_event::Kind::Title, Some(window(7, "A")), 7))
+                .expect("自引用应为顶层");
         assert_eq!(dto.kind, "TITLE");
         assert_eq!(dto.root_id, "7");
     }
@@ -356,8 +360,8 @@ mod tests {
     #[test]
     fn destroyed_with_empty_info_is_top_level_by_root_zero() {
         // proto3 缺省 info（None）且 root_id=0：仍转发，info 为 None（前端按 root_id 处理）
-        let dto = top_level_window_event(&event(window_event::Kind::Destroyed, None, 0))
-            .expect("应转发");
+        let dto =
+            top_level_window_event(&event(window_event::Kind::Destroyed, None, 0)).expect("应转发");
         assert_eq!(dto.kind, "DESTROYED");
         assert!(dto.info.is_none());
     }

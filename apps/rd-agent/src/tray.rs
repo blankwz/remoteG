@@ -13,20 +13,16 @@
 //! - 暂停共享 = `state.paused` 原子开关(画面/输入 handler 消费);
 //! - 退出 = 取消所有连接后 `std::process::exit(0)`。
 
-use std::sync::Arc;
-
-use crate::session::AgentState;
-
 /// 托盘主循环:Windows 跑托盘消息泵(下方 `imp`);其他平台驻留待命,
 /// 行为与 `--no-tray` 一致(保持可 check/可运行)。
 #[cfg(windows)]
-pub fn run(state: Arc<AgentState>) -> ! {
-    imp::run(state)
+pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
+    imp::run(runtime)
 }
 
 #[cfg(not(windows))]
-pub fn run(state: Arc<AgentState>) -> ! {
-    let _ = state;
+pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
+    let _ = runtime;
     tracing::info!("当前平台无托盘,进程驻留待命(Ctrl+C 退出)");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -50,7 +46,7 @@ mod imp {
         MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MSG, WM_TIMER,
     };
 
-    use crate::session::AgentState;
+    use rd_agent::session::AgentState;
 
     /// 内嵌托盘图标资产:灰 = 空闲,绿 = 正在被控制(16/32/48 px,32bpp)。
     const IDLE_ICON_BYTES: &[u8] = include_bytes!("../assets/tray.ico");
@@ -103,7 +99,8 @@ mod imp {
     }
 
     /// 托盘入口:构建图标/菜单/托盘,主线程泵消息直至退出(永不返回)。
-    pub(super) fn run(state: Arc<AgentState>) -> ! {
+    pub(super) fn run(runtime: &rd_agent::AgentRuntime) -> ! {
+        let state: Arc<AgentState> = Arc::clone(&runtime.state);
         let idle_icon = load_icon(IDLE_ICON_BYTES, "tray.ico");
         let active_icon = load_icon(ACTIVE_ICON_BYTES, "tray-active.ico");
 
@@ -174,13 +171,13 @@ mod imp {
         let mut msg = MSG::default();
         loop {
             while let Ok(event) = MenuEvent::receiver().try_recv() {
-                handle_menu_event(&state, &mut ui, event.id.0.as_str());
+                handle_menu_event(runtime, &mut ui, event.id.0.as_str());
             }
             // 返回值:0 = WM_QUIT,-1 = 错误,>0 = 取到消息
             let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
             if got.0 <= 0 {
                 tracing::info!(code = got.0, "托盘消息循环结束");
-                disconnect_all(&state);
+                disconnect_all(runtime);
                 std::process::exit(0);
             }
             if msg.message == WM_TIMER && msg.hwnd.0.is_null() {
@@ -202,7 +199,8 @@ mod imp {
     }
 
     /// 菜单点击分发;除退出外的分支最后统一 `refresh` 即时反映状态。
-    fn handle_menu_event(state: &AgentState, ui: &mut TrayUi, id: &str) {
+    fn handle_menu_event(runtime: &rd_agent::AgentRuntime, ui: &mut TrayUi, id: &str) {
+        let state: Arc<AgentState> = Arc::clone(&runtime.state);
         match id {
             ID_GENERATE => {
                 let code = {
@@ -246,25 +244,25 @@ mod imp {
                     }
                 }
             }
-            ID_DISCONNECT_ALL => disconnect_all(state),
+            ID_DISCONNECT_ALL => disconnect_all(runtime),
             ID_PAUSE => {
                 // Windows 下 muda 原生先翻转勾选,再发事件:以勾选态为准回写
                 let paused = ui.paused_item.is_checked();
                 state.paused.store(paused, Ordering::SeqCst);
                 if paused {
                     // 终端一并终止(D-013 包3/E4):活 shell 不能在暂停后存活
-                    crate::term_handler::pause_all(state);
-                    broadcast_session_state(state, SESSION_STATE_PAUSED, "共享已暂停");
+                    rd_agent::term_handler::pause_all(&state);
+                    broadcast_session_state(&state, SESSION_STATE_PAUSED, "共享已暂停");
                     tracing::info!("共享已暂停(画面/输入/终端全部停止)");
                 } else {
-                    broadcast_session_state(state, SESSION_STATE_RESUMED, "");
+                    broadcast_session_state(&state, SESSION_STATE_RESUMED, "");
                     tracing::info!("共享已恢复");
                 }
             }
             ID_OPEN_LOGS => open_log_dir(),
             ID_QUIT => {
                 tracing::info!("托盘请求退出");
-                disconnect_all(state);
+                disconnect_all(runtime);
                 std::process::exit(0);
             }
             other => {
@@ -278,11 +276,11 @@ mod imp {
                         peer.cancel.cancel();
                     }
                 } else if let Some(fp_hex) = other.strip_prefix(TRUST_PREFIX) {
-                    revoke_trust(state, fp_hex);
+                    revoke_trust(&state, fp_hex);
                 }
             }
         }
-        refresh(state, ui);
+        refresh(&state, ui);
     }
 
     /// 每秒刷新:已连接数/设备子菜单、图标与 tooltip、暂停勾选同步。
@@ -530,8 +528,8 @@ mod imp {
         }
     }
 
-    /// SessionState.Kind 原始值(v0.1,proto SessionState::Kind)。
-    const SESSION_STATE_AGENT_CLOSING: i32 = 1;
+    /// SessionState.Kind 原始值(v0.1,proto SessionState::Kind;AGENT_CLOSING=1
+    /// 由 AgentRuntime::disconnect_all 内部发送)。
     const SESSION_STATE_PAUSED: i32 = 2;
     const SESSION_STATE_RESUMED: i32 = 3;
 
@@ -564,32 +562,9 @@ mod imp {
 
     /// 取消并清空所有连接(托盘"断开所有"/退出):先推 AGENT_CLOSING 让控制端
     /// 区分「Agent 退出」与「网络断」(v0.1/D-013 包4),再取消令牌。
-    fn disconnect_all(state: &AgentState) {
-        let peers = {
-            let mut peers = state.peers.lock().expect("peers 锁中毒");
-            std::mem::take(&mut *peers)
-        };
-        let count = peers.len();
-        for peer in peers.values() {
-            let ctl = Arc::clone(&peer.ctl);
-            peer.rt.block_on(async move {
-                let mut ctl = ctl.lock().await;
-                let _ = ctl
-                    .send(&rd_proto::v0::Envelope {
-                        req_id: 0,
-                        msg: Some(rd_proto::v0::envelope::Msg::SessionState(
-                            rd_proto::v0::SessionState {
-                                kind: SESSION_STATE_AGENT_CLOSING,
-                                reason: "被控端已退出 rd-agent".into(),
-                            },
-                        )),
-                    })
-                    .await;
-            });
-        }
-        for peer in peers.into_values() {
-            peer.cancel.cancel();
-        }
+    fn disconnect_all(runtime: &rd_agent::AgentRuntime) {
+        let count = runtime.state.peers.lock().expect("peers 锁中毒").len();
+        runtime.disconnect_all("被控端已退出 rd-agent");
         if count > 0 {
             tracing::info!(count, "已断开全部连接");
         }

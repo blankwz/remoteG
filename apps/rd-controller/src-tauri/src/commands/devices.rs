@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rd_proto::v0::{envelope, Codec, PairRequest, PairResult};
+use rd_proto::v0::{Codec, PairRequest, PairResult, envelope};
 use rd_security::TrustStore;
 use rd_transport::Fingerprint;
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
     use std::collections::{BTreeSet, HashMap};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::net::UdpSocket;
-    use tokio::time::{timeout, Instant};
+    use tokio::time::{Instant, timeout};
 
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
@@ -253,14 +253,14 @@ impl DeviceStore {
         let tmp = self.path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(&self.devices)
             .map_err(|e| anyhow::anyhow!("序列化设备列表失败：{e}"))?;
-        let mut file = std::fs::File::create(&tmp)
-            .map_err(|e| anyhow::anyhow!("写入临时文件失败：{e}"))?;
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|e| anyhow::anyhow!("写入临时文件失败：{e}"))?;
         file.write_all(json.as_bytes())
             .map_err(|e| anyhow::anyhow!("写入临时文件失败：{e}"))?;
-        file.sync_all().map_err(|e| anyhow::anyhow!("fsync 失败：{e}"))?;
+        file.sync_all()
+            .map_err(|e| anyhow::anyhow!("fsync 失败：{e}"))?;
         drop(file);
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| anyhow::anyhow!("原子替换设备列表失败：{e}"))
+        std::fs::rename(&tmp, &self.path).map_err(|e| anyhow::anyhow!("原子替换设备列表失败：{e}"))
     }
 }
 
@@ -269,8 +269,7 @@ impl DeviceStore {
 // ---------------------------------------------------------------------------
 
 fn open_store(state: &ConnManager) -> Result<DeviceStore, String> {
-    DeviceStore::open(&state.data_dir().join("devices.json"))
-        .map_err(|e| format!("{e:#}"))
+    DeviceStore::open(&state.data_dir().join("devices.json")).map_err(|e| format!("{e:#}"))
 }
 
 fn open_trust(state: &ConnManager) -> Result<TrustStore, String> {
@@ -357,14 +356,18 @@ fn save_device(
     };
     store.upsert(entry.clone()).map_err(|e| format!("{e:#}"))?;
     let mut trust = open_trust(state)?;
-    trust.add(fp, name).map_err(|e| format!("写入信任列表失败：{e:#}"))?;
+    trust
+        .add(fp, name)
+        .map_err(|e| format!("写入信任列表失败：{e:#}"))?;
     Ok(entry)
 }
 
 /// 发送一条 PairRequest 并解析 PairResult 回复。
 async fn pair_step(conn: &DeviceConn, payload: Vec<u8>) -> Result<PairResult, String> {
     let reply = conn
-        .rpc(envelope::Msg::PairReq(PairRequest { spake2_msg: payload }))
+        .rpc(envelope::Msg::PairReq(PairRequest {
+            spake2_msg: payload,
+        }))
         .await
         .map_err(|e| format!("配对通信失败：{e:#}"))?;
     conn::parse_pair_reply(reply)

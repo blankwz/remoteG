@@ -1,47 +1,37 @@
 // release 构建隐藏控制台窗口(小白双击即用,无黑框不闪退);日志已双写文件,
 // stdout 层在无控制台时静默。debug/测试构建保留控制台(RD_LISTEN 解析依赖 stdout)。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-//! rd-agent — Windows 被控端。
+//! rd-agent — Windows 被控端（无头 bin 入口）。
 //!
-//! 无参数(双击)等价 `run`:自动发现监听地址 + 托盘;命令行子命令保留给
-//! 测试与调试(`run --print-port`、`spike`)。
+//! 核心逻辑已 lib 化（`rd_agent`，融合模式 rd-app 内嵌；D-013 F-1）；
+//! 本 bin 保留无头被控模式：无参数（双击）等价 `run`，命令行子命令供测试
+//! 与调试（`run --print-port`、`spike`）。托盘只属于 bin 模式。
 
-mod clipboard;
-mod config;
-mod discover;
-mod host_activity;
-mod input_handler;
-mod power;
-mod server;
-mod session;
-mod term_handler;
-mod tray;
-mod window_session;
-
-#[cfg(windows)]
 mod spike;
+mod tray;
 
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
-
-use tracing_subscriber::prelude::*;
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
-
-use crate::session::AgentState;
-
-/// 终端会话空闲保留时长(rd-term 文档建议的生产值)。
-const TERM_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+use tracing_subscriber::prelude::*;
 
 /// Windows 下提供 clap 子命令分发。`spike` 依赖 WGC 与 Win32 枚举,仅 Windows 可用;
 /// `run` 的核心逻辑跨平台(托盘为 Windows 项)。
 fn main() -> anyhow::Result<()> {
+    // Per-Monitor-V2 DPI 感知(原 manifest,lib 化后改运行时声明;F-1):
+    // 必须在任何 HWND 创建前调用;失败时沿用系统默认(混合缩放下坐标可能漂移)。
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     let cli = Cli::parse();
     match cli.command {
         #[cfg(windows)]
@@ -74,7 +64,7 @@ pub struct RunArgs {
     /// 配置/身份/信任列表目录(默认 %LOCALAPPDATA%\rd;日志在其下 logs/)。
     #[arg(long)]
     config_dir: Option<PathBuf>,
-    /// 覆盖监听地址(如 `127.0.0.1:0`);缺省按配置自动选择(Tailscale 优先)。
+    /// 覆盖监听地址(如 `127.0.0.1:0`);缺省按配置自动选择。
     #[arg(long)]
     listen: Option<SocketAddr>,
     /// 不启动托盘(服务/测试模式)。
@@ -89,43 +79,15 @@ pub struct RunArgs {
     test_pair_code: Option<String>,
 }
 
-/// `run` 子命令入口。
+/// `run` 子命令入口:初始化日志 → lib `start` → 托盘/信号驻留。
 fn run_app(args: RunArgs) -> anyhow::Result<()> {
-    let config_dir = args.config_dir.clone().unwrap_or_else(default_config_dir);
+    let config_dir = args
+        .config_dir
+        .clone()
+        .unwrap_or_else(rd_agent::default_config_dir);
     // guard 必须存活到进程结束,否则非阻塞日志线程停摆
     let _log_guard = init_logging(&config_dir.join("logs"));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "rd-agent 启动");
-
-    let config = config::Config::load(&config_dir)?;
-    // 本机优先检测(D-013 包5):低级钩子记录真实输入时刻,注入路径据此挂起
-    host_activity::init();
-    let identity = rd_security::load_or_create_identity(&config_dir, "rd-agent")
-        .context("加载/生成本机身份失败")?;
-    let local_fp = identity.fingerprint();
-    tracing::info!(fingerprint = local_fp.short_hex(), "本机指纹(前 8 字节)");
-    let trust = rd_security::TrustStore::open(&config_dir.join("trusted.json"))
-        .context("打开信任列表失败")?;
-
-    let state = Arc::new(AgentState {
-        config: config.clone(),
-        identity,
-        local_fp,
-        trust: Mutex::new(trust),
-        pairing: Mutex::new(rd_security::AgentPairing::new()),
-        terms: rd_term::TermManager::new(TERM_IDLE_TIMEOUT),
-        injector: Mutex::new(input_handler::Injector::new()),
-        paused: AtomicBool::new(false),
-        peers: Mutex::new(HashMap::new()),
-        listen_addrs: Mutex::new(Vec::new()),
-    });
-
-    #[cfg(debug_assertions)]
-    if let Some(code) = &args.test_pair_code {
-        force_test_pair_code(&state, code)?;
-        tracing::info!("已注入测试配对码(仅 debug 构建;码值不落日志)");
-    }
-
-    let listen_addrs = server::resolve_listen_addrs(&state.config, args.listen)?;
 
     // tokio 跑在后台线程,主线程留给托盘/信号等待;
     // quinn Endpoint 的创建依赖 runtime 上下文,绑定须在 runtime 就绪后进行
@@ -133,37 +95,15 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("创建 tokio runtime 失败")?;
-    let servers = rt.block_on(async { server::bind_servers(&listen_addrs, &state.identity) })?;
-    let bound: Vec<SocketAddr> = servers.iter().map(|s| s.local_addr()).collect();
-    tracing::info!(
-        listen = ?bound,
-        fingerprint = state.local_fp.short_hex(),
-        "QUIC 监听就绪"
-    );
-    {
-        // 托盘弹窗"本机地址"消费:bind 之前已构建 AgentState,bind 后回填
-        *state.listen_addrs.lock().expect("listen_addrs 锁中毒") = bound.clone();
-    }
-    {
-        let state = Arc::clone(&state);
-        rt.spawn(async move {
-            server::serve_all(state, servers).await;
-        });
-    }
 
-    {
-        // UDP 局域网发现应答(21119):失败仅降级(不影响 QUIC 服务)
-        let state = Arc::clone(&state);
-        rt.spawn(async move { discover::serve(state).await });
-    }
+    #[cfg(debug_assertions)]
+    let test_pair_code = args.test_pair_code.clone();
+    #[cfg(not(debug_assertions))]
+    let test_pair_code = None::<String>;
 
-    {
-        // encode_caps 预热(D-013 包2):ffmpeg 444 探测 ~1.5s,提前到启动时
-        // 后台执行,消除首个 HelloAck 的同步等待(控制端 RPC 超时 5s)
-        rt.spawn(async move {
-            let _ = tokio::task::spawn_blocking(rd_encode::caps::probe_encode_caps).await;
-        });
-    }
+    let runtime =
+        rt.block_on(async { rd_agent::start(&config_dir, args.listen, test_pair_code) })?;
+    let bound = runtime.bound.clone();
 
     if args.print_port {
         // 机器可读前缀:与彩色日志行区分,解析方按行前缀过滤
@@ -173,48 +113,37 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         let _ = std::io::stdout().flush();
     }
 
-    park_main_thread(&state, &rt, args.no_tray)?;
+    park_main_thread(&runtime, args.no_tray)?;
     rt.shutdown_timeout(Duration::from_secs(2));
     Ok(())
 }
 
 /// 主线程驻留:Windows 默认跑托盘(永不返回);`--no-tray` 或非 Windows 等待 Ctrl+C。
 #[cfg(windows)]
-fn park_main_thread(
-    state: &Arc<AgentState>,
-    rt: &tokio::runtime::Runtime,
-    no_tray: bool,
-) -> anyhow::Result<()> {
+fn park_main_thread(runtime: &rd_agent::AgentRuntime, no_tray: bool) -> anyhow::Result<()> {
     if no_tray {
-        wait_ctrl_c(rt)
+        wait_ctrl_c()
     } else {
-        tray::run(Arc::clone(state))
+        tray::run(runtime)
     }
 }
 
 /// 非 Windows 平台无托盘:一律等待 Ctrl+C(保持可 check/可运行)。
 #[cfg(not(windows))]
-fn park_main_thread(
-    state: &Arc<AgentState>,
-    rt: &tokio::runtime::Runtime,
-    _no_tray: bool,
-) -> anyhow::Result<()> {
-    let _ = state;
-    wait_ctrl_c(rt)
+fn park_main_thread(runtime: &rd_agent::AgentRuntime, no_tray: bool) -> anyhow::Result<()> {
+    let _ = (runtime, no_tray);
+    wait_ctrl_c()
 }
 
-fn wait_ctrl_c(rt: &tokio::runtime::Runtime) -> anyhow::Result<()> {
-    rt.block_on(tokio::signal::ctrl_c())
+#[cfg_attr(windows, allow(dead_code))]
+fn wait_ctrl_c() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(tokio::signal::ctrl_c())
         .context("等待 Ctrl+C 失败")?;
     tracing::info!("收到 Ctrl+C,退出");
     Ok(())
-}
-
-/// 默认配置目录:Windows `%LOCALAPPDATA%\rd`(directories::ProjectDirs)。
-fn default_config_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "rd")
-        .map(|dirs| dirs.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("rd"))
 }
 
 /// 按天滚动日志:`<config_dir>/logs/rd-agent.YYYY-MM-DD.log`,保留 7 天。
@@ -243,24 +172,4 @@ fn init_logging(dir: &Path) -> tracing_appender::non_blocking::WorkerGuard {
         .with(stdout_layer)
         .init();
     guard
-}
-
-/// (仅 debug 构建)把 AgentPairing 的配对码"摇"成指定值,供端到端测试。
-///
-/// rd-security 出于安全不提供注入固定码的 API(生产码必须 CSPRNG 生成);
-/// 这里反复 `new_code()` 直到命中目标值——6 位码期望约 10^6 次调用(毫秒级)。
-/// 码值本身不落日志。
-#[cfg(debug_assertions)]
-fn force_test_pair_code(state: &AgentState, code: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
-        "测试配对码必须是 6 位数字"
-    );
-    let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
-    for _ in 0..50_000_000u32 {
-        if pairing.new_code() == code {
-            return Ok(());
-        }
-    }
-    anyhow::bail!("未能摇出测试配对码(概率极低,请重试)")
 }

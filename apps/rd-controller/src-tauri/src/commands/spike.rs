@@ -1,13 +1,13 @@
 //! T-005 视频链路 spike：QUIC 连接 → 控制流 Hello → 数据流泵到前端 Channel。
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use rd_proto::v0::{envelope, Codec, Envelope, Hello};
-use rd_transport::{connect, Conn, StreamKind};
-use tauri::ipc::{Channel, InvokeResponseBody};
+use rd_proto::v0::{Codec, Envelope, Hello, envelope};
+use rd_transport::{Conn, StreamKind, connect};
 use tauri::State;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 use crate::conn::ConnManager;
 use crate::video_pump;

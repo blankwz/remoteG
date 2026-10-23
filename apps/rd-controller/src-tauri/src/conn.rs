@@ -21,10 +21,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use bytes::Bytes;
-use rd_proto::v0::{envelope, Codec, Envelope, Hello, HelloAck, PairResult};
+use rd_proto::v0::{Codec, Envelope, Hello, HelloAck, PairResult, envelope};
 use rd_security::{ControllerPairing, PairError, PairStep};
-use rd_transport::framing::{encode_tile_header, encode_video_header, TILE_HEADER_LEN, VIDEO_HEADER_LEN};
-use rd_transport::{connect, Conn, ControlRx, ControlTx, DataRx, DataTx, Fingerprint, Identity, StreamKind};
+use rd_transport::framing::{
+    TILE_HEADER_LEN, VIDEO_HEADER_LEN, encode_tile_header, encode_video_header,
+};
+use rd_transport::{
+    Conn, ControlRx, ControlTx, DataRx, DataTx, Fingerprint, Identity, StreamKind, connect,
+};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 use tokio::sync::{broadcast, oneshot, watch};
@@ -154,7 +158,8 @@ pub fn decode_tile_to_rgba(h: &rd_transport::TileHeader, data: &[u8]) -> anyhow:
             Ok(rgba)
         }
         TILE_FMT_ZSTD_BGRA => {
-            let mut bgra = zstd::stream::decode_all(data).map_err(|e| anyhow::anyhow!("zstd decode: {e}"))?;
+            let mut bgra =
+                zstd::stream::decode_all(data).map_err(|e| anyhow::anyhow!("zstd decode: {e}"))?;
             if bgra.len() != expected {
                 anyhow::bail!("zstd 输出 {} 字节，期望 {}", bgra.len(), expected);
             }
@@ -198,7 +203,9 @@ impl ReqTable {
 
     /// 按 req_id 投递响应；无等待者返回 false（响应转交广播）。
     pub fn complete(&mut self, id: u32, env: Envelope) -> bool {
-        self.pending.remove(&id).is_some_and(|tx| tx.send(env).is_ok())
+        self.pending
+            .remove(&id)
+            .is_some_and(|tx| tx.send(env).is_ok())
     }
 
     /// 移除等待者（超时/发送失败）；返回是否存在。
@@ -528,7 +535,9 @@ impl DeviceConn {
         identity: &Identity,
         expected: Option<Fingerprint>,
     ) -> anyhow::Result<Arc<Self>> {
-        let sock = resolve_addr(addr, DEFAULT_AGENT_PORT).await.context("地址解析失败")?;
+        let sock = resolve_addr(addr, DEFAULT_AGENT_PORT)
+            .await
+            .context("地址解析失败")?;
         let conn = connect(sock, identity, expected).await?;
         let peer_fp = conn.peer_fingerprint();
         let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
@@ -538,7 +547,9 @@ impl DeviceConn {
             peer = %peer_fp.short_hex(),
             "device connected"
         );
-        Ok(Self::build(device_id, sock, conn, ctrl_tx, ctrl_rx, peer_fp))
+        Ok(Self::build(
+            device_id, sock, conn, ctrl_tx, ctrl_rx, peer_fp,
+        ))
     }
 
     fn build(
@@ -597,11 +608,7 @@ impl DeviceConn {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(anyhow::anyhow!("连接已关闭（等待响应 req_id={req_id}）")),
             Err(_) => {
-                self.inner
-                    .pending
-                    .lock()
-                    .expect("req table")
-                    .remove(req_id);
+                self.inner.pending.lock().expect("req table").remove(req_id);
                 Err(anyhow::anyhow!(
                     "RPC 超时（{} s，req_id={req_id}）",
                     RPC_TIMEOUT.as_secs()
@@ -762,7 +769,11 @@ async fn accept_bidi_loop(conn: Conn, inner: Arc<Inner>) {
         match conn.accept_bidi().await {
             Ok((StreamKind::Terminal, stream_id, tx, rx)) => {
                 let tx: TermTx = Arc::new(tokio::sync::Mutex::new(tx));
-                inner.terms.lock().expect("term routes").bind_tx(stream_id, tx);
+                inner
+                    .terms
+                    .lock()
+                    .expect("term routes")
+                    .bind_tx(stream_id, tx);
                 tauri::async_runtime::spawn(term_rx_pump(inner.clone(), stream_id, rx));
             }
             Ok((kind, id, _, _)) => {
@@ -823,7 +834,11 @@ async fn tile_pump(inner: Arc<Inner>, mut rx: DataRx) {
 }
 
 fn deliver_frame(inner: &Inner, window_id: u64, frame: Vec<u8>) {
-    let ch = inner.windows.lock().expect("window routes").resolve(window_id);
+    let ch = inner
+        .windows
+        .lock()
+        .expect("window routes")
+        .resolve(window_id);
     if let Some(ch) = ch {
         let _ = ch.send(InvokeResponseBody::Raw(frame));
     }
@@ -1412,7 +1427,10 @@ mod tests {
         terms.register(5, 42);
         terms.remove(5);
         assert!(terms.tx_of(5).is_none());
-        assert_eq!(terms.buffer(5, Bytes::from_static(b"y"), Instant::now()), None);
+        assert_eq!(
+            terms.buffer(5, Bytes::from_static(b"y"), Instant::now()),
+            None
+        );
     }
 
     // ---- 解码能力 → Hello ----

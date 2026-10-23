@@ -1,11 +1,16 @@
-//! rd-controller Tauri 入口（T-005）。
+//! rd-app（融合版，D-013 F-2）：Tauri 壳 = 控制端 UI + 被控核心（agent lib）。
 //!
-//! 注册全部命令：spike_*（真实实现）+ devices/windows/session/input/term 桩。
-//! 后续任务只替换 `commands/` 下对应文件实现，不改本文件。
+//! 被控核心在 setup 阶段启动（融合身份目录 `%APPDATA%\rd\app\`），托盘/主窗口
+//! 由本壳承担；单实例靠端口 21118 绑定失败判定（提示已有实例后退出）。
 
 mod commands;
 mod conn;
+mod tray_fusion;
 mod video_pump;
+
+use std::sync::Arc;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +33,31 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state)
+        .setup(|app| {
+            // 被控核心启动（F-2）：融合身份目录独立于 bin 版（K3，干净起步）
+            let config_dir = rd_agent::default_config_dir().join("app");
+            let agent =
+                tauri::async_runtime::block_on(async { rd_agent::start(&config_dir, None, None) });
+            match agent {
+                Ok(runtime) => {
+                    tracing::info!(
+                        listen = ?runtime.bound,
+                        "被控核心已启动(融合模式)"
+                    );
+                    app.manage(Arc::clone(&runtime.state));
+                    let state_for_tray = Arc::clone(&runtime.state);
+                    tray_fusion::build(app.handle(), state_for_tray)?;
+                    // AgentRuntime 保活(常驻到 app 退出;丢句柄=状态与 peers 表引用断)
+                    app.manage(runtime);
+                }
+                Err(err) => {
+                    // 端口被占 = 已有实例(单实例锁,K7);其余错误同样致命提示
+                    tracing::error!("被控核心启动失败: {err:#}");
+                    return Err(err.into());
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // T-005：视频链路 spike（真实实现）
             commands::spike::spike_connect,
