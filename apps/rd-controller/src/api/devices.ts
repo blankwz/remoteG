@@ -12,6 +12,46 @@ export const AGENT_DEFAULT_PORT = 21118;
 declare const __APP_VERSION__: string;
 export const APP_VERSION = __APP_VERSION__;
 
+// ---------------------------------------------------------------------------
+// 融合模式被控状态（D-013 包5 UI 化）
+// ---------------------------------------------------------------------------
+
+/** 被控端在线状态（本机=被控机）。 */
+export interface HostStatusDto {
+  listenAddrs: string[];
+  peers: { name: string; sinceSecs: number }[];
+  paused: boolean;
+}
+
+/** 配对码 + 建议地址。 */
+export interface PairCodeDto {
+  code: string;
+  addrs: string[];
+  paused: boolean;
+}
+
+export function hostStatus(): Promise<HostStatusDto> {
+  return invoke("host_status");
+}
+
+export function generatePairCode(): Promise<PairCodeDto> {
+  return invoke("generate_pair_code");
+}
+
+/** 编辑已配对设备（名称/地址）。 */
+export function editDevice(
+  id: string,
+  name: string,
+  addr: string,
+): Promise<DeviceDto> {
+  return invoke("edit_device", { id, name, addr });
+}
+
+/** Tailscale 链路测试（直达 or DERP 中继 + 逐跳延迟）。 */
+export function tailscalePing(ip: string): Promise<string> {
+  return invoke("tailscale_ping", { ip });
+}
+
 /** 已配对设备（含在线状态）。 */
 export interface DeviceDto {
   id: string;

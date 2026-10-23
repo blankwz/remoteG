@@ -119,6 +119,8 @@ export function Windows({ deviceId }: { deviceId: string }) {
   const [error, setError] = useState<string | null>(null);
   // 仅最新一期装载（重试 / 切换设备）的事件与列表结果生效
   const seqRef = useRef(0);
+  /** 失败自动重试计数（成功后清零）。 */
+  const retryRef = useRef(0);
   /** 上次装载失败后置位：重试时强制重建设备连接（应对连接表内失效连接）。 */
   const forceConnectRef = useRef(false);
 
@@ -190,6 +192,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
       await loadList(seq);
       rememberLastDeviceId(deviceId);
       setStatus("ready");
+      retryRef.current = 0;
     } catch (e) {
       if (seqRef.current !== seq) {
         return;
@@ -198,6 +201,17 @@ export function Windows({ deviceId }: { deviceId: string }) {
       forceConnectRef.current = true;
       setError(errText(e));
       setStatus("error");
+      // 自动退避重试（2026-10-23 用户反馈：open 失败返回后列表死掉只能手动刷）：
+      // 1s/2s/4s 三次，仍失败则停在 error 态等手动「刷新/重试」
+      const attempt = retryRef.current + 1;
+      if (attempt <= 3) {
+        retryRef.current = attempt;
+        window.setTimeout(() => {
+          if (seqRef.current === seq) {
+            void load();
+          }
+        }, 1000 * 2 ** (attempt - 1));
+      }
     }
   }, [deviceId, loadList]);
 

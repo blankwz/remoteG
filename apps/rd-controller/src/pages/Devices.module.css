@@ -335,3 +335,81 @@
   gap: 8px;
   margin-top: 4px;
 }
+
+/* 本机被控状态卡（融合版:本机=被控机,地址/配对码/被谁连接） */
+.hostCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+}
+
+.hostRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.hostLabel {
+  color: var(--rd-text-faint);
+  font-size: 12px;
+}
+
+.hostAddr {
+  font-family: var(--rd-font-mono);
+  font-size: 12px;
+  color: var(--rd-text-dim);
+  word-break: break-all;
+}
+
+.hostPeer {
+  padding: 2px 8px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+  font-size: 12px;
+}
+
+.pairCode {
+  padding: 2px 10px;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+  font-family: var(--rd-font-mono);
+  font-size: 16px;
+  letter-spacing: 2px;
+}
+
+.hostPaused {
+  padding: 2px 8px;
+  border: 1px solid rgb(240 180 60 / 40%);
+  border-radius: var(--rd-radius-sm);
+  background: rgb(240 180 60 / 12%);
+  color: rgb(255 214 130);
+  font-size: 12px;
+}
+
+.hostSpacer {
+  flex: 1;
+}
+
+/* Tailscale 链路测试输出 */
+.linkTestOut {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text-dim);
+  font-family: var(--rd-font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

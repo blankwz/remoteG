@@ -11,8 +11,14 @@ import {
   connectDevice,
   disconnectDevice,
   discoverDevices,
+  editDevice,
+  generatePairCode,
   getHostVersion,
   getLastDeviceId,
+  hostStatus,
+  tailscalePing,
+  type HostStatusDto,
+  type PairCodeDto,
   listDevices,
   pairDevice,
   probeDevice,
@@ -52,6 +58,14 @@ export function Devices() {
   /** 局域网扫描结果（发现 ≠ 信任，点击仅预填添加对话框）。 */
   const [discovered, setDiscovered] = useState<DiscoveredDeviceDto[] | null>(null);
   const [scanning, setScanning] = useState(false);
+  /** 本机被控状态（融合版：本机也是被控机）。 */
+  const [host, setHost] = useState<HostStatusDto | null>(null);
+  /** 配对码卡（null = 未生成）。 */
+  const [pairCard, setPairCard] = useState<PairCodeDto | null>(null);
+  /** 正在编辑的设备（null = 添加模式）。 */
+  const [editing, setEditing] = useState<DeviceDto | null>(null);
+  /** 链路测试进行中的设备 id 与结果文本。 */
+  const [linkTest, setLinkTest] = useState<{ id: string; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -68,10 +82,35 @@ export function Devices() {
     const unlisten = listen<DisconnectedPayload>("device-disconnected", () => {
       void refresh();
     });
+    // 被控状态 2s 轮询（地址/被谁连接/暂停态）
+    const hostTimer = window.setInterval(() => {
+      void hostStatus()
+        .then(setHost)
+        .catch(() => undefined);
+    }, 2000);
+    void hostStatus()
+      .then(setHost)
+      .catch(() => undefined);
     return () => {
       void unlisten.then((fn) => fn());
+      window.clearInterval(hostTimer);
     };
   }, [refresh]);
+
+  /** 生成配对码（UI 卡片展示 + 自动复制）。 */
+  const onGenerateCode = useCallback(async () => {
+    try {
+      const card = await generatePairCode();
+      setPairCard(card);
+      try {
+        await navigator.clipboard.writeText(card.code);
+      } catch {
+        // 剪贴板不可用：卡片上仍显示明文
+      }
+    } catch (e) {
+      setError(errText(e));
+    }
+  }, []);
 
   const onConnect = useCallback(
     async (d: DeviceDto) => {
@@ -185,21 +224,57 @@ export function Devices() {
       setFormError(null);
       setPairing(true);
       try {
-        await pairDevice(form.addr, form.code, form.name);
-        setShowAdd(false);
-        setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
-        await refresh();
+        if (editing !== null) {
+          // 编辑模式：只改名称/地址，不需要配对码
+          await editDevice(editing.id, form.name, form.addr);
+          setShowAdd(false);
+          setEditing(null);
+          setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
+          await refresh();
+        } else {
+          await pairDevice(form.addr, form.code, form.name);
+          setShowAdd(false);
+          setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
+          await refresh();
+        }
       } catch (e) {
         setFormError(errText(e));
       } finally {
         setPairing(false);
       }
     },
-    [form, refresh],
+    [form, refresh, editing],
   );
+
+  /** 进入编辑模式（复用添加对话框，隐藏配对码栏）。 */
+  const onEdit = useCallback((d: DeviceDto) => {
+    setEditing(d);
+    setShowAdd(true);
+    setForm({ addr: d.addr, code: "", name: d.name });
+    setFormError(null);
+  }, []);
+
+  /** Tailscale 链路测试（直达/DERP 中继）。 */
+  const onLinkTest = useCallback(async (d: DeviceDto) => {
+    const ip = d.addr.split(":")[0] ?? "";
+    if (!ip.startsWith("100.")) {
+      return;
+    }
+    setBusyId(d.id);
+    setLinkTest({ id: d.id, text: "测试中…" });
+    try {
+      const text = await tailscalePing(ip);
+      setLinkTest({ id: d.id, text });
+    } catch (e) {
+      setLinkTest({ id: d.id, text: `链路测试失败：${errText(e)}` });
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
 
   const closeAdd = useCallback(() => {
     setShowAdd(false);
+    setEditing(null);
     setFormError(null);
   }, []);
 
@@ -232,6 +307,47 @@ export function Devices() {
       {error !== null && <p className={styles.error}>{error}</p>}
       {notice !== null && <p className={styles.notice}>{notice}</p>}
 
+      {host !== null && (
+        <div className={styles.hostCard}>
+          <div className={styles.hostRow}>
+            <strong>本机被控</strong>
+            {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
+            <span className={styles.hostSpacer} />
+            <button type="button" className={styles.actionBtn} onClick={() => void onGenerateCode()}>
+              生成配对码
+            </button>
+          </div>
+          {host.listenAddrs.length > 0 && (
+            <div className={styles.hostRow}>
+              <span className={styles.hostLabel}>本机地址：</span>
+              <code className={styles.hostAddr}>{host.listenAddrs.join("  ·  ")}</code>
+            </div>
+          )}
+          {host.peers.length > 0 && (
+            <div className={styles.hostRow}>
+              <span className={styles.hostLabel}>正在被控制：</span>
+              {host.peers.map((p) => (
+                <span key={p.name} className={styles.hostPeer}>
+                  {p.name}
+                </span>
+              ))}
+            </div>
+          )}
+          {pairCard !== null && (
+            <div className={styles.hostRow}>
+              <span className={styles.hostLabel}>配对码：</span>
+              <code className={styles.pairCode}>{pairCard.code}</code>
+              <span className={styles.hostLabel}>（已复制，5 分钟内有效）建议地址：</span>
+              <code className={styles.hostAddr}>{pairCard.addrs.join("  ·  ")}</code>
+            </div>
+          )}
+        </div>
+      )}
+
+      {linkTest !== null && (
+        <pre className={styles.linkTestOut}>{`链路测试[${linkTest.id.slice(0, 6)}…]\n${linkTest.text}`}</pre>
+      )}
+
       {devices.length === 0 ? (
         <p className={styles.empty}>
           还没有设备。点「扫描局域网」自动发现同网段被控电脑，或点「添加设备」手动输入地址与托盘显示的 6 位配对码。
@@ -259,6 +375,17 @@ export function Devices() {
                 </span>
               </button>
               <div className={styles.actions}>
+                {d.addr.split(":")[0]?.startsWith("100.") && (
+                  <button
+                    type="button"
+                    className={styles.actionBtn}
+                    onClick={() => void onLinkTest(d)}
+                    disabled={busyId !== null}
+                    title="Tailscale 链路测试：直达或 DERP 中继"
+                  >
+                    链路
+                  </button>
+                )}
                 <button
                   type="button"
                   className={styles.actionBtn}
@@ -266,6 +393,14 @@ export function Devices() {
                   disabled={busyId !== null}
                 >
                   测试
+                </button>
+                <button
+                  type="button"
+                  className={styles.actionBtn}
+                  onClick={() => onEdit(d)}
+                  disabled={busyId !== null}
+                >
+                  编辑
                 </button>
                 <button
                   type="button"
@@ -337,13 +472,15 @@ export function Devices() {
       </footer>
 
       {showAdd && (
-        <div className={styles.overlay} onClick={closeAdd}>
+        <div className={styles.overlay}>
           <form
             className={styles.dialog}
             onClick={(e) => e.stopPropagation()}
             onSubmit={(e) => void submitAdd(e)}
           >
-            <h2 className={styles.dialogTitle}>添加设备</h2>
+            <h2 className={styles.dialogTitle}>
+              {editing !== null ? `编辑设备：${editing.name}` : "添加设备"}
+            </h2>
             <label className={styles.field}>
               <span>地址</span>
               <input
@@ -355,17 +492,19 @@ export function Devices() {
                 autoFocus
               />
             </label>
-            <label className={styles.field}>
-              <span>配对码</span>
-              <input
-                className={styles.input}
-                value={form.code}
-                onChange={(e) => updateForm("code", e.currentTarget.value)}
-                placeholder="被控端托盘显示的 6 位数字"
-                inputMode="numeric"
-                maxLength={6}
-              />
-            </label>
+            {editing === null && (
+              <label className={styles.field}>
+                <span>配对码</span>
+                <input
+                  className={styles.input}
+                  value={form.code}
+                  onChange={(e) => updateForm("code", e.currentTarget.value)}
+                  placeholder="被控端托盘显示的 6 位数字"
+                  inputMode="numeric"
+                  maxLength={6}
+                />
+              </label>
+            )}
             <label className={styles.field}>
               <span>名称（可选）</span>
               <input
@@ -381,7 +520,7 @@ export function Devices() {
                 取消
               </button>
               <button type="submit" className={styles.addBtn} disabled={pairing}>
-                {pairing ? "配对中…" : "配对"}
+                {editing !== null ? "保存" : pairing ? "配对中…" : "配对"}
               </button>
             </div>
           </form>

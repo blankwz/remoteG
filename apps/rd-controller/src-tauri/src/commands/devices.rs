@@ -7,8 +7,10 @@
 //! - `devices.json`：设备地址/名称等自有信息（`[{id, name, addr, fingerprint_hex, added_at}]`）。
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rd_agent::session::AgentState;
 use rd_proto::v0::{Codec, PairRequest, PairResult, envelope};
 use rd_security::TrustStore;
 use rd_transport::Fingerprint;
@@ -97,6 +99,34 @@ pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
                 }
                 let broadcast = Ipv4Addr::from(u32::from(v4.ip) | !mask);
                 targets.insert(SocketAddr::new(IpAddr::V4(broadcast), DISCOVER_PORT));
+            }
+        }
+    }
+    // Tailscale 网段（D-013 包5 用户需求：扫描也要覆盖 tailnet）——广播在
+    // 点对点接口无效，改为对本 tailnet 已知节点逐个单播探测（tailscale
+    // status --json 的 Peer 列表；未装/未登录时静默跳过）。
+    let ts_out = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok();
+    let peers: Vec<serde_json::Value> = match ts_out {
+        Some(out) => serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|js| {
+                js.get("Peer")
+                    .and_then(|v| v.as_object())
+                    .map(|o| o.values().cloned().collect())
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    for peer in &peers {
+        let Some(ips) = peer.get("TailscaleIPs").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for ip in ips {
+            if let Some(ip) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
+                targets.insert(SocketAddr::new(ip, DISCOVER_PORT));
             }
         }
     }
@@ -615,4 +645,133 @@ pub async fn set_decode_caps(
     state.set_decode_caps(caps.into());
     tracing::info!(?caps, "decode caps updated");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 融合模式被控状态（D-013 包5 UI 化：本机地址/配对码/已被谁连接）
+// ---------------------------------------------------------------------------
+
+/// 被控端在线状态（融合版设备页「本机被控」卡）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostStatusDto {
+    /// 本机可达地址（QUIC 监听，含回环外全部）。
+    pub listen_addrs: Vec<String>,
+    /// 当前在线控制端（谁在控制我）。
+    pub peers: Vec<PeerBriefDto>,
+    /// 共享是否已暂停。
+    pub paused: bool,
+}
+
+/// 在线控制端简报。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerBriefDto {
+    pub name: String,
+    pub since_secs: u64,
+}
+
+/// 被控端状态快照（融合版：agent core 与控制端同进程）。
+#[tauri::command]
+pub fn host_status(state: tauri::State<'_, Arc<AgentState>>) -> HostStatusDto {
+    use std::sync::atomic::Ordering;
+    HostStatusDto {
+        listen_addrs: state
+            .listen_addrs
+            .lock()
+            .expect("listen_addrs 锁中毒")
+            .iter()
+            .map(|a| a.to_string())
+            .collect(),
+        peers: state
+            .peers
+            .lock()
+            .expect("peers 锁中毒")
+            .values()
+            .map(|p| PeerBriefDto {
+                name: p.name.clone(),
+                since_secs: p
+                    .since
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            })
+            .collect(),
+        paused: state.paused.load(Ordering::SeqCst),
+    }
+}
+
+/// 生成 6 位配对码并返回建议地址（UI 弹卡展示；5 分钟内有效、一次性）。
+#[tauri::command]
+pub fn generate_pair_code(state: tauri::State<'_, Arc<AgentState>>) -> PairCodeDto {
+    use std::sync::atomic::Ordering;
+    let code = {
+        let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
+        pairing.new_code()
+    };
+    tracing::info!("UI 生成新配对码(5 分钟内有效)");
+    PairCodeDto {
+        code,
+        addrs: state
+            .listen_addrs
+            .lock()
+            .expect("listen_addrs 锁中毒")
+            .iter()
+            .filter(|a| !a.ip().is_loopback())
+            .map(|a| a.to_string())
+            .collect(),
+        paused: state.paused.load(Ordering::SeqCst),
+    }
+}
+
+/// 配对码 + 建议地址。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCodeDto {
+    pub code: String,
+    pub addrs: Vec<String>,
+    pub paused: bool,
+}
+
+/// 编辑已配对设备（名称/地址；指纹与 id 不变，改后需重连生效）。
+#[tauri::command]
+pub fn edit_device(
+    id: String,
+    name: String,
+    addr: String,
+    state: State<'_, ConnManager>,
+) -> Result<DeviceDto, String> {
+    let addr = addr.trim().to_string();
+    if addr.is_empty() {
+        return Err("设备地址不能为空".into());
+    }
+    let name = name.trim().to_string();
+    let mut store = open_store(&state)?;
+    let mut entry = store
+        .by_id(&id)
+        .cloned()
+        .ok_or_else(|| "设备不存在".to_string())?;
+    if !name.is_empty() {
+        entry.name = name;
+    }
+    entry.addr = addr;
+    store
+        .upsert(entry.clone())
+        .map_err(|e| format!("保存设备失败:{e}"))?;
+    let online = state.get_device(&id).is_some();
+    Ok(to_dto(&entry, online))
+}
+
+/// Tailscale 链路测试：`tailscale ping --c 3 <ip>` 抓取直达/DERP 中继与延迟。
+#[tauri::command]
+pub fn tailscale_ping(ip: String) -> Result<String, String> {
+    let out = std::process::Command::new("tailscale")
+        .args(["ping", "--c", "3", &ip])
+        .output()
+        .map_err(|e| format!("无法运行 tailscale 命令（本机未安装或不在 PATH）:{e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if text.trim().is_empty() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(text.trim_end().to_string())
 }

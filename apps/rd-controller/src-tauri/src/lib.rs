@@ -72,6 +72,10 @@ pub fn run() {
             commands::devices::set_decode_caps,
             commands::devices::send_clipboard,
             commands::devices::request_clipboard,
+            commands::devices::host_status,
+            commands::devices::generate_pair_code,
+            commands::devices::edit_device,
+            commands::devices::tailscale_ping,
             // T-020：窗口
             commands::windows::list_windows,
             commands::windows::subscribe_window_events,
