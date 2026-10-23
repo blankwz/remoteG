@@ -12,6 +12,7 @@ quinn = { version = "0.11", default-features = false, features = [
     "runtime-tokio",
     "rustls-ring",
 ] }
+quinn-proto = "0.11"
 rcgen = { workspace = true }
 rd-proto = { path = "../rd-proto" }
 rustls = { workspace = true, features = ["ring"] }

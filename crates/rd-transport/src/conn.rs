@@ -3,12 +3,14 @@
 //! 拥塞控制用 quinn 默认（Cubic）；暴露 [`Conn::rtt`] / [`Conn::stats`] 供码率自适应。
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use prost::Message;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{IdleTimeout, ReadExactError, TransportConfig, VarInt};
+use quinn_proto::congestion::{Bbr, BbrConfig, Controller, ControllerFactory};
 use rustls::pki_types::CertificateDer;
 
 use crate::framing::{
@@ -119,7 +121,20 @@ fn transport_config() -> TransportConfig {
     ));
     tc.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_SIZE));
     tc.datagram_send_buffer_size(DATAGRAM_BUFFER_SIZE);
+    // BBR（D-013 包5）：跨 DERP 中继/高丢包路径下 Cubic 对丢包过敏、吞吐
+    // 崩塌（跨网实测 fps=1/RTT 1.2s）；BBR 以带宽估测驱动、丢包鲁棒。
+    tc.congestion_controller_factory(Arc::new(BbrFactory(Arc::new(BbrConfig::default()))));
     tc
+}
+
+/// BBR 拥塞控制器工厂（quinn 0.11 需经 [`ControllerFactory`] 注入）。
+#[derive(Debug)]
+struct BbrFactory(Arc<BbrConfig>);
+
+impl ControllerFactory for BbrFactory {
+    fn build(self: Arc<Self>, _now: Instant, current_mtu: u16) -> Box<dyn Controller> {
+        Box::new(Bbr::new(Arc::clone(&self.0), current_mtu))
+    }
 }
 
 /// 一条已认证的 QUIC 连接（对端证书指纹在握手期提取）。

@@ -317,6 +317,8 @@ export function WindowGroupView({
   const [banner, setBanner] = useState<string | null>(null);
   /** 被控机本机有人在用（D-013 包5）：注入已被 Agent 挂起，显示禁止光标。 */
   const [hostBusy, setHostBusy] = useState(false);
+  /** HUD「复制」按钮的已复制闪示。 */
+  const [copiedFlash, setCopiedFlash] = useState(false);
   /** 重开代数：重连成功/模式切换需重建会话时递增。 */
   const [epoch, setEpoch] = useState(0);
   const [rootStats, setRootStats] = useState<DecodeStats | null>(null);
@@ -958,6 +960,19 @@ export function WindowGroupView({
       </div>
     );
 
+  // 操控日志（HUD 同源数据的一行文本,供「复制」按钮与排障回填）
+  const hudText = `fps ${rootStats !== null ? rootStats.fps : "-"} decode ${
+    rootStats !== null ? `${rootStats.decodeMs.toFixed(1)}ms` : "-"
+  } ${
+    rootStats !== null && rootStats.width > 0
+      ? `${rootStats.width}x${rootStats.height}`
+      : "-"
+  } RTT ${snapshot.stats !== null ? `${snapshot.stats.rttMs}ms` : "-"} ${
+    snapshot.stats !== null ? `${snapshot.stats.kbps}kbps` : "-"
+  } codec ${snapshot.ack?.codec ?? "-"} ${snapshot.fit}×${Math.round(
+    snapshot.zoom * 100,
+  )}%`;
+
   const hud =
     showHud === false ? null : (
       <div className={styles.hud}>
@@ -995,6 +1010,22 @@ export function WindowGroupView({
           />{" "}
           Cmd→Ctrl
         </label>
+        <button
+          type="button"
+          className={styles.hudCopyBtn}
+          title={`复制操控日志：${hudText}`}
+          onClick={() => {
+            void navigator.clipboard
+              .writeText(hudText)
+              .then(() => setCopiedFlash(true))
+              .then(() => {
+                window.setTimeout(() => setCopiedFlash(false), 1500);
+              })
+              .catch(() => undefined);
+          }}
+        >
+          {copiedFlash ? "已复制" : "复制"}
+        </button>
       </div>
     );
 
