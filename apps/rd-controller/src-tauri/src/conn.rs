@@ -37,8 +37,10 @@ use tokio::sync::{broadcast, oneshot, watch};
 pub const PROTO_VER: u32 = 0;
 /// Agent 默认监听端口（05_api §1 [假设]，可配）。
 pub const DEFAULT_AGENT_PORT: u16 = 21118;
-/// 单个 RPC 等待响应超时。
-pub const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// 单个 RPC 等待响应超时。30s：DERP 中继路径 RTT 可达 1.2s+ 且剧烈波动
+/// （跨网实测 4483ms），5s 会让配对/握手多轮往返必超时（2026-10-23 跨机
+/// 实测）；LAN 下正常 RTT <15ms 无感知差异。
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// 前端帧前缀：视频（`[1][VideoHeader][AU]`）。
 pub const FRAME_VIDEO: u8 = 1;
 /// 前端帧前缀：瓦片（`[2][TileHeader][RGBA]`，已解码）。
