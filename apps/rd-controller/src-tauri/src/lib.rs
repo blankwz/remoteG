@@ -11,16 +11,45 @@ mod video_pump;
 use std::sync::Arc;
 
 use tauri::Manager;
+use tracing_subscriber::prelude::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 日志：RUST_LOG 可覆盖（如 RUST_LOG=debug 看 control envelope）
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // 日志：stdout + 按天滚动文件双写（融合版目录 %APPDATA%\rd\app\logs\rd-app.*.log，
+    // 保留 7 天；托盘"打开日志目录"与此一致）。RUST_LOG=debug 可看更多细节。
+    // guard 必须存活至进程结束（run 的 event loop 不返回，局部绑定即可）。
+    let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = {
+        let log_dir = rd_agent::default_config_dir().join("app").join("logs");
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        match std::fs::create_dir_all(&log_dir).ok().and_then(|()| {
+            tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("rd-app")
+                .filename_suffix("log")
+                .max_log_files(7)
+                .build(&log_dir)
+                .ok()
+        }) {
+            Some(appender) => {
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(writer),
+                    )
+                    .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+                    .init();
+                Some(guard)
+            }
+            None => {
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+                None
+            }
+        }
+    };
 
     let state = conn::ConnManager::new().expect("generate ephemeral controller identity");
     tracing::info!(
