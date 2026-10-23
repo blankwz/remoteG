@@ -25,14 +25,17 @@ fn congested_queued() -> RateInput {
 #[test]
 fn queued_backlog_drops_bitrate() {
     let mut rc = RateController::new(4000, 60);
-    // 首次反馈：积压 > 1 帧（4000 kbps / 60 fps ≈ 8.3 KB）→ 降档。
+    // 积压防抖（D-013 包5）：单 tick 积压尖峰（鼠标扫过全窗的 hover 变化）
+    // 由 QUIC 缓冲吸收，不降码率。
+    assert_eq!(rc.update(congested_queued()).kbps, 4000);
+    // 连续第 2 tick（400 ms）才确认拥塞 → 降档；之后连续降 2800 → 1960 → 1372。
     assert_eq!(rc.update(congested_queued()).kbps, 2800);
-    // 连续降档 4000 → 2800 → 1960 → 1372 → 960。
     assert_eq!(rc.update(congested_queued()).kbps, 1960);
-    assert_eq!(rc.update(congested_queued()).kbps, 1372);
+    let d = rc.update(congested_queued());
+    assert_eq!(d.kbps, 1372);
+    // 下一 tick：码率已 < 1500 kbps → 建议帧率降至 30（决策用降档前码率判断）。
     let d = rc.update(congested_queued());
     assert_eq!(d.kbps, 960);
-    // 码率 < 1500 kbps → 建议帧率降至 30。
     assert_eq!(d.fps, 30);
     // 继续降档直到下限 500。
     rc.update(congested_queued());
@@ -86,43 +89,47 @@ fn packet_loss_drops_bitrate() {
 #[test]
 fn recovery_grows_bitrate_after_one_second() {
     let mut rc = RateController::new(4000, 60);
+    // 积压需连续 2 tick 才降档。
+    assert_eq!(rc.update(congested_queued()).kbps, 4000);
     assert_eq!(rc.update(congested_queued()).kbps, 2800);
-    // 连续 4 次无拥塞反馈（800 ms）不升档。
-    for _ in 0..4 {
+    // 连续 3 次无拥塞反馈（600 ms）不升档。
+    for _ in 0..3 {
         assert_eq!(rc.update(normal()).kbps, 2800);
     }
-    // 第 5 次（≈1 s）升档 +10%。
+    // 第 4 次（≈0.8 s）升档 +15%。
     let d = rc.update(normal());
-    assert_eq!(d.kbps, 3080);
+    assert_eq!(d.kbps, 3220);
     assert_eq!(d.fps, 60);
-    // 再 5 次继续升档 3080 → 3388。
-    for _ in 0..4 {
+    // 再 4 次继续升档 3220 → 3703。
+    for _ in 0..3 {
         rc.update(normal());
     }
-    assert_eq!(rc.update(normal()).kbps, 3388);
+    assert_eq!(rc.update(normal()).kbps, 3703);
 }
 
 #[test]
 fn bitrate_upper_bound_clamped() {
-    let mut rc = RateController::new(20_000, 60);
+    let mut rc = RateController::new(50_000, 60);
     for _ in 0..5 {
         let d = rc.update(normal());
-        assert!(d.kbps <= 20_000);
+        assert!(d.kbps <= 50_000);
     }
-    assert_eq!(rc.update(normal()).kbps, 20_000);
+    assert_eq!(rc.update(normal()).kbps, 50_000);
 }
 
 #[test]
 fn bitrate_lower_bound_clamped() {
     let mut rc = RateController::new(600, 60);
+    // 积压防抖：首 tick 不降。
+    assert_eq!(rc.update(congested_queued()).kbps, 600);
     assert_eq!(rc.update(congested_queued()).kbps, 500);
     // 持续拥塞不跌破下限。
     assert_eq!(rc.update(congested_queued()).kbps, 500);
-    // 恢复后从下限开始升档 500 → 550。
-    for _ in 0..4 {
+    // 恢复后从下限开始升档：3 次不升，第 4 次 500 → 575。
+    for _ in 0..3 {
         assert_eq!(rc.update(normal()).kbps, 500);
     }
-    assert_eq!(rc.update(normal()).kbps, 550);
+    assert_eq!(rc.update(normal()).kbps, 575);
 }
 
 #[test]
@@ -137,15 +144,15 @@ fn low_bitrate_drops_fps() {
             fps: 30
         }
     );
-    // 升回 ≥1500 后帧率恢复上限。
-    for _ in 0..4 {
+    // 升回 ≥1500 后帧率恢复上限（1400 × 23/20 = 1610）。
+    for _ in 0..3 {
         rc.update(normal());
     }
     let d = rc.update(normal());
     assert_eq!(
         d,
         RateDecision {
-            kbps: 1540,
+            kbps: 1610,
             fps: 60
         }
     );
@@ -159,7 +166,7 @@ fn new_clamps_start_bitrate() {
     let mut rc = RateController::new(0, 60);
     assert_eq!(rc.update(normal()).kbps, 500);
     let mut rc = RateController::new(999_999, 60);
-    assert_eq!(rc.update(normal()).kbps, 20_000);
+    assert_eq!(rc.update(normal()).kbps, 50_000);
 }
 
 #[test]

@@ -36,15 +36,21 @@ pub struct RateDecision {
 }
 
 const MIN_KBPS: u32 = 500;
-const MAX_KBPS: u32 = 20_000;
+/// 上限 50 Mbps（2026-10-23 用户反馈鼠标移动发糊：hover 全窗变化时瞬时
+/// 码率需求远超 20M，LAN 千兆场景应允许带宽换画质；跨网由 AIMD 自行收敛）。
+const MAX_KBPS: u32 = 50_000;
 /// 降档因子 0.7（×7/10，整型避免浮点）。
 const DROP_NUM: u32 = 7;
 const DROP_DEN: u32 = 10;
-/// 升档因子 1.1（×11/10）。
-const GROW_NUM: u32 = 11;
-const GROW_DEN: u32 = 10;
-/// 升档所需连续无拥塞反馈次数（200 ms × 5 ≈ 1 s）。
-const GROW_TICKS: u32 = 5;
+/// 升档因子 1.15（×23/20）。
+const GROW_NUM: u32 = 23;
+const GROW_DEN: u32 = 20;
+/// 升档所需连续无拥塞反馈次数（200 ms × 4 ≈ 0.8 s）。
+const GROW_TICKS: u32 = 4;
+/// 积压信号需连续满足的 tick 数（400 ms）：鼠标扫过全窗的 hover 变化会让
+/// 编码帧瞬间膨胀、单 tick 积压尖峰被 QUIC 缓冲吸收即可，立刻降码率会让
+/// 「移动中画面变糊」——正是用户抱怨的顿挫感来源（2026-10-23）。
+const BACKLOG_STREAK: u32 = 2;
 /// RTT 相对基线的拥塞判定阈值（上升 > 50%）。
 const RTT_SPIKE_RATIO: f32 = 1.5;
 /// RTT 基线 EWMA 平滑系数（1/8，TCP 惯例）。
@@ -62,6 +68,8 @@ pub struct RateController {
     baseline_rtt: Option<f32>,
     /// 距上次升档的连续无拥塞反馈次数。
     good_ticks: u32,
+    /// 积压信号连续 tick 计数（达到 [`BACKLOG_STREAK`] 才算拥塞降档）。
+    backlog_streak: u32,
 }
 
 impl RateController {
@@ -73,6 +81,7 @@ impl RateController {
             max_fps: max_fps.max(1),
             baseline_rtt: None,
             good_ticks: 0,
+            backlog_streak: 0,
         }
     }
 
@@ -83,7 +92,7 @@ impl RateController {
 
         // 一帧的估算大小（字节）：kbps × 1000 / 8 / fps ≈ kbps × 125 / fps，
         // fps 取当前生效帧率（低码率降帧到 30 后单帧更大，阈值相应放宽）。
-        // 积压超过 1 帧说明发送速率跟不上产出速率，必须降码率。
+        // 积压持续超过 1 帧说明发送速率跟不上产出速率。
         let fps = if self.kbps < LOW_KBPS {
             self.max_fps.min(LOW_FPS)
         } else {
@@ -91,10 +100,16 @@ impl RateController {
         };
         let frame_bytes = (self.kbps as usize) * 125 / (fps.max(1) as usize);
         // 丢包阈值(D-013 包3/E3):任何丢包即降码率对 tailnet/DERP 的单包
-        // 抖动过敏——码率被反复砸到几百 kbps 再缓慢爬升。>2% 窗口丢包才
-        // 视为拥塞;积压与 RTT 尖峰仍为即时信号。
+        // 抖动过敏——>2% 窗口丢包才视为拥塞。RTT 尖峰即时降(真拥塞);
+        // 积压需连续 [`BACKLOG_STREAK`] tick(瞬时尖峰由 QUIC 缓冲吸收,
+        // 避免鼠标移动即降码率的"移动中变糊")。
         const LOST_RATIO_THRESHOLD: f32 = 0.02;
-        let congested = i.queued_bytes > frame_bytes
+        if i.queued_bytes > frame_bytes {
+            self.backlog_streak += 1;
+        } else {
+            self.backlog_streak = 0;
+        }
+        let congested = self.backlog_streak >= BACKLOG_STREAK
             || rtt > baseline * RTT_SPIKE_RATIO
             || i.lost_ratio > LOST_RATIO_THRESHOLD;
 
