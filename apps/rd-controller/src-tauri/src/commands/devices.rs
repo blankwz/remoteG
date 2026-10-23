@@ -456,6 +456,20 @@ pub async fn list_devices(state: State<'_, ConnManager>) -> Result<Vec<DeviceDto
         .collect())
 }
 
+/// 地址规范化：无端口时自动补默认 21118（2026-10-23 用户需求——输入可省
+/// 端口号）。`[v6]:p` 带方括号视为已带端口；裸多冒号地址无法区分 host:port
+/// 与 IPv6，按已含端口原样保留。
+fn normalize_addr(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('[') || raw.matches(':').count() >= 2 {
+        return raw.to_string();
+    }
+    if raw.contains(':') {
+        return raw.to_string();
+    }
+    format!("{raw}:{}", crate::conn::DEFAULT_AGENT_PORT)
+}
+
 /// 用被控端托盘显示的 6 位配对码配对新设备；成功后保存设备并写入信任列表。
 #[tauri::command]
 pub async fn pair_device(
@@ -468,7 +482,7 @@ pub async fn pair_device(
     if code.len() != CODE_LEN || !code.bytes().all(|b| b.is_ascii_digit()) {
         return Err("配对码必须是 6 位数字".into());
     }
-    let addr = addr.trim().to_string();
+    let addr = normalize_addr(addr.trim());
     if addr.is_empty() {
         return Err("设备地址不能为空".into());
     }
@@ -741,7 +755,7 @@ pub fn edit_device(
     addr: String,
     state: State<'_, ConnManager>,
 ) -> Result<DeviceDto, String> {
-    let addr = addr.trim().to_string();
+    let addr = normalize_addr(addr.trim());
     if addr.is_empty() {
         return Err("设备地址不能为空".into());
     }
@@ -774,4 +788,23 @@ pub fn tailscale_ping(ip: String) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(text.trim_end().to_string())
+}
+
+#[cfg(test)]
+mod addr_tests {
+    use super::normalize_addr;
+
+    #[test]
+    fn 无端口自动补默认() {
+        assert_eq!(normalize_addr("192.168.6.111"), "192.168.6.111:21118");
+        assert_eq!(normalize_addr(" 100.81.205.0 "), "100.81.205.0:21118");
+        assert_eq!(normalize_addr("rd.example.com"), "rd.example.com:21118");
+    }
+
+    #[test]
+    fn 已带端口原样保留() {
+        assert_eq!(normalize_addr("192.168.6.111:21119"), "192.168.6.111:21119");
+        assert_eq!(normalize_addr("[::1]:21118"), "[::1]:21118");
+        assert_eq!(normalize_addr("fe80::1"), "fe80::1");
+    }
 }

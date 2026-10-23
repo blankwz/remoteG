@@ -117,13 +117,12 @@ fn tauri_icon(bytes: &[u8]) -> Option<tauri::image::Image<'static>> {
     Some(tauri::image::Image::new_owned(rgba, w, h))
 }
 
-/// 用资源管理器打开日志目录（融合版目录 = app 子目录）。
-fn open_log_dir(app: &AppHandle) {
-    let dir: PathBuf = app
-        .path()
-        .app_data_dir()
-        .map(|d| d.join("rd").join("app").join("logs"))
-        .unwrap_or_else(|_| rd_agent::default_config_dir().join("app").join("logs"));
+/// 用资源管理器打开日志目录（与文件日志写入路径严格一致：
+/// `<rd_agent::default_config_dir()>/app/logs`，2026-10-23 修复——
+/// 之前误用 Tauri app_data_dir（%APPDATA%\com.rd.controller），目录体系
+/// 与 rd-agent 的 ProjectDirs 体系不一致导致"打开的目录永远是空的"）。
+fn open_log_dir(_app: &AppHandle) {
+    let dir: PathBuf = rd_agent::default_config_dir().join("app").join("logs");
     let _ = std::fs::create_dir_all(&dir);
     match std::process::Command::new("explorer").arg(&dir).spawn() {
         Ok(_) => tracing::info!(dir = %dir.display(), "打开日志目录"),
