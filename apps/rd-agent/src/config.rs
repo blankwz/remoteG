@@ -33,7 +33,9 @@ pub struct Config {
     pub terminal_enabled: bool,
     /// 语义化精修(T-016 L2 渲染)开关。
     pub refine_enabled: bool,
-    /// 默认最大帧率。
+    /// 默认最大帧率。120（2026-10-23 用户主诉流畅度；WGC 跟随合成器刷新,
+    /// 高刷屏可超 60;h264_mf 硬编 1080p 120fps≈8ms/帧可扛;运动带宽×2 由
+    /// AIMD 上限 50M 兜底,低带宽自动收敛）。
     pub max_fps: u32,
     /// 初始视频码率(kbps)。
     pub start_kbps: u32,
@@ -48,7 +50,7 @@ impl Default for Config {
             confirm_connection: false,
             terminal_enabled: true,
             refine_enabled: true,
-            max_fps: 60,
+            max_fps: 120,
             start_kbps: 8000,
         }
     }
