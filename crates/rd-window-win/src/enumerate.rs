@@ -92,7 +92,10 @@ pub fn is_capturable(a: &WindowAttrs) -> bool {
     if a.title.is_empty() {
         return false;
     }
-    if a.rect.w == 0 || a.rect.h == 0 {
+    // 客户区为空排除——但最小化窗口客户区必然塌缩 0×0（Notepad++ 等），
+    // 设计意图是保留在列表（minimized 标记，打开时自动还原），否则列表
+    // 随最小化/还原来回闪烁（2026-10-23 用户跨机实测"窗口一下有一下没有"）。
+    if !a.minimized && (a.rect.w == 0 || a.rect.h == 0) {
         return false;
     }
     if a.pid == std::process::id() {

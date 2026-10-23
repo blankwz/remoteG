@@ -119,3 +119,20 @@ fn 最小化窗口不排除() {
         "最小化窗口保留，由调用方用 minimized 区分"
     );
 }
+
+#[test]
+fn 最小化塌缩窗口保留() {
+    // 最小化后客户区塌缩 0×0：设计意图是保留在列表（minimized 标记，
+    // 打开时自动还原），否则列表随最小化/还原来回闪烁（用户跨机实测）。
+    let mut a = base();
+    a.rect.w = 0;
+    a.rect.h = 0;
+    a.minimized = true;
+    assert!(is_capturable(&a));
+    // 非最小化的 0×0 仍然排除（不可见/即将销毁的瞬时态）。
+    let mut b = base();
+    b.rect.w = 0;
+    b.rect.h = 0;
+    b.minimized = false;
+    assert!(!is_capturable(&b));
+}
