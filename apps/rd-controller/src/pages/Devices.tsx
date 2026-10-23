@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   clearLastDeviceId,
   connectDevice,
@@ -314,10 +315,15 @@ export function Devices() {
       <footer className={styles.hint}>
         对方没装 Tailscale？同一 WiFi 可直接用局域网 IP 连接（先「扫描局域网」）。跨网络用
         Tailscale：
-        <a href="https://tailscale.com/kb/1461/sharing" target="_blank" rel="noreferrer">
-          节点共享
-        </a>
-        （发邀请链接给对方，对方用自己的账号接受，无需登你的账号）。
+        <button
+          type="button"
+          className={styles.linkBtn}
+          onClick={() => void openUrl("https://login.tailscale.com/admin/users").catch(() => undefined)}
+        >
+          管理后台邀请
+        </button>
+        （登录后在 Machines 里选你这台 → Share → 生成邀请链接发给对方，对方点开用自己的账号
+        接受，无需登你的账号）。注意：两台电脑必须在<strong>同一个 tailnet</strong> 里才能互通。
       </footer>
 
       {showAdd && (

@@ -7,6 +7,7 @@
     "core:default",
     "fs:default",
     "fs:allow-download-write-recursive",
-    "dialog:default"
+    "dialog:default",
+    "opener:allow-open-url"
   ]
 }
