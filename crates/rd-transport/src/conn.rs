@@ -121,6 +121,13 @@ fn transport_config() -> TransportConfig {
     ));
     tc.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_SIZE));
     tc.datagram_send_buffer_size(DATAGRAM_BUFFER_SIZE);
+    // MTU 钳制（D-013 包5，2026-10-23 B 机日志实测）：Tailscale 接口 MTU
+    // 1280，quinn 的 MTU 发现曾在 LAN 探测升 MTU，切 tailnet 路径后
+    // sendmsg 报 WSAEMSGSIZE(10040) 重传降速。统一钳到 QUIC 保证值 1200
+    // （IPv6 最小 MTU 1280 也安全）并关闭发现——跨路径确定性优先。
+    tc.initial_mtu(1200);
+    tc.min_mtu(1200);
+    tc.mtu_discovery_config(None);
     // BBR（D-013 包5）：跨 DERP 中继/高丢包路径下 Cubic 对丢包过敏、吞吐
     // 崩塌（跨网实测 fps=1/RTT 1.2s）；BBR 以带宽估测驱动、丢包鲁棒。
     tc.congestion_controller_factory(Arc::new(BbrFactory(Arc::new(BbrConfig::default()))));
