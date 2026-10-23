@@ -8,6 +8,10 @@ import { invoke } from "@tauri-apps/api/core";
 /** Agent 默认监听端口（地址省略端口时由 Rust 侧补全）。 */
 export const AGENT_DEFAULT_PORT = 21118;
 
+/** 控制端自身版本（vite define 注入 package.json version）。 */
+declare const __APP_VERSION__: string;
+export const APP_VERSION = __APP_VERSION__;
+
 /** 已配对设备（含在线状态）。 */
 export interface DeviceDto {
   id: string;
@@ -25,6 +29,32 @@ export interface HelloAckDto {
   protoVer: number;
   hostName: string;
   encodeCaps: string[];
+  /** 被控端应用版本（v0.1，版本一致性排查用）。 */
+  hostVersion: string;
+}
+
+// ---------------------------------------------------------------------------
+// 被控端版本记录（连接成功时写入；设备卡/会话 HUD 展示，版本一致性排查）
+// ---------------------------------------------------------------------------
+
+const HOST_VERSION_PREFIX = "rd.hostVersion.";
+
+/** 记录某设备的被控端版本（connect 成功时调用）。 */
+export function rememberHostVersion(deviceId: string, version: string): void {
+  try {
+    window.localStorage.setItem(HOST_VERSION_PREFIX + deviceId, version);
+  } catch {
+    // 存储不可用：仅失去版本展示，不影响功能
+  }
+}
+
+/** 读取某设备的被控端版本；未连接过返回 null。 */
+export function getHostVersion(deviceId: string): string | null {
+  try {
+    return window.localStorage.getItem(HOST_VERSION_PREFIX + deviceId);
+  } catch {
+    return null;
+  }
 }
 
 /** UDP 局域网发现的设备（未配对，仅提供"添加设备"建议地址）。 */

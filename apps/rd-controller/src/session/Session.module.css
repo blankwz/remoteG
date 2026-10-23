@@ -361,10 +361,14 @@
 .stageCenter {
   width: 100%;
   height: 100%;
-  overflow: hidden;
+  /* SCALE 模式画面可大于容器(zoom≥100%/小屏):滚动查看完整画面;
+     margin:auto 子元素技巧保证溢出滚动时四边都可达(flex center 会裁左上) */
+  overflow: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
+}
+
+.stageCenter > * {
+  margin: auto;
 }
 
 .group {

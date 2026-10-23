@@ -13,7 +13,8 @@ message Envelope { uint32 req_id = 1; oneof msg {
   SessionState session_state = 42; } }
 
 message Hello { uint32 proto_ver = 1; string device_name = 2; repeated Codec decode_caps = 3; bool supports_444 = 4; }
-message HelloAck { uint32 proto_ver = 1; string host_name = 2; repeated Codec encode_caps = 3; }
+// v0.1: host_version(=5)被控端应用版本——控制端显眼处展示,防两端版本不一致排查困难。
+message HelloAck { uint32 proto_ver = 1; string host_name = 2; repeated Codec encode_caps = 3; string host_version = 5; }
 message PairRequest { bytes spake2_msg = 1; }  message PairResult { bool ok = 1; bytes spake2_msg = 2; string reason = 3; }
 
 message WindowInfo { uint64 id = 1; string title = 2; string process = 3; uint32 pid = 4; bytes icon_png = 5;

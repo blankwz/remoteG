@@ -6,15 +6,18 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  APP_VERSION,
   clearLastDeviceId,
   connectDevice,
   disconnectDevice,
   discoverDevices,
+  getHostVersion,
   getLastDeviceId,
   listDevices,
   pairDevice,
   probeDevice,
   rememberLastDeviceId,
+  rememberHostVersion,
   removeDevice,
   type DeviceDto,
   type DiscoveredDeviceDto,
@@ -79,7 +82,8 @@ export function Devices() {
         // 替换（关旧连新），旧连接的断线监听会把新连接误清出连接表（conn.rs
         // put_device 竞态），导致随后的窗口列表报“设备未连接”
         if (!d.online) {
-          await connectDevice(d.id);
+          const ack = await connectDevice(d.id);
+          rememberHostVersion(d.id, ack.hostVersion);
         }
         rememberLastDeviceId(d.id);
         window.location.hash = `#/windows/${d.id}`;
@@ -246,7 +250,12 @@ export function Devices() {
                 <span className={styles.dot} data-online={d.online} aria-hidden="true" />
                 <span className={styles.info}>
                   <span className={styles.name}>{d.name}</span>
-                  <span className={styles.addr}>{d.addr}</span>
+                  <span className={styles.addr}>
+                    {d.addr}
+                    {getHostVersion(d.id) !== null && (
+                      <span title="被控端 rd-agent 版本"> · v{getHostVersion(d.id)}</span>
+                    )}
+                  </span>
                 </span>
               </button>
               <div className={styles.actions}>
@@ -313,6 +322,7 @@ export function Devices() {
       )}
 
       <footer className={styles.hint}>
+        rd-controller v{APP_VERSION} ·{" "}
         对方没装 Tailscale？同一 WiFi 可直接用局域网 IP 连接（先「扫描局域网」）。跨网络用
         Tailscale：
         <button

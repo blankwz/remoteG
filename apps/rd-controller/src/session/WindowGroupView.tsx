@@ -33,6 +33,7 @@ import {
   mouseWheel,
   textInput,
 } from "../api/input";
+import { getHostVersion } from "../api/devices";
 import {
   closeWindow,
   openWindow,
@@ -961,6 +962,7 @@ export function WindowGroupView({
     );
 
   // 操控日志（HUD 同源数据的一行文本,供「复制」按钮与排障回填）
+  const hostVer = getHostVersion(deviceId);
   const hudText = `fps ${rootStats !== null ? rootStats.fps : "-"} decode ${
     rootStats !== null ? `${rootStats.decodeMs.toFixed(1)}ms` : "-"
   } ${
@@ -971,7 +973,7 @@ export function WindowGroupView({
     snapshot.stats !== null ? `${snapshot.stats.kbps}kbps` : "-"
   } codec ${snapshot.ack?.codec ?? "-"} ${snapshot.fit}×${Math.round(
     snapshot.zoom * 100,
-  )}%`;
+  )}% agent v${hostVer ?? "?"}`;
 
   const hud =
     showHud === false ? null : (
@@ -997,6 +999,9 @@ export function WindowGroupView({
         <span className={styles.hudItem}>{snapshot.ack?.codec ?? "-"}</span>
         <span className={styles.hudItem}>
           {snapshot.fit} ×{Math.round(snapshot.zoom * 100)}%
+        </span>
+        <span className={styles.hudItem} title="被控端 rd-agent 版本">
+          {hostVer !== null ? `v${hostVer}` : "-"}
         </span>
         <label className={styles.hudItem} title="macOS：Cmd 组合键映射为远端 Ctrl">
           <input

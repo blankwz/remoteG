@@ -149,6 +149,7 @@ pub struct HelloAckDto {
     pub proto_ver: u32,
     pub host_name: String,
     pub encode_caps: Vec<String>,
+    pub host_version: String,
 }
 
 /// 前端启动探测出的解码能力。
@@ -515,6 +516,7 @@ pub async fn connect_device(
         proto_ver: ack.proto_ver,
         host_name: ack.host_name,
         encode_caps: ack.encode_caps.iter().map(|c| codec_label(*c)).collect(),
+        host_version: ack.host_version,
     })
 }
 

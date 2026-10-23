@@ -230,6 +230,14 @@ export function Windows({ deviceId }: { deviceId: string }) {
       <header className={styles.header}>
         <h1 className={styles.title}>窗口</h1>
         <div className={styles.tools}>
+          <button
+            type="button"
+            className={styles.retry}
+            title="重新拉取被控端窗口列表（事件推送丢失时使用）"
+            onClick={() => void load()}
+          >
+            刷新
+          </button>
           <input
             className={styles.search}
             type="search"

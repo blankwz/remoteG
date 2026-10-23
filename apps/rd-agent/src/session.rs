@@ -591,7 +591,7 @@ fn spawn_datagram_loop(ctx: &Arc<SessionCtx>) {
 // 消息构造辅助
 // ---------------------------------------------------------------------------
 
-/// `HelloAck`:主机名 + 动态探测的编码能力(见 `encode_caps`)。
+/// `HelloAck`:主机名 + 版本 + 动态探测的编码能力(见 `encode_caps`)。
 fn hello_ack(req_id: u32) -> Envelope {
     Envelope {
         req_id,
@@ -599,6 +599,7 @@ fn hello_ack(req_id: u32) -> Envelope {
             proto_ver: PROTO_VER,
             host_name: host_name(),
             encode_caps: encode_caps().to_vec(),
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
         })),
     }
 }

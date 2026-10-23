@@ -34,6 +34,7 @@ fn ack_envelope(req_id: u32, host: &str) -> Envelope {
             proto_ver: 0,
             host_name: host.to_owned(),
             encode_caps: vec![],
+            host_version: "0.0.0-test".to_owned(),
         })),
     }
 }
