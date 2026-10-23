@@ -55,7 +55,7 @@ message Error { uint32 code = 1; string message = 2; }
 message ClipboardData { bool write = 1; string text = 2; }
 
 // 会话级状态通知(Agent→控制端,req_id=0):控制端据此区分「网络断/Agent 退出/
-// 被控端锁屏/共享暂停」,替代只显示"已断开"的盲态。
+// 被端锁屏/共享暂停/本机有人使用」,替代只显示"已断开"的盲态。
 message SessionState { enum Kind {
   CONNECTED = 0;    // 会话建立完成(信息性)
   AGENT_CLOSING = 1; // Agent 即将退出(托盘退出/系统关机),reason 说明
@@ -63,4 +63,7 @@ message SessionState { enum Kind {
   RESUMED = 3;      // 共享已恢复
   LOCKED = 4;       // 被控端已锁屏(画面冻结属预期,解锁自动恢复)
   UNLOCKED = 5;     // 被控端已解锁
+  HOST_BUSY = 6;    // 被控机本机有人正在使用(真实键鼠输入)——控制端注入被
+                    // 挂起,光标显示禁止样式(向日葵式"本机优先",D-013 包5)
+  HOST_IDLE = 7;    // 被控机本机空闲恢复——注入恢复
 } Kind kind = 1; string reason = 2; }

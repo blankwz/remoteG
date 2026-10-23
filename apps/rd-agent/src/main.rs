@@ -9,6 +9,7 @@
 mod clipboard;
 mod config;
 mod discover;
+mod host_activity;
 mod input_handler;
 mod power;
 mod server;
@@ -96,6 +97,8 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "rd-agent 启动");
 
     let config = config::Config::load(&config_dir)?;
+    // 本机优先检测(D-013 包5):低级钩子记录真实输入时刻,注入路径据此挂起
+    host_activity::init();
     let identity = rd_security::load_or_create_identity(&config_dir, "rd-agent")
         .context("加载/生成本机身份失败")?;
     let local_fp = identity.fingerprint();

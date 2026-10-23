@@ -1726,6 +1726,8 @@ fn spawn_session_tick(
         let mut prev_frames = 0u64;
         // 锁屏检测状态(v0.1/D-013 包4):变化沿才发 SessionState
         let mut last_locked: Option<bool> = None;
+        // 本机优先状态(D-013 包5):同上,变化沿才发
+        let mut last_busy: Option<bool> = None;
         let mut next_lock_check = Instant::now();
 
         loop {
@@ -1775,6 +1777,30 @@ fn spawn_session_tick(
                         .await
                     {
                         tracing::debug!("SessionState(锁屏)发送失败: {err:#}");
+                    }
+                }
+                // 本机优先状态沿(D-013 包5):被控机有人在用 → 控制端显示禁止
+                // 光标;恢复空闲 → 解除。1s 轮询足够(注入挂起本身是硬保证,
+                // 此通知只是 UI 反馈)。
+                let busy = crate::host_activity::busy();
+                if last_busy != Some(busy) {
+                    last_busy = Some(busy);
+                    let kind = if busy {
+                        session_state::Kind::HostBusy
+                    } else {
+                        session_state::Kind::HostIdle
+                    } as i32;
+                    if let Err(err) = ctx
+                        .send(
+                            Msg::SessionState(SessionState {
+                                kind,
+                                reason: String::new(),
+                            }),
+                            0,
+                        )
+                        .await
+                    {
+                        tracing::debug!("SessionState(本机占用)发送失败: {err:#}");
                     }
                 }
             }

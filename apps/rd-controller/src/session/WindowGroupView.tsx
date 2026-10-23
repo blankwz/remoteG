@@ -315,6 +315,8 @@ export function WindowGroupView({
   const [viewOnly, setViewOnly] = useState(false);
   /** Agent 会话级状态横幅（锁屏/暂停/退出；null = 不显示）。 */
   const [banner, setBanner] = useState<string | null>(null);
+  /** 被控机本机有人在用（D-013 包5）：注入已被 Agent 挂起，显示禁止光标。 */
+  const [hostBusy, setHostBusy] = useState(false);
   /** 重开代数：重连成功/模式切换需重建会话时递增。 */
   const [epoch, setEpoch] = useState(0);
   const [rootStats, setRootStats] = useState<DecodeStats | null>(null);
@@ -720,6 +722,8 @@ export function WindowGroupView({
         return;
       }
       setBanner(sessionStateText(s));
+      // 本机优先(D-013 包5):被控机有人在用 → 禁止光标;空闲恢复
+      setHostBusy(s.kind === 6);
     })
       .then((fn) => {
         if (alive) {
@@ -1015,7 +1019,11 @@ export function WindowGroupView({
   });
 
   return (
-    <div className={styles.stage} ref={containerRef}>
+    <div
+      className={styles.stage}
+      ref={containerRef}
+      style={hostBusy ? { cursor: "not-allowed" } : undefined}
+    >
       {/* 会话工具条(v0.1/D-013 包4):只看不控 + 剪贴板互传 */}
       <div className={styles.sessionBar}>
         <label

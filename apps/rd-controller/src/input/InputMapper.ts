@@ -313,11 +313,12 @@ export interface PendingMove {
   y: number;
 }
 
-/** 默认调度：浏览器 requestAnimationFrame；node 测试注入替身。 */
-const defaultSchedule = (cb: () => void): unknown =>
-  typeof requestAnimationFrame === "function"
-    ? requestAnimationFrame(cb)
-    : setTimeout(cb, 0);
+/**
+ * 默认调度：固定 8ms 定时器（125Hz，2026-10-23 用户反馈鼠标移动发糊/顿挫，
+ * rAF 的 60Hz 与显示刷新对齐反而造成注入-视频采样的相位抖动；datagram 单条
+ * 21B，125Hz 带宽可忽略）。node 测试注入替身。
+ */
+const defaultSchedule = (cb: () => void): unknown => setTimeout(cb, 8);
 
 const defaultCancel = (handle: unknown): void => {
   if (typeof cancelAnimationFrame === "function") {

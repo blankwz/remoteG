@@ -124,6 +124,10 @@ export function sessionStateText(s: SessionStateDto): string | null {
       return "对方已锁屏，画面暂停；解锁后自动恢复";
     case 5:
       return null;
+    case 6:
+      return "对方正在使用电脑，远程控制已暂停（对方停手约 2 秒后自动恢复）";
+    case 7:
+      return null; // 本机空闲恢复：清横幅
     default:
       return null;
   }

@@ -24,9 +24,10 @@ pub struct Config {
     /// 是否额外绑定私网地址(默认 true:同 WiFi 直连是小白场景的主要路径,
     /// 安全由配对码+信任列表兜底,D-013 评审确认;设 false 收窄为仅 Tailscale)。
     pub allow_lan: bool,
-    /// 受信任设备接入时在被控端弹确认框(D-013 包3/E4:消除"静默被控";
-    /// 30s 内不允许即断开。debug 构建默认关,供 e2e/开发)。自用嫌烦可设
-    /// false;信任撤销入口在托盘「信任设备」。
+    /// 受信任设备接入时在被控端弹确认框。**默认关**(2026-10-23 用户反馈:
+    /// 配对输 6 位码时人就在场,已是完整授权,每次连接再问是重复打扰;
+    /// 且后台线程 MessageBox 受 Windows 前台锁限制只能闪任务栏不前置)。
+    /// 需要强确认的场景在 agent.toml 设 true;信任撤销入口在托盘「信任设备」。
     pub confirm_connection: bool,
     /// 终端功能开关(11_security:信任设备才可开,此处为总开关)。
     pub terminal_enabled: bool,
@@ -44,7 +45,7 @@ impl Default for Config {
             listen_port: DEFAULT_LISTEN_PORT,
             listen_addrs: Vec::new(),
             allow_lan: true,
-            confirm_connection: cfg!(not(debug_assertions)),
+            confirm_connection: false,
             terminal_enabled: true,
             refine_enabled: true,
             max_fps: 60,

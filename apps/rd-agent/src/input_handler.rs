@@ -93,6 +93,11 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
+    // 本机优先(D-013 包5):被控机真实键鼠 2s 窗口期内,控制端注入挂起
+    // (防止两边抢鼠标;向日葵式行为)
+    if crate::host_activity::busy() {
+        return Ok(());
+    }
     match msg {
         InputMsg::MouseButton(m) => mouse_button(ctx, &m),
         InputMsg::MouseWheel(m) => mouse_wheel(ctx, &m),
@@ -405,6 +410,10 @@ fn accept_seq(ctx: &SessionCtx, window_id: u64, seq: u32) -> bool {
 pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     let mv = parse_mouse_move(bytes)?;
     if ctx.state.paused.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜)
+    if crate::host_activity::busy() {
         return Ok(());
     }
     if !ctx.windows.is_open(mv.window_id) {
