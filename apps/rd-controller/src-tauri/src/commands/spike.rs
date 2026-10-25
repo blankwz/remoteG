@@ -61,6 +61,7 @@ pub async fn spike_connect(
             device_name: "rd-controller".into(),
             decode_caps: vec![Codec::H264420 as i32],
             supports_444: false,
+            media_fec: false,
         })),
     };
     ctrl_tx

@@ -10,6 +10,7 @@ fn hello_roundtrip() {
             device_name: "controller-dev".to_owned(),
             decode_caps: vec![],
             supports_444: false,
+            media_fec: false,
         })),
     };
 

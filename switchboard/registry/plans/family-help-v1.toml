@@ -1,0 +1,44 @@
+spec = "switchboard/0.1"
+name = "family-help-v1"
+
+# 「帮家人」目标场景（spec/02 §1 完整示例的落地版）
+# 注意：L-A 模块（研究桩/未接入）执行时诚实失败并回退——Plan 仍可编辑与评分预览
+
+[session]
+identity = "file:%APPDATA%/rd/identity.pem"
+trust = "fingerprint-pinning"
+pairing = "code6"
+connect_confirm = true
+
+[[path]]
+name = "lan-direct"
+discovery = "sb.lan.udp-broadcast"
+transport = "sb.quinn.quic"
+budget_ms = 1500
+
+[[path]]
+name = "tailnet"
+transport = "sb.ext.tailscale"
+
+[[path]]
+name = "stun-punch"
+punch = "sb.rustdesk.punch-v2"
+transport = "sb.quinn.quic"
+fallback_relay = "sb.derp.self-hk"
+
+[upgrade]
+mode = "relay-first"
+probe_interval_ms = 5000
+settle_ms = 800
+
+[media]
+profile = "fec-shards"
+codec = "h264.ultralowlat"
+adapter = "sb.core.fec-xor"
+
+[media.control]
+rules = "sb.qos.baseline-adaptive"
+limits = { min_kbps = 500, max_kbps = 50000, relay_kbps_cap = 8000 }
+
+[requirements]
+min_mtu = 1200

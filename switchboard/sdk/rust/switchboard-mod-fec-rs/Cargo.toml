@@ -1,0 +1,16 @@
+[package]
+name = "switchboard-mod-fec-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "sb.moonlight.fec-rs：Reed-Solomon + 动态 FEC 比例（fec-shards profile 的 Moonlight 级实现）"
+
+[dependencies]
+switchboard-core = { path = "../switchboard-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+anyhow = "1"
+reed-solomon-erasure = "6"

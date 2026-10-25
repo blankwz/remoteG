@@ -179,6 +179,8 @@ pub struct SessionCtx {
     /// 对端 `Hello`(含 decode_caps,供 T-016 编码选路)。
     #[allow(dead_code)]
     pub hello: Hello,
+    /// T-027：视频是否走 fec-shards（Hello 协商 + 被控端开关）
+    pub media_fec: bool,
     /// 窗口子会话(T-016 实现;桩阶段无读者)。
     #[allow(dead_code)]
     pub windows: WindowSessions,
@@ -229,7 +231,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
             }
         }
         // 沿用 Hello 的 req_id:控制端以 RPC(等响应)方式握手
-        ctl_tx.send(&hello_ack(hello_req_id)).await?;
+        ctl_tx.send(&hello_ack(hello_req_id, hello.media_fec)).await?;
         true
     } else {
         // 未信任:先对 Hello 回 Error{1}(05_api §1 未鉴权;控制端以此触发配对流程),
@@ -267,12 +269,17 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     // 控制流发送端 Arc:SessionCtx(分发回包)与 PeerInfo(托盘推 SessionState)共享
     let ctl_shared = Arc::new(tokio::sync::Mutex::new(ctl_tx));
 
+    let media_fec = hello.media_fec;
+    if media_fec {
+        tracing::info!("视频路径协商：fec-shards（T-027）");
+    }
     let ctx = Arc::new(SessionCtx {
         state: Arc::clone(&state),
         conn: Arc::new(conn),
         ctl: Arc::clone(&ctl_shared),
         peer_name: hello.device_name.clone(),
         hello,
+        media_fec,
         windows: WindowSessions,
         terms: TermAttachments,
     });
@@ -443,7 +450,7 @@ async fn finish_pairing(
     tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已加入信任列表");
     // HelloAck 尽力发送:对端配对成功后可能立即断开重连
     // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
-    let _ = ctl_tx.send(&hello_ack(0)).await;
+    let _ = ctl_tx.send(&hello_ack(0, false)).await; // 配对期 ack 不协商 fec
     Ok(())
 }
 
@@ -592,7 +599,7 @@ fn spawn_datagram_loop(ctx: &Arc<SessionCtx>) {
 // ---------------------------------------------------------------------------
 
 /// `HelloAck`:主机名 + 版本 + 动态探测的编码能力(见 `encode_caps`)。
-fn hello_ack(req_id: u32) -> Envelope {
+fn hello_ack(req_id: u32, media_fec: bool) -> Envelope {
     Envelope {
         req_id,
         msg: Some(envelope::Msg::HelloAck(HelloAck {
@@ -600,6 +607,8 @@ fn hello_ack(req_id: u32) -> Envelope {
             host_name: host_name(),
             encode_caps: encode_caps().to_vec(),
             host_version: env!("CARGO_PKG_VERSION").to_string(),
+            // T-027：fec-shards 协商确认（默认关，RD_MEDIA_FEC=1 才声明支持）
+            media_fec,
         })),
     }
 }

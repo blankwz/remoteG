@@ -23,6 +23,7 @@ fn hello_envelope(req_id: u32, device: &str) -> Envelope {
             device_name: device.to_owned(),
             decode_caps: vec![],
             supports_444: false,
+            media_fec: false,
         })),
     }
 }
@@ -34,6 +35,7 @@ fn ack_envelope(req_id: u32, host: &str) -> Envelope {
             proto_ver: 0,
             host_name: host.to_owned(),
             encode_caps: vec![],
+            media_fec: false,
             host_version: "0.0.0-test".to_owned(),
         })),
     }

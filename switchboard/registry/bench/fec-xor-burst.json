@@ -1,0 +1,69 @@
+{
+  "composite": 70.98999786376953,
+  "env": {
+    "os": "windows"
+  },
+  "module": {
+    "id": "sb.core.loopback+sb.core.fec-xor",
+    "version": "0.1.0"
+  },
+  "note": "T0 回归剖面（×0.9）；M5 为文本完整性直读口径，OCR 版与注册表评分需 T3/T4 实网",
+  "plan": "inline:sbbench-t0",
+  "profile": "T0",
+  "profile_params": {
+    "burst_len": 5,
+    "loss": 0.019999999552965164,
+    "mbps": 10.0,
+    "mtu": 1200,
+    "rtt_ms": 80.0
+  },
+  "runs": 1,
+  "schema": "sbbench/1",
+  "tool_version": "switchboard-bench 0.1.1",
+  "workloads": {
+    "W1": {
+      "metrics": {
+        "runs": [
+          {
+            "M1_g2g_p95_ms": 94.0999984741211,
+            "M5_legibility_pct": 100.0,
+            "run": 0
+          }
+        ]
+      },
+      "score": 21.8789119720459,
+      "weight": 0.2
+    },
+    "W2": {
+      "metrics": {},
+      "score": 84.67471313476562,
+      "weight": 0.2
+    },
+    "W3": {
+      "metrics": {},
+      "score": 88.90642547607422,
+      "weight": 0.2
+    },
+    "W6": {
+      "metrics": {
+        "runs": [
+          {
+            "M4_recovery_ms": 1200.5999755859375,
+            "fps_low": 2.9000000953674316,
+            "frames_lost": 55,
+            "run": 0
+          }
+        ]
+      },
+      "score": 67.5923843383789,
+      "weight": 0.25
+    },
+    "W7": {
+      "metrics": {
+        "M9_startup_ms": 0.0
+      },
+      "score": 100.0,
+      "weight": 0.15
+    }
+  }
+}

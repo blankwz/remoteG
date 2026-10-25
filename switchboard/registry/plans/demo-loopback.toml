@@ -1,0 +1,12 @@
+spec = "switchboard/0.1"
+name = "demo-loopback"
+
+# SB-Bench T0 演示计划：纯内存管道 + 可选弱网仿真参数由 bench CLI 注入
+
+[[path]]
+name = "loopback"
+transport = "sb.core.loopback"
+
+[media]
+profile = "fec-shards"
+adapter = "sb.core.fec-xor"

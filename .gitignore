@@ -17,3 +17,14 @@ Thumbs.db
 *.log
 /.cargo/
 apps/rd-controller/src-tauri/ffmpeg-bin/
+
+# Switchboard（构建产物和依赖）
+switchboard/sdk/rust/target/
+switchboard/studio/node_modules/
+switchboard/studio/dist/
+switchboard/sdk/rust/target/
+switchboard/studio/node_modules/
+switchboard/studio/dist/
+switchboard/.claude/
+.quickbash/
+switchboard/studio/.claude/

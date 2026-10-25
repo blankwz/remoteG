@@ -68,7 +68,10 @@ use rd_proto::v0::{
     RenderLevel, SessionState, StatsReport, ViewportInfo, WindowEvent, WindowInfo, WindowList,
 };
 use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
+use rd_switch::RdChannel;
+use rd_transport::framing::encode_video_header;
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
+use switchboard_core::stages::{EncodedFrame, FrameSink, MediaAdapt};
 use rd_window_win::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
 use rd_window_win::resize::{fit_window, restore_placement, save_placement, target_client_size};
 use rd_window_win::resize::{FitResult, SavedPlacement};
@@ -876,24 +879,54 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         }
     };
 
-    let mut video_tx = match ctx.conn.open_data(StreamKind::Video).await {
-        Ok(t) => t,
-        Err(err) => {
-            drop(capture);
-            restore_on_fail(&spec);
-            anyhow::bail!("打开视频流失败: {err:#}");
-        }
+    // T-027：协商开启 fec-shards 时，视频走 datagram（FEC 分片），不开可靠流；
+    // 瓦片/终端仍走可靠流不变。
+    let (mut video_out, video_stream_id) = if ctx.media_fec {
+        let ch: Arc<dyn switchboard_core::channel::Channel> =
+            Arc::new(rd_switch::RdChannel::from_conn(
+                Arc::clone(&ctx.conn),
+                switchboard_core::types::PathKind::Direct,
+            ));
+        let fec = switchboard_mod_fec_rs::FecRs::new(Default::default());
+        let bus = Arc::new(switchboard_core::telemetry::EventBus::new());
+        let (sink, _src) = fec
+            .bind(Arc::clone(&ch), ch, bus)
+            .await
+            .context("绑定 fec-shards 视频路径失败")?;
+        (
+            VideoOut::Fec {
+                sink: tokio::sync::Mutex::new(sink),
+                next_fid: Arc::new(AtomicU32::new(0)),
+            },
+            u32::MAX,
+        )
+    } else {
+        let t = match ctx.conn.open_data(StreamKind::Video).await {
+            Ok(t) => t,
+            Err(err) => {
+                drop(capture);
+                restore_on_fail(&spec);
+                anyhow::bail!("打开视频流失败: {err:#}");
+            }
+        };
+        let sid = u32::try_from(t.id()).unwrap_or(u32::MAX);
+        (VideoOut::Stream(t), sid)
     };
     let mut tile_tx = match ctx.conn.open_data(StreamKind::Tile).await {
         Ok(t) => t,
         Err(err) => {
             drop(capture);
-            let _ = video_tx.finish();
+            match &mut video_out {
+                VideoOut::Stream(t) => {
+                    let _ = t.finish();
+                }
+                _ => {}
+            }
             restore_on_fail(&spec);
             anyhow::bail!("打开瓦片流失败: {err:#}");
         }
     };
-    let video_stream_id = u32::try_from(video_tx.id()).unwrap_or(u32::MAX);
+    let video_stream_id = video_stream_id;
     let tile_stream_id = u32::try_from(tile_tx.id()).unwrap_or(u32::MAX);
 
     let cancel = CancellationToken::new();
@@ -944,7 +977,12 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             Ok(t) => t,
             Err(err) => {
                 drop(capture);
-                let _ = video_tx.finish();
+                match &mut video_out {
+                    VideoOut::Stream(t) => {
+                        let _ = t.finish();
+                    }
+                    _ => {}
+                }
                 let _ = tile_tx.finish();
                 restore_on_fail(&spec);
                 anyhow::bail!("启动编码线程失败: {err}");
@@ -955,7 +993,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     tokio::spawn(video_send_task(
         Arc::clone(ctx),
         cancel.clone(),
-        video_tx,
+        video_out,
         au_rx,
         PipeIdentity {
             window_id: wid,
@@ -1557,10 +1595,19 @@ struct PipeIdentity {
     serial: u64,
 }
 
+/// 视频出口（T-027）：可靠流（旧路径）或 fec-shards datagram（协商开启时）
+enum VideoOut {
+    Stream(DataTx),
+    Fec {
+        sink: tokio::sync::Mutex<Box<dyn FrameSink>>,
+        next_fid: Arc<AtomicU32>,
+    },
+}
+
 async fn video_send_task(
     ctx: Arc<SessionCtx>,
     cancel: CancellationToken,
-    mut tx: DataTx,
+    mut video: VideoOut,
     mut rx: mpsc::Receiver<(u32, EncodedAu)>,
     id: PipeIdentity,
     errors: Arc<PipeError>,
@@ -1611,9 +1658,38 @@ async fn video_send_task(
                     };
                     // 在途字节记账（码率自适应的积压信号）：写完前计入，
                     // 完成后扣除（成功与否都扣，失败时管线即将关闭）。
-                    let n = (au.data.len() + VIDEO_HEADER_LEN) as u64;
+                    let mut n = (au.data.len() + VIDEO_HEADER_LEN) as u64;
                     backlog.fetch_add(n, Ordering::Relaxed);
-                    let sent = tx.send_video(&header, &au.data).await;
+                    let sent = match &mut video {
+                        VideoOut::Stream(tx) => tx
+                            .send_video(&header, &au.data)
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| anyhow::anyhow!("{e:#}")),
+                        VideoOut::Fec { sink, next_fid } => {
+                            // T-027：fec 无接收端 IDR 请求（v0.2），每 120 帧（≈2s）
+                            // 兜底一个关键帧，限制画面卡死的最大时长
+                            let fid = next_fid.fetch_add(1, Ordering::Relaxed);
+                            if fid % 120 == 0 {
+                                drop_to_idr.store(true, Ordering::Relaxed);
+                            }
+                            let mut payload =
+                                Vec::with_capacity(VIDEO_HEADER_LEN + au.data.len());
+                            payload
+                                .extend_from_slice(&encode_video_header(&header, au.data.len()));
+                            payload.extend_from_slice(&au.data);
+                            n = payload.len() as u64;
+                            sink.lock()
+                                .await
+                                .submit(switchboard_core::stages::EncodedFrame {
+                                    frame_id: fid,
+                                    data: switchboard_core::Bytes::from(payload),
+                                })
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| anyhow::anyhow!("fec submit: {e}"))
+                        }
+                    };
                     backlog.fetch_sub(n, Ordering::Relaxed);
                     if let Err(err) = sent {
                         tracing::warn!(window = format!("{window_id:#x}"), "视频发送失败: {err:#}");

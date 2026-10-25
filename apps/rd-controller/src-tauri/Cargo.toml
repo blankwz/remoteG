@@ -24,6 +24,9 @@ rd-agent = { path = "../../../apps/rd-agent" }
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }
 rd-transport = { path = "../../../crates/rd-transport" }
+rd-switch = { path = "../../../crates/rd-switch" }
+switchboard-core = { path = "../../../switchboard/sdk/rust/switchboard-core" }
+switchboard-mod-fec-rs = { path = "../../../switchboard/sdk/rust/switchboard-mod-fec-rs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }

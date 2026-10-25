@@ -1,0 +1,16 @@
+[package]
+name = "switchboard-mod-kcp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "sb.kcp.kcp：KCP 可靠 UDP 直连传输适配器（turbo 参数，RustDesk 同源协议栈）"
+
+[dependencies]
+switchboard-core = { path = "../switchboard-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+anyhow = "1"
+kcp = "0.6"

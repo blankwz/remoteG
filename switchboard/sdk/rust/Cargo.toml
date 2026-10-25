@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["switchboard-core", "switchboard-bench", "switchboard-mod-fec-rs", "switchboard-mod-quinn", "switchboard-mod-kcp", "switchboard-mod-punch-stun", "switchboard-daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+bytes = "1"
+reed-solomon-erasure = "6"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+sha2 = "0.10"
+kcp = "0.6"

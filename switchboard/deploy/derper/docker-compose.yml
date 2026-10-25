@@ -1,0 +1,44 @@
+version: "3.9"
+
+# 自建 DERP 套件：headscale（控制面）+ derper（中继面）+ caddy（TLS）
+# 用法见同目录 README.md；所有 <占位符> 部署前必须替换
+
+services:
+  headscale:
+    image: headscale/headscale:latest
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - ./headscale-data:/var/lib/headscale
+      - ./headscale-config.template.yaml:/etc/headscale/config.yaml:ro
+      - ./derp-map.template.json:/etc/headscale/derp-map.json:ro
+    ports:
+      - "8080:8080"   # headscale API（配 Caddy 反代 443）
+
+  derper:
+    image: fredbi/derper:latest   # 或自构建 tailscale derper
+    container_name: derper
+    restart: unless-stopped
+    command:
+      - "--hostname=<derp.example.com>"
+      - "--a=:443"
+      - "--verify-clients=false"    # 纯容器无 tailscaled.sock；改 true 需挂宿主机 sock
+      - "--stun"                    # 顺带提供 STUN（DISCO 测绘用）
+    ports:
+      - "443:443"     # DERP over HTTPS
+      - "3478:3478/udp"  # STUN
+
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "80:80"
+      - "8443:8443"   # headscale over TLS（443 已被 derper 占用）
+
+volumes:
+  caddy-data:

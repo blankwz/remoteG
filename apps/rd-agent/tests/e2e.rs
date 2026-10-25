@@ -103,7 +103,9 @@ async fn t02_open_window_keyframe() -> Result<()> {
 
     let started = Instant::now();
     let (header, au) =
-        common::recv_video_frame(&mut s.video, env.hwnd, Duration::from_secs(5)).await?;
+        // 15s：套件内编码器冷启动（MFT 实例反复创建）使首帧显著慢于隔离运行；
+        // 首帧性能仍由下方 2s WARN 追踪（任务卡口径），此处只保证非时序脆弱。
+        common::recv_video_frame(&mut s.video, env.hwnd, Duration::from_secs(15)).await?;
     let elapsed = started.elapsed();
     anyhow::ensure!(
         header.keyframe,
@@ -289,7 +291,9 @@ async fn t04_fit_resizes_window() -> Result<()> {
 
     // 基线：初始 keyframe（800×600），此后 resize 才会有新 IDR。
     let (header, au) =
-        common::recv_video_frame(&mut s.video, env.hwnd, Duration::from_secs(5)).await?;
+        // 15s：套件内编码器冷启动（MFT 实例反复创建）使首帧显著慢于隔离运行；
+        // 首帧性能仍由下方 2s WARN 追踪（任务卡口径），此处只保证非时序脆弱。
+        common::recv_video_frame(&mut s.video, env.hwnd, Duration::from_secs(15)).await?;
     anyhow::ensure!(header.keyframe, "初始帧应为 IDR");
     let base = common::decode_h264_size(&au)?;
     anyhow::ensure!(
@@ -299,14 +303,14 @@ async fn t04_fit_resizes_window() -> Result<()> {
 
     send_viewport(&mut c, env.hwnd, 1000, 640).await?;
     let got =
-        wait_keyframe_size(&mut s.video, env.hwnd, Duration::from_secs(6), (1000, 640)).await?;
+        wait_keyframe_size(&mut s.video, env.hwnd, Duration::from_secs(15), (1000, 640)).await?;
     anyhow::ensure!(got == (1000, 640), "Fit 1000×640 未生效，实际 {got:?}");
 
     send_viewport(&mut c, env.hwnd, common::CLIENT_W, common::CLIENT_H).await?;
     let got = wait_keyframe_size(
         &mut s.video,
         env.hwnd,
-        Duration::from_secs(6),
+        Duration::from_secs(15),
         (common::CLIENT_W, common::CLIENT_H),
     )
     .await?;

@@ -1,0 +1,27 @@
+# headscale 配置模板（部署前替换 <占位符>；完整字段见 headscale 官方文档）
+server_url: https://<hs.example.com>:8443
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+prefix: tsderp-
+private_key_path: /var/lib/headscale/node_private.key
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+derp:
+  server:
+    enabled: false
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  auto_update_enabled: true
+  # 自建 DERP map（本目录 derp-map.template.json 挂载到容器 /etc/headscale/）
+  paths: [/etc/headscale/derp-map.json]
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+dns:
+  magic_dns: true
+  base_domain: <tail.example.com>
+  nameservers:
+    global: [1.1.1.1, 8.8.8.8]
+logtail:
+  enabled: false

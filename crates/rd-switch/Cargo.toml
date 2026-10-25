@@ -1,0 +1,14 @@
+[package]
+name = "rd-switch"
+version.workspace = true
+edition.workspace = true
+description = "rd × Switchboard 集成层：Plan 执行器选路 + rd 原生 QUIC 传输（M2 任务 #4）"
+
+[dependencies]
+rd-transport = { path = "../rd-transport" }
+switchboard-core = { path = "../../switchboard/sdk/rust/switchboard-core" }
+tokio = { workspace = true }
+async-trait = "0.1"
+serde_json.workspace = true
+anyhow.workspace = true
+bytes.workspace = true

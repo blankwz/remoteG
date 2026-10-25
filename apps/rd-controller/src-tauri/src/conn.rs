@@ -23,6 +23,8 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use rd_proto::v0::{Codec, Envelope, Hello, HelloAck, PairResult, envelope};
 use rd_security::{ControllerPairing, PairError, PairStep};
+use switchboard_core::channel::Channel as SbChannel;
+use switchboard_core::stages::MediaAdapt;
 use rd_transport::framing::{
     TILE_HEADER_LEN, VIDEO_HEADER_LEN, encode_tile_header, encode_video_header,
 };
@@ -106,11 +108,14 @@ impl DecodeCaps {
 /// 构造 Hello 消息（`decode_caps` 由前端启动探测后上报）。
 pub fn hello_msg(caps: DecodeCaps, device_name: &str) -> envelope::Msg {
     let (decode_caps, supports_444) = caps.to_codecs();
+    // T-027：fec-shards 视频路径请求开关（默认关，RD_MEDIA_FEC=1 开启）
+    let media_fec = std::env::var("RD_MEDIA_FEC").as_deref() == Ok("1");
     envelope::Msg::Hello(Hello {
         proto_ver: PROTO_VER,
         device_name: device_name.into(),
         decode_caps,
         supports_444,
+        media_fec,
     })
 }
 
@@ -511,6 +516,8 @@ pub fn host_display_name() -> String {
 struct Inner {
     device_id: String,
     addr: SocketAddr,
+    /// T-027：fec-shards 视频路径协商结果（握手成功后置位）
+    media_fec: std::sync::atomic::AtomicBool,
     peer_fp: Fingerprint,
     ctrl_tx: tokio::sync::Mutex<ControlTx>,
     pending: Mutex<ReqTable>,
@@ -524,7 +531,7 @@ struct Inner {
 /// 视频/瓦片/终端数据流路由 + datagram。
 pub struct DeviceConn {
     inner: Arc<Inner>,
-    conn: Conn,
+    conn: Arc<Conn>,
 }
 
 impl DeviceConn {
@@ -537,10 +544,27 @@ impl DeviceConn {
         identity: &Identity,
         expected: Option<Fingerprint>,
     ) -> anyhow::Result<Arc<Self>> {
+        // M2 #4 切入点（默认关闭）：设置 RD_PLAN 环境变量时走 Switchboard Plan
+        // 执行器选路（LAN 发现/回退语义，spec/02），传输仍是 rd 原生 QUIC。
+        if std::env::var("RD_PLAN").map_or(false, |p| !p.is_empty()) {
+            let plan = std::env::var("RD_PLAN").unwrap_or_default();
+            let sock = resolve_addr(addr, DEFAULT_AGENT_PORT).await.context("地址解析失败")?;
+            match rd_switch::plan_dial(&plan, Arc::new(identity.clone()), expected, sock).await {
+                Ok((path_name, conn)) => {
+                    tracing::info!(path = %path_name, "RD_PLAN 生效：Switchboard 选路连接");
+                    let peer_fp = conn.peer_fingerprint();
+                    let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
+                    return Ok(Self::build(device_id, sock, Arc::new(conn), ctrl_tx, ctrl_rx, peer_fp, false));
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "RD_PLAN 选路失败，回退默认直连");
+                }
+            }
+        }
         let sock = resolve_addr(addr, DEFAULT_AGENT_PORT)
             .await
             .context("地址解析失败")?;
-        let conn = connect(sock, identity, expected).await?;
+        let conn = Arc::new(connect(sock, identity, expected).await?);
         let peer_fp = conn.peer_fingerprint();
         let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
         tracing::info!(
@@ -549,24 +573,40 @@ impl DeviceConn {
             peer = %peer_fp.short_hex(),
             "device connected"
         );
-        Ok(Self::build(
-            device_id, sock, conn, ctrl_tx, ctrl_rx, peer_fp,
-        ))
+        let device = Self::build(
+            device_id,
+            sock,
+            Arc::clone(&conn),
+            ctrl_tx,
+            ctrl_rx,
+            peer_fp,
+            media_fec_env(),
+        );
+        // T-027：已请求 fec-shards → 拉起视频泵（握手后远端才开始发分片）
+        if device.inner.media_fec.load(Ordering::SeqCst) {
+            tauri::async_runtime::spawn(fec_video_pump(
+                Arc::clone(&conn),
+                Arc::clone(&device.inner),
+            ));
+        }
+        Ok(device)
     }
 
     fn build(
         device_id: &str,
         sock: SocketAddr,
-        conn: Conn,
+        conn: Arc<Conn>,
         ctrl_tx: ControlTx,
         ctrl_rx: ControlRx,
         peer_fp: Fingerprint,
+        media_fec: bool,
     ) -> Arc<Self> {
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
         let (closed_tx, _closed_rx) = watch::channel(false);
         let inner = Arc::new(Inner {
             device_id: device_id.to_string(),
             addr: sock,
+            media_fec: std::sync::atomic::AtomicBool::new(media_fec),
             peer_fp,
             ctrl_tx: tokio::sync::Mutex::new(ctrl_tx),
             pending: Mutex::new(ReqTable::default()),
@@ -577,8 +617,8 @@ impl DeviceConn {
         });
         // 读循环 + 数据流 accept 循环；连接断开时整体退出并置 closed
         tauri::async_runtime::spawn(read_loop(inner.clone(), ctrl_rx));
-        tauri::async_runtime::spawn(accept_data_loop(conn.clone(), inner.clone()));
-        tauri::async_runtime::spawn(accept_bidi_loop(conn.clone(), inner.clone()));
+        tauri::async_runtime::spawn(accept_data_loop(Arc::clone(&conn), inner.clone()));
+        tauri::async_runtime::spawn(accept_bidi_loop(Arc::clone(&conn), inner.clone()));
         Arc::new(Self { inner, conn })
     }
 
@@ -588,7 +628,12 @@ impl DeviceConn {
             .rpc(hello_msg(caps, &host_display_name()))
             .await
             .map_err(handshake_error_from_transport)?;
-        classify_hello_reply(resp)
+        let ack = classify_hello_reply(resp)?;
+        // T-027：记录协商结果（被控端确认才算数）
+        self.inner
+            .media_fec
+            .store(ack.media_fec, std::sync::atomic::Ordering::SeqCst);
+        Ok(ack)
     }
 
     /// 发起一个 RPC：分配 req_id → 发送 → 5 s 内等待同 req_id 的响应。
@@ -744,7 +789,7 @@ async fn read_loop(inner: Arc<Inner>, mut rx: ControlRx) {
 }
 
 /// 单向数据流 accept 循环：视频/瓦片各起一个泵。
-async fn accept_data_loop(conn: Conn, inner: Arc<Inner>) {
+async fn accept_data_loop(conn: Arc<Conn>, inner: Arc<Inner>) {
     loop {
         match conn.accept_data().await {
             Ok((StreamKind::Video, id, rx)) => {
@@ -766,7 +811,7 @@ async fn accept_data_loop(conn: Conn, inner: Arc<Inner>) {
 }
 
 /// 双向数据流 accept 循环：终端。
-async fn accept_bidi_loop(conn: Conn, inner: Arc<Inner>) {
+async fn accept_bidi_loop(conn: Arc<Conn>, inner: Arc<Inner>) {
     loop {
         match conn.accept_bidi().await {
             Ok((StreamKind::Terminal, stream_id, tx, rx)) => {
@@ -802,6 +847,50 @@ async fn video_pump(inner: Arc<Inner>, mut rx: DataRx) {
             Ok(None) => break,
             Err(e) => {
                 tracing::debug!(device = %inner.device_id, "video pump ended: {e:#}");
+                break;
+            }
+        }
+    }
+}
+
+/// T-027 开关：fec-shards 视频路径请求（默认关）
+fn media_fec_env() -> bool {
+    std::env::var("RD_MEDIA_FEC").as_deref() == Ok("1")
+}
+
+/// T-027：fec-shards 视频泵——datagram 收流 → RS 重组 → 前端投递。
+/// 与 agent 侧 FecRs 发送端配对；帧格式仍为 `[VideoHeader][AU]`。
+async fn fec_video_pump(conn: Arc<Conn>, inner: Arc<Inner>) {
+    let ch: Arc<dyn SbChannel> = Arc::new(
+        rd_switch::RdChannel::from_conn(conn, switchboard_core::types::PathKind::Direct),
+    );
+    let fec = switchboard_mod_fec_rs::FecRs::new(Default::default());
+    let (_sink, mut src) = fec
+        .bind(
+            Arc::clone(&ch),
+            Arc::clone(&ch),
+            Arc::new(switchboard_core::telemetry::EventBus::new()),
+        )
+        .await
+        .expect("fec 视频泵绑定失败");
+    loop {
+        match src.next().await {
+            Some(switchboard_core::stages::FrameIn::Complete { frame_id: _, data }) => {
+                match rd_transport::framing::decode_video_header(&data) {
+                    Ok((h, len)) => {
+                        let end = (VIDEO_HEADER_LEN + len as usize).min(data.len());
+                        let au = &data[VIDEO_HEADER_LEN..end];
+                        let frame = encode_video_frame(&h, au);
+                        deliver_frame(&inner, h.window_id, frame);
+                    }
+                    Err(e) => {
+                        tracing::debug!(device = %inner.device_id, "fec 帧头解析失败: {e:#}");
+                    }
+                }
+            }
+            Some(switchboard_core::stages::FrameIn::Lost { .. }) => {}
+            None => {
+                tracing::info!(device = %inner.device_id, "fec 视频泵结束");
                 break;
             }
         }

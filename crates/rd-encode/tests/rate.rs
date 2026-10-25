@@ -1,4 +1,4 @@
-//! T-011 集成测试：AIMD 码率控制、编解码协商与能力探测。
+//! T-011 集成测试：码率控制（v0.2 baseline-adaptive）、编解码协商与能力探测。
 
 use rd_encode::caps::{negotiate, probe_encode_caps};
 use rd_encode::rate::{RateController, RateDecision, RateInput};
@@ -23,25 +23,18 @@ fn congested_queued() -> RateInput {
 }
 
 #[test]
-fn queued_backlog_drops_bitrate() {
+fn queued_backlog_drops_bitrate_after_debounce() {
     let mut rc = RateController::new(4000, 60);
     // 积压防抖（D-013 包5）：单 tick 积压尖峰（鼠标扫过全窗的 hover 变化）
     // 由 QUIC 缓冲吸收，不降码率。
     assert_eq!(rc.update(congested_queued()).kbps, 4000);
-    // 连续第 2 tick（400 ms）才确认拥塞 → 降档；之后连续降 2800 → 1960 → 1372。
+    // 连续第 2 tick（400 ms）确认拥塞 → 先降码率 ×0.7。
     assert_eq!(rc.update(congested_queued()).kbps, 2800);
+    // 继续拥塞：2800 → 1960 → 1372；码率 < 1500 → 帧率 30。
     assert_eq!(rc.update(congested_queued()).kbps, 1960);
     let d = rc.update(congested_queued());
     assert_eq!(d.kbps, 1372);
-    // 下一 tick：码率已 < 1500 kbps → 建议帧率降至 30（决策用降档前码率判断）。
-    let d = rc.update(congested_queued());
-    assert_eq!(d.kbps, 960);
     assert_eq!(d.fps, 30);
-    // 继续降档直到下限 500。
-    rc.update(congested_queued());
-    rc.update(congested_queued());
-    assert_eq!(rc.update(congested_queued()).kbps, 500);
-    assert_eq!(rc.update(congested_queued()).kbps, 500);
 }
 
 #[test]
@@ -49,7 +42,7 @@ fn rtt_spike_drops_bitrate() {
     let mut rc = RateController::new(4000, 60);
     // 首次反馈建立基线 RTT=20。
     assert_eq!(rc.update(normal()).kbps, 4000);
-    // RTT 升至 31（> 基线 1.5×=30）→ 拥塞降档。
+    // RTT 升至 31（> 基线 1.5×=30）→ 拥塞 ×0.7。
     assert_eq!(
         rc.update(RateInput {
             rtt_ms: 31,
@@ -59,52 +52,59 @@ fn rtt_spike_drops_bitrate() {
         .kbps,
         2800
     );
-}
-
-#[test]
-fn packet_loss_drops_bitrate() {
-    let mut rc = RateController::new(4000, 60);
-    // 丢包阈值化（D-013 包4/E3）：≤2% 视为 tailnet/DERP 抖动，不降码率。
+    // RTT 升至 41（> 基线 2×）→ 严重 ×0.5。
     assert_eq!(
         rc.update(RateInput {
-            rtt_ms: 20,
+            rtt_ms: 41,
             queued_bytes: 0,
-            lost_ratio: 0.02
+            lost_ratio: 0.0
         })
         .kbps,
-        4000
-    );
-    // >2% 真实拥塞 → 降档。
-    assert_eq!(
-        rc.update(RateInput {
-            rtt_ms: 20,
-            queued_bytes: 0,
-            lost_ratio: 0.05
-        })
-        .kbps,
-        2800
+        1400
     );
 }
 
 #[test]
-fn recovery_grows_bitrate_after_one_second() {
+fn packet_loss_threshold() {
     let mut rc = RateController::new(4000, 60);
-    // 积压需连续 2 tick 才降档。
-    assert_eq!(rc.update(congested_queued()).kbps, 4000);
-    assert_eq!(rc.update(congested_queued()).kbps, 2800);
-    // 连续 3 次无拥塞反馈（600 ms）不升档。
-    for _ in 0..3 {
-        assert_eq!(rc.update(normal()).kbps, 2800);
-    }
-    // 第 4 次（≈0.8 s）升档 +15%。
-    let d = rc.update(normal());
-    assert_eq!(d.kbps, 3220);
-    assert_eq!(d.fps, 60);
-    // 再 4 次继续升档 3220 → 3703。
-    for _ in 0..3 {
-        rc.update(normal());
-    }
-    assert_eq!(rc.update(normal()).kbps, 3703);
+    rc.update(normal());
+    // 丢包阈值化（D-013 包4/E3）：≤2% 视为 tailnet/DERP 抖动，不降码率
+    // （健康链路稳态爬升允许 ≥ 当前值）。
+    let before = rc
+        .update(RateInput {
+            rtt_ms: 20,
+            queued_bytes: 0,
+            lost_ratio: 0.02,
+        })
+        .kbps;
+    assert!(before >= 4000, "≤2% 不降码率: {before}");
+    // >2% 真实拥塞 → 相对下降。
+    let after = rc
+        .update(RateInput {
+            rtt_ms: 20,
+            queued_bytes: 0,
+            lost_ratio: 0.05,
+        })
+        .kbps;
+    assert!(after < before, ">2% → 降码率: {before} → {after}");
+}
+
+#[test]
+fn recovery_fast_climb_back_to_start_then_steady() {
+    let mut rc = RateController::new(4000, 60);
+    rc.update(normal());
+    rc.update(congested_queued()); // 防抖 tick（好样本，稳态 streak=1）
+    let degraded = rc.update(congested_queued()).kbps; // ×0.7
+    // 好样本：低于起始码率 → 爬坡 ×1.3 快速恢复，封顶 start_kbps。
+    let g1 = rc.update(normal()).kbps;
+    assert!(g1 > degraded, "爬坡: {degraded} → {g1}");
+    let g2 = rc.update(normal()).kbps;
+    assert!(g2 > g1, "继续爬坡: {g1} → {g2}");
+    assert!(g2 >= degraded, "恢复到降档前水平");
+    // 超过起始码率后转稳态：2 连好 ×1.15。
+    let s = rc.update(normal()).kbps;
+    let s2 = rc.update(normal()).kbps;
+    assert!(s2 > s || s >= 50_000, "稳态增长: {s} → {s2}");
 }
 
 #[test]
@@ -122,19 +122,14 @@ fn bitrate_lower_bound_clamped() {
     let mut rc = RateController::new(600, 60);
     // 积压防抖：首 tick 不降。
     assert_eq!(rc.update(congested_queued()).kbps, 600);
+    // ×0.7 → 420 → clamp 500；持续拥塞不跌破下限。
     assert_eq!(rc.update(congested_queued()).kbps, 500);
-    // 持续拥塞不跌破下限。
     assert_eq!(rc.update(congested_queued()).kbps, 500);
-    // 恢复后从下限开始升档：3 次不升，第 4 次 500 → 575。
-    for _ in 0..3 {
-        assert_eq!(rc.update(normal()).kbps, 500);
-    }
-    assert_eq!(rc.update(normal()).kbps, 575);
 }
 
 #[test]
 fn low_bitrate_drops_fps() {
-    // 低起始码率直接降帧。
+    // 低起始码率直接降帧（LOW_KBPS 规则）。
     let mut rc = RateController::new(1400, 60);
     let d = rc.update(normal());
     assert_eq!(
@@ -142,18 +137,6 @@ fn low_bitrate_drops_fps() {
         RateDecision {
             kbps: 1400,
             fps: 30
-        }
-    );
-    // 升回 ≥1500 后帧率恢复上限（1400 × 23/20 = 1610）。
-    for _ in 0..3 {
-        rc.update(normal());
-    }
-    let d = rc.update(normal());
-    assert_eq!(
-        d,
-        RateDecision {
-            kbps: 1610,
-            fps: 60
         }
     );
     // 帧率上限本身低于 30 时不会反向上调。

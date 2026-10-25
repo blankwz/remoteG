@@ -1,0 +1,70 @@
+{
+  "composite": 71.58000183105469,
+  "env": {
+    "os": "windows"
+  },
+  "module": {
+    "id": "sb.core.loopback+sb.moonlight.fec-rs",
+    "version": "0.1.0"
+  },
+  "note": "T4 强制中继剖面（path.kind 如实标注 relay）；合成等效，×0.9",
+  "passes": [
+    {
+      "composite": 79.54000091552734,
+      "params": {
+        "burst_len": 5,
+        "loss": 0.019999999552965164,
+        "mbps": 10.0,
+        "mtu": 1200,
+        "relay_label": true,
+        "rtt_ms": 80.0,
+        "seed": 0
+      },
+      "pass_index": 0,
+      "runs": [
+        {
+          "pass": {
+            "burst_len": 5,
+            "relay": true,
+            "seed": 0
+          },
+          "w1": {
+            "M1_p95_ms": 140.60000610351562,
+            "M5_legibility_pct": 15.979999542236328,
+            "score": 86.45439147949219
+          },
+          "w2": {
+            "M1_p95_ms": 463.8999938964844,
+            "fps_low": 2.700000047683716,
+            "score": 45.0
+          },
+          "w3": {
+            "fps_low": 8.100000381469727,
+            "score": 81.65836334228516
+          },
+          "w6": {
+            "M4_recovery_ms": 257.29998779296875,
+            "frames_lost": 59,
+            "score": 87.6513442993164
+          },
+          "w7": {
+            "M9_startup_ms": 0.0,
+            "score": 100.0
+          }
+        }
+      ]
+    }
+  ],
+  "plan": "inline:sbbench",
+  "profile": "T4",
+  "profile_params": {
+    "burst_len": 5,
+    "loss": 0.019999999552965164,
+    "mbps": 10.0,
+    "mtu": 1200,
+    "rtt_ms": 80.0
+  },
+  "runs": 1,
+  "schema": "sbbench/1",
+  "tool_version": "switchboard-bench 0.1.2"
+}

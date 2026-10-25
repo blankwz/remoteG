@@ -1,0 +1,115 @@
+{
+  "composite": 75.04000091552734,
+  "env": {
+    "os": "windows"
+  },
+  "module": {
+    "id": "sb.core.loopback+sb.moonlight.fec-rs",
+    "version": "0.1.0"
+  },
+  "note": "T3 合成等效剖面（均匀+突发双口径均值×0.9）；注册表认证仍需实网复跑",
+  "passes": [
+    {
+      "composite": 84.81999969482422,
+      "params": {
+        "burst_len": 0,
+        "loss": 0.019999999552965164,
+        "mbps": 10.0,
+        "mtu": 1200,
+        "relay_label": false,
+        "rtt_ms": 80.0,
+        "seed": 0
+      },
+      "pass_index": 0,
+      "runs": [
+        {
+          "pass": {
+            "burst_len": 0,
+            "relay": false,
+            "seed": 0
+          },
+          "w1": {
+            "M1_p95_ms": 95.4000015258789,
+            "M5_legibility_pct": 19.530000686645508,
+            "score": 91.69451904296875
+          },
+          "w2": {
+            "M1_p95_ms": 422.0,
+            "fps_low": 2.700000047683716,
+            "score": 45.0
+          },
+          "w3": {
+            "fps_low": 30.200000762939453,
+            "score": 88.56114196777344
+          },
+          "w6": {
+            "M4_recovery_ms": 111.5,
+            "frames_lost": 7,
+            "score": 99.08047485351562
+          },
+          "w7": {
+            "M9_startup_ms": 0.0,
+            "score": 100.0
+          }
+        }
+      ]
+    },
+    {
+      "composite": 81.93000030517578,
+      "params": {
+        "burst_len": 5,
+        "loss": 0.019999999552965164,
+        "mbps": 10.0,
+        "mtu": 1200,
+        "relay_label": false,
+        "rtt_ms": 80.0,
+        "seed": 0
+      },
+      "pass_index": 1,
+      "runs": [
+        {
+          "pass": {
+            "burst_len": 5,
+            "relay": false,
+            "seed": 0
+          },
+          "w1": {
+            "M1_p95_ms": 94.5,
+            "M5_legibility_pct": 15.979999542236328,
+            "score": 91.82621765136719
+          },
+          "w2": {
+            "M1_p95_ms": 421.0,
+            "fps_low": 2.700000047683716,
+            "score": 45.0
+          },
+          "w3": {
+            "fps_low": 8.0,
+            "score": 88.56610107421875
+          },
+          "w6": {
+            "M4_recovery_ms": 262.20001220703125,
+            "frames_lost": 66,
+            "score": 87.41378784179688
+          },
+          "w7": {
+            "M9_startup_ms": 0.0,
+            "score": 100.0
+          }
+        }
+      ]
+    }
+  ],
+  "plan": "inline:sbbench",
+  "profile": "T3",
+  "profile_params": {
+    "burst_len": 5,
+    "loss": 0.019999999552965164,
+    "mbps": 10.0,
+    "mtu": 1200,
+    "rtt_ms": 80.0
+  },
+  "runs": 1,
+  "schema": "sbbench/1",
+  "tool_version": "switchboard-bench 0.1.2"
+}

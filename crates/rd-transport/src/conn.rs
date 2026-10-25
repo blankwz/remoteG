@@ -130,7 +130,10 @@ fn transport_config() -> TransportConfig {
     tc.mtu_discovery_config(None);
     // BBR（D-013 包5）：跨 DERP 中继/高丢包路径下 Cubic 对丢包过敏、吞吐
     // 崩塌（跨网实测 fps=1/RTT 1.2s）；BBR 以带宽估测驱动、丢包鲁棒。
-    tc.congestion_controller_factory(Arc::new(BbrFactory(Arc::new(BbrConfig::default()))));
+    // A/B 回退：RD_BBR=0 临时切回 Cubic（05_api §6.4 候选项的对比开关）。
+    if std::env::var("RD_BBR").as_deref() != Ok("0") {
+        tc.congestion_controller_factory(Arc::new(BbrFactory(Arc::new(BbrConfig::default()))));
+    }
     tc
 }
 
@@ -241,6 +244,12 @@ impl Conn {
             .read_datagram()
             .await
             .map_err(|e| anyhow::anyhow!("read_datagram: {e}"))
+    }
+
+    /// QUIC 连接句柄（Clone，轻量）：供 fec/datagram 适配器复用同一条连接
+    /// （T-027：rd-switch 的 Channel 视图基于它实现）。
+    pub fn quinn_handle(&self) -> quinn::Connection {
+        self.conn.clone()
     }
 
     /// 平滑 RTT（码率自适应用）。

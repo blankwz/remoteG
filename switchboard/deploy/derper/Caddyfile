@@ -1,0 +1,4 @@
+# headscale 的 TLS 反代（derper 占用 443，headscale 走 8443）
+<hs.example.com>:8443 {
+    reverse_proxy headscale:8080
+}

@@ -1,0 +1,402 @@
+{
+  "spec": "switchboard/registry/1",
+  "modules": [
+    {
+      "id": "sb.core.loopback",
+      "version": "0.1.0",
+      "stage": "transport",
+      "binding": "native-rust",
+      "provides": {
+        "congestion": [
+          "cubic"
+        ],
+        "datagram": {
+          "max_size": 1184,
+          "lossy_ok": true
+        },
+        "streams": {
+          "reliable_ordered": true,
+          "bidi": true,
+          "max_concurrent": 64
+        },
+        "mtu": 1200,
+        "multipath": false
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "origin": {
+        "adapted_from": "参考实现（SDK 自带）",
+        "upstream_ref": [
+          "spec/01 §6"
+        ]
+      },
+      "principles_card": null,
+      "license": "MIT"
+    },
+    {
+      "id": "sb.core.lossy-sim",
+      "version": "0.1.0",
+      "stage": "transport",
+      "binding": "native-rust",
+      "provides": {
+        "congestion": [
+          "cubic"
+        ],
+        "datagram": {
+          "max_size": 1184,
+          "lossy_ok": true
+        },
+        "streams": {
+          "reliable_ordered": true,
+          "bidi": true,
+          "max_concurrent": 64
+        },
+        "mtu": 1200,
+        "multipath": false
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "origin": {
+        "adapted_from": "参考实现（SB-Bench T0/T3 剖面）",
+        "upstream_ref": [
+          "spec/04 §1"
+        ]
+      },
+      "principles_card": null,
+      "license": "MIT"
+    },
+    {
+      "id": "sb.core.fec-xor",
+      "version": "0.1.0",
+      "stage": "media",
+      "binding": "native-rust",
+      "provides": {
+        "profile": "fec-shards",
+        "fec": {
+          "scheme": "xor",
+          "max_overhead": 0.125,
+          "group_size": 8,
+          "shard_size": 1024
+        },
+        "recovery": {
+          "on_frame_loss": "drop",
+          "spec_ref": "01 §8"
+        }
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "origin": {
+        "adapted_from": "Moonlight GameStream 模型的简化参考（原版 Reed-Solomon + 动态 FEC ≤200%）",
+        "upstream_ref": [
+          "moonlight-stream/moonlight-common-c RtpVideoQueue.c",
+          "SdpGenerator.c"
+        ]
+      },
+      "principles_card": "docs/cards/moonlight-gamestream.md",
+      "license": "MIT",
+      "bench": {
+        "file": "bench/fec-xor-burst.json",
+        "composite": 71.0,
+        "profile": "T0-burst"
+      },
+      "bench_note": "最小参考实现（XOR 单校验/组）。T0 突发剖面 A/B：hover 带宽受限场景优于 RS（84.7 vs 45.0），突发恢复劣于 RS（67.6 vs 85.6）——开销换恢复的典型权衡"
+    },
+    {
+      "id": "sb.moonlight.fec-rs",
+      "version": "0.1.0",
+      "stage": "media",
+      "binding": "native-rust",
+      "provides": {
+        "profile": "fec-shards",
+        "fec": {
+          "scheme": "reed-solomon",
+          "max_overhead": 2.0,
+          "default_ratio": 0.2,
+          "shard_size": 1024,
+          "min_parity_single": 2
+        },
+        "recovery": {
+          "on_frame_loss": "drop",
+          "reorder_window_frames": 1
+        }
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "bench": {
+        "file": "bench/fec-rs-burst.json",
+        "composite": 67.4,
+        "profile": "T0-burst"
+      },
+      "origin": {
+        "adapted_from": "Moonlight GameStream（RS + 动态 FEC 比例 + minRequiredFecPackets=2 单片帧规则）",
+        "upstream_ref": [
+          "moonlight-stream/moonlight-common-c RtpVideoQueue.c",
+          "SdpGenerator.c:207-211"
+        ]
+      },
+      "principles_card": "docs/cards/moonlight-gamestream.md",
+      "license": "MIT"
+    },
+    {
+      "id": "sb.lan.udp-broadcast",
+      "version": "0.1.0",
+      "stage": "discovery",
+      "binding": "native-rust",
+      "provides": {
+        "scope": "lan",
+        "zero_conf": true
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "origin": {
+        "adapted_from": "rd apps/rd-agent/src/discover.rs（D-013 包1）",
+        "upstream_ref": []
+      },
+      "principles_card": "docs/cards/rd-quic.md",
+      "license": "MIT"
+    },
+    {
+      "id": "sb.quinn.quic",
+      "version": "0.1.0",
+      "stage": "transport",
+      "binding": "native-rust",
+      "provides": {
+        "congestion": [
+          "cubic",
+          "bbr"
+        ],
+        "datagram": {
+          "max_size": 1200,
+          "lossy_ok": true
+        },
+        "streams": {
+          "reliable_ordered": true,
+          "bidi": true,
+          "max_concurrent": 1024
+        },
+        "mtu": 1200,
+        "multipath": false
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "bench_note": "适配器已落地（L-B）：真实 QUIC datagram+流、TOFU 指纹钉扎（v0.1.2 起证书指纹为 SHA-256）、MTU 钳 1200",
+      "origin": {
+        "adapted_from": "rd crates/rd-transport",
+        "upstream_ref": [
+          "quinn 0.11"
+        ]
+      },
+      "principles_card": "docs/cards/rd-quic.md",
+      "license": "MIT"
+    },
+    {
+      "id": "sb.rustdesk.punch-v2",
+      "version": "0.1.0",
+      "stage": "punch",
+      "binding": "native-rust",
+      "provides": {
+        "proto": "udp",
+        "symmetric_attack": "none",
+        "needs_rendezvous": true
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "研究级桩：完整适配需 hbbs 会合服务；打洞铁律（01 §4.1）即出自其 PoC #16488 修正。当前 master v4 路径已修复端点推断缺陷，残留：对称 NAT 直接转中继、打洞 IP 仍取自 TCP 观察地址",
+      "origin": {
+        "adapted_from": "rustdesk/rustdesk src/rendezvous_mediator.rs + src/client.rs",
+        "upstream_ref": [
+          "rustdesk #16488 PoC"
+        ]
+      },
+      "principles_card": "docs/cards/rustdesk-punch.md",
+      "license": "AGPL-3.0"
+    },
+    {
+      "id": "sb.stun.punch-v2",
+      "version": "0.1.0",
+      "stage": "punch",
+      "binding": "native-rust",
+      "provides": {
+        "proto": "udp",
+        "symmetric_attack": "none",
+        "needs_rendezvous": true
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "bench_note": "五条铁律参考实现（sdk/rust/switchboard-mod-punch-stun）：同 socket STUN（RFC5389 子集，迷你服务器测试）/完整端点交换/双向 8×100ms PROBE/首包权威/保活 min(15s, nat×0.5)。宿主注入 Rendezvous 通道即可用",
+      "origin": {
+        "adapted_from": "spec 01 §4.1（来源：RustDesk PoC #16488 修正）",
+        "upstream_ref": [
+          "rustdesk #16488"
+        ]
+      },
+      "principles_card": "docs/cards/rustdesk-punch.md",
+      "license": "MIT"
+    },
+    {
+      "id": "sb.kcp.kcp",
+      "version": "0.1.0",
+      "stage": "transport",
+      "binding": "native-rust",
+      "provides": {
+        "congestion": [
+          "kcp-turbo"
+        ],
+        "datagram": null,
+        "streams": {
+          "reliable_ordered": true,
+          "bidi": true,
+          "max_concurrent": 1
+        },
+        "mtu": 1400,
+        "multipath": false
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-B",
+      "bench_note": "适配器已落地：sdk/rust/switchboard-mod-kcp（kcp 0.6 turbo 参数=nodelay/10/2/true，与 RustDesk new_turbo 同款；caps 如实 lossy_ok=false，fec-shards 协商正确拒绝）",
+      "origin": {
+        "adapted_from": "rustdesk kcp_stream.rs / hbb_common bytes_codec.rs",
+        "upstream_ref": [
+          "kcp-sys"
+        ]
+      },
+      "principles_card": "docs/cards/rustdesk-punch.md",
+      "license": "AGPL-3.0"
+    },
+    {
+      "id": "sb.webrtc.ice",
+      "version": "0.1.0",
+      "stage": "punch",
+      "binding": "native-rust",
+      "provides": {
+        "proto": "udp",
+        "symmetric_attack": "none",
+        "needs_rendezvous": true
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "RustDesk 1.5.x 新路径：webrtc-rs fork，DataChannel 上仍跑原 protobuf 协议；与既有打洞/中继并行竞速",
+      "origin": {
+        "adapted_from": "rustdesk hbb_common/src/webrtc.rs",
+        "upstream_ref": [
+          "webrtc-rs"
+        ]
+      },
+      "principles_card": "docs/cards/rustdesk-punch.md",
+      "license": "AGPL-3.0"
+    },
+    {
+      "id": "sb.derp.self-hk",
+      "version": "0.1.0",
+      "stage": "relay",
+      "binding": "process",
+      "provides": {
+        "proto": "custom",
+        "regions": [
+          "hk"
+        ],
+        "auth": "tailscale-identity"
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "headscale + derper 自托管：解决官方 DERP 在 CN 劣化（rd 实测 1.2s RTT 根因）；process 绑定契约见 spec/05 §2",
+      "origin": {
+        "adapted_from": "tailscale derper（自托管）",
+        "upstream_ref": [
+          "tailscale.com/blog/how-nat-traversal-works"
+        ]
+      },
+      "principles_card": "docs/cards/tailscale-disco.md",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "sb.ext.tailscale",
+      "version": "0.1.0",
+      "stage": "transport",
+      "stages": [
+        "discovery",
+        "punch",
+        "relay",
+        "transport"
+      ],
+      "binding": "process",
+      "provides": {
+        "congestion": [
+          "wireguard-internal"
+        ],
+        "datagram": {
+          "max_size": 1200,
+          "lossy_ok": false
+        },
+        "streams": {
+          "reliable_ordered": true,
+          "bidi": true,
+          "max_concurrent": 1024
+        },
+        "mtu": 1280,
+        "multipath": true
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "整栈即模块（DISCO 打洞 + DERP 中继 + WireGuard 传输）；rd 现行架构。遥测桥需把 tailscaled 指标映射为 StageStats 并如实标注 path.kind",
+      "origin": {
+        "adapted_from": "tailscaled（外部进程）",
+        "upstream_ref": [
+          "tailscale.com/blog/nat-traversal-improvements-pt-1"
+        ]
+      },
+      "principles_card": "docs/cards/tailscale-disco.md",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "sb.qos.baseline-adaptive",
+      "version": "0.1.0",
+      "stage": "media",
+      "binding": "native-rust",
+      "provides": {
+        "profile": "rate-control",
+        "rules": "baseline-adaptive"
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "RustDesk 1.5.0 QoS：延迟基线渐进适应 / 3 连坏样本降帧 / 先降码率后降帧 / 2 好样本快恢复；目标替换 rd AIMD（rate.rs）",
+      "origin": {
+        "adapted_from": "rustdesk PR #16082",
+        "upstream_ref": [
+          "rustdesk.com/blog/rustdesk-1-5-0-webrtc-qos"
+        ]
+      },
+      "principles_card": null,
+      "license": "AGPL-3.0"
+    },
+    {
+      "id": "sb.srt.srt",
+      "version": "0.1.0",
+      "stage": "transport",
+      "binding": "process",
+      "provides": {
+        "congestion": [
+          "srt-arq"
+        ],
+        "datagram": {
+          "max_size": 1316,
+          "lossy_ok": true
+        },
+        "streams": null,
+        "mtu": 1500,
+        "multipath": false
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "广电级 ARQ(NACK)+FEC：弱网鲁棒基准候选，与 QUIC 在 T3/T4 对照",
+      "origin": {
+        "adapted_from": "SRT Alliance / libsrt（外部进程）",
+        "upstream_ref": [
+          "github.com/Haivision/srt"
+        ]
+      },
+      "principles_card": null,
+      "license": "MPL-2.0"
+    }
+  ]
+}

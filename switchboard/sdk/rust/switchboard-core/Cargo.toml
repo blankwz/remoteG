@@ -1,0 +1,16 @@
+[package]
+name = "switchboard-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Switchboard 规范 v0.1 的规范性 Rust SDK：阶段 trait、caps 协商、Plan DSL、遥测、参考模块"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+bytes = "1"

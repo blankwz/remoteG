@@ -405,6 +405,7 @@ fn hello_envelope() -> Envelope {
             device_name: "rd-e2e-client".to_string(),
             decode_caps: Vec::new(),
             supports_444: false,
+            media_fec: false,
         })),
     }
 }

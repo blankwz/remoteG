@@ -1,0 +1,56 @@
+{
+  "composite_available": 95.93000030517578,
+  "env": {
+    "os": "windows"
+  },
+  "module": {
+    "id": "sb.core.loopback+sb.core.fec-xor",
+    "version": "0.1.0"
+  },
+  "note": "T0 回归剖面（×0.9）；注册表评分需 T3/T4 实网 + W1 文字可读性（Level-C）",
+  "plan": "inline:sbbench-t0",
+  "profile": "T0",
+  "profile_params": {
+    "burst_len": 5,
+    "loss": 0.019999999552965164,
+    "mbps": 10.0,
+    "mtu": 1200,
+    "rtt_ms": 80.0
+  },
+  "runs": 1,
+  "schema": "sbbench/1",
+  "tool_version": "switchboard-bench 0.1.0",
+  "workloads": {
+    "W2": {
+      "metrics": {},
+      "score": 85.03672790527344,
+      "weight": 0.2
+    },
+    "W3": {
+      "metrics": {},
+      "score": 88.96044158935547,
+      "weight": 0.2
+    },
+    "W6": {
+      "metrics": {
+        "runs": [
+          {
+            "M4_recovery_ms": 242.60000610351562,
+            "fps_low": 3.200000047683716,
+            "frames_lost": 66,
+            "run": 0
+          }
+        ]
+      },
+      "score": 88.5919189453125,
+      "weight": 0.25
+    },
+    "W7": {
+      "metrics": {
+        "M9_startup_ms": 0.0
+      },
+      "score": 100.0,
+      "weight": 0.15
+    }
+  }
+}

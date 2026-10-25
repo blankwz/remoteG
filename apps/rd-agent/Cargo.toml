@@ -25,6 +25,9 @@ rd-proto = { path = "../../crates/rd-proto" }
 rd-security = { path = "../../crates/rd-security" }
 rd-term = { path = "../../crates/rd-term" }
 rd-transport = { path = "../../crates/rd-transport" }
+rd-switch = { path = "../../crates/rd-switch" }
+switchboard-core = { path = "../../switchboard/sdk/rust/switchboard-core" }
+switchboard-mod-fec-rs = { path = "../../switchboard/sdk/rust/switchboard-mod-fec-rs" }
 rd-window-win = { path = "../../crates/rd-window-win" }
 serde = { workspace = true }
 tokio = { workspace = true }

@@ -24,10 +24,12 @@
 ## 未决事项（M1 收尾/移交 M2）
 0. **待用户手测**（09_test/兼容性.md 已重写为含 D-013 新功能的完整版；release 产物已预构建、C:\rd 联接与 C:\rd-test bat 已恢复）：兼容性矩阵（**扩充项**：扫描局域网→配对、连接确认框、暂停→终端终止、锁屏横幅、剪贴板互传、只看不控、撤销信任）、场景 A/B/C 延迟、1 小时稳定性。
 1. 用户执行兼容性手测矩阵 + 场景 A/B/C 延迟（RUN_LOG 回填后关闭 P95 指标）。
-2. 协议 v0.2 候选（05_api §6.4）：TerminalExit/TermClose、Agent 剪贴板变化推送、WindowEvent 状态事件、FitApplied、BBR 拥塞 A/B。
+2. 协议 v0.2 候选（05_api §6.4）：TerminalExit/TermClose、Agent 剪贴板变化推送、WindowEvent 状态事件、FitApplied、BBR 拥塞 A/B。**新增：视频切 fec-shards**（Switchboard `sb.moonlight.fec-rs` + quinn datagram 已在 switchboard 侧端到端验证，rd 侧收发管线切换待做）。
+2a. **M2 已落地（2026-10-24）**：① `crates/rd-switch`——Plan 执行器选路 + rd 原生 QUIC（`plan_dial`，`RD_PLAN` 环境变量切入并已接入 `DeviceConn::connect`，默认行为不变）；② **码控 v0.2**：`rd-encode/src/rate.rs` 换 baseline-adaptive（RustDesk 1.5.0 QoS 规则：基线渐进适应/3 连坏才降帧/先码率后帧率/2 连好快恢复/低码率爬坡封顶），API 不变 window_session 零改动；③ **BBR A/B 开关**：`RD_BBR=0` 临时回退 Cubic（BBR 仍为默认，D-013 包5 结论）；④ `switchboard/` v0.1.4（规范+SDK 7 crate 36 测试+SB-Bench T0/T3/T4+**Studio 三页含运行态可视化与基准对比**+daemon+deploy/DERP 套件）；⑤ **T-027 任务卡**（视频切 fec-shards）已就绪待排期。
+2b. **待外部资源**：自建 DERP 部署（`switchboard/deploy/derper/` 套件就绪，需港区 VPS）；实网 T3/T4 跑分出 L-C 分（需两台真机）。
 3. NVIDIA 驱动 ≥610.00 后重跑 444 探针验证 nvenc/444 端到端（`cargo test -p rd-encode --test encode create_best_yuv444_local_probe -- --ignored --nocapture`；创建接口与前端解码配置已就绪。2026-10-22 实测驱动 572.70，仍阻塞）。
 4. 零拷贝送硬编优化（当前 staging 读回 ~1.3ms/帧已达标）。
-5. e2e 间歇性已加固；并行跑 rd-agent 测试套件会互踩（串行即绿），残余单例失败如再现实测定位。
+5. e2e 间歇性**已定位并修复（2026-10-24）**：套件内编码器冷启动（MFT 实例反复创建）使首帧超出 5s 等待预算——视频类等待放宽至 15s（首帧性能仍由 2s WARN 追踪，任务卡口径不变）；串行 e2e 连续两次 8/8。
 6. macOS：cargo check 待 CI 首跑确认；keyring 身份存储待真机验证。
 7. CI 推送变绿验证：仓库尚无远端（用户提供 GitHub 私有仓库后 push）。
 8. 服务化（SCM+崩溃重启）为 M2 决策点（E5 建议，E1/E2 认为现阶段 HKCU Run 自启已覆盖帮家人场景）。
