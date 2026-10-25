@@ -1,349 +1,353 @@
-// 方案测试页（默认）：选场景 → 一键测试 → 自动出分排名
+// 方案测试页（默认）：三步引导 → 选方案 → 一键测试 → 自动出分排名
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PRESETS, type Preset } from './presets';
 
-interface Stat {
-  ts_ms: number;
-  fps: number;
-  recv_mbps: number;
-  rtt_ms: number;
-  loss_pct: number;
-}
-interface Score {
-  total: number;
-  smoothness: number;
-  delivery: number;
-  latency: number;
-  robustness: number;
-  avg_fps: number;
-  frames_sent: number;
-  frames_recv: number;
-}
-interface Result {
-  presetName: string;
-  score: Score;
-}
+// ── 类型 ──
+interface Stat { ts_ms: number; fps: number; recv_mbps: number; rtt_ms: number; loss_pct: number; }
+interface Score { total: number; smoothness: number; delivery: number; latency: number; robustness: number; avg_fps: number; frames_sent: number; frames_recv: number; }
+interface Result { presetName: string; score: Score; ts: number; }
+type Phase = 'idle' | 'testing' | 'done';
 
-const SCORE_LABEL: [keyof Score, string, string][] = [
+// ── 常量 ──
+const MAX_PTS = 120;
+const SCORE_DIMS: [keyof Score, string, string][] = [
   ['smoothness', '画面流畅', '40%'],
-  ['delivery', '画面送达率', '30%'],
-  ['latency', '延迟表现', '20%'],
-  ['robustness', '抗丢包表现', '10%'],
+  ['delivery', '画面送达', '30%'],
+  ['latency', '延迟', '20%'],
+  ['robustness', '抗丢包', '10%'],
 ];
+const EVENT_ICON: Record<string, string> = {
+  fec_recovered: '🔧', frame_lost: '💔', frame_drop: '⏱',
+};
+const EVENT_TEXT: Record<string, string> = {
+  fec_recovered: '自动修复了丢失的数据片',
+  frame_lost: '丢了一帧（坏得太厉害救不回来）',
+  frame_drop: '来不及发送，扔掉一帧',
+};
 
-function Spark(props: { data: number[]; color: string; label: string; unit: string }) {
-  const w = 260;
-  const h = 56;
-  const max = Math.max(...props.data, 0.0001);
-  const pts = props.data
-    .map((v, i) => `${(i / Math.max(props.data.length - 1, 1)) * w},${h - (v / max) * (h - 6) - 3}`)
-    .join(' ');
-  const last = props.data.length ? props.data[props.data.length - 1] : 0;
+// ── 工具 ──
+function scoreColor(v: number) { return v >= 80 ? '#3fb950' : v >= 60 ? '#d29922' : '#e5484d'; }
+
+// ── 迷你折线图 ──
+function Spark({ data, color, label, unit }: { data: number[]; color: string; label: string; unit: string }) {
+  const w = 280, h = 60;
+  const max = Math.max(...data, 0.001);
+  const pts = data.map((v, i) => `${(i / Math.max(data.length - 1, 1)) * w},${h - (v / max) * (h - 6) - 3}`).join(' ');
+  const cur = data.length ? data[data.length - 1] : 0;
+  const avgV = data.length ? data.reduce((a, b) => a + b, 0) / data.length : 0;
   return (
     <div className="spark">
       <div className="spark-head">
-        <b>{props.label}</b>
-        <span style={{ color: props.color }}>
-          {last.toFixed(1)} {props.unit}
+        <b>{label}</b>
+        <span>
+          <span style={{ color: props_color(color) }}>{cur.toFixed(1)}</span>
+          <span className="hint"> / 均{avgV.toFixed(1)} {unit}</span>
         </span>
       </div>
-      <svg width={w} height={h}>
-        <polyline points={pts} fill="none" stroke={props.color} strokeWidth="1.6" />
+      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" />
       </svg>
     </div>
   );
 }
+function props_color(c: string) { return c; }
 
-const DEPLOY_ITEMS = PRESETS.filter((p) => p.deploy).map((p) => ({
-  title: p.deploy!.title,
-  steps: p.deploy!.steps,
-}));
-
-function ScoreCard({ s }: { s: Score }) {
+// ── 评分卡（动画出分） ──
+function ScoreReveal({ s, name }: { s: Score; name: string }) {
   return (
-    <div className="score-card">
-      <div className="score-total">
-        <span className="score-num">{s.total.toFixed(0)}</span>
-        <span className="score-unit">分</span>
+    <div className="score-reveal">
+      <div className="score-reveal-name">{name}</div>
+      <div className="score-big" style={{ color: scoreColor(s.total) }}>
+        {s.total.toFixed(0)}<span className="score-unit">分</span>
       </div>
-      <div className="score-bars">
-        {SCORE_LABEL.map(([k, label, w]) => (
-          <div key={k} className="bar-row">
-            <span className="bar-label">{label}（{w}）</span>
-            <div className="bar-track">
-              <div className="bar-fill" style={{ width: `${s[k] as number}%`, background: '#3fb950' }} />
-              <span className="bar-val">{(s[k] as number).toFixed(0)}</span>
+      <div className="score-dims">
+        {SCORE_DIMS.map(([k, label]) => (
+          <div key={k} className="score-dim">
+            <span className="score-dim-label">{label}</span>
+            <div className="score-dim-track">
+              <div className="score-dim-fill" style={{ width: `${s[k] as number}%` }} />
             </div>
+            <span className="score-dim-val">{(s[k] as number).toFixed(0)}</span>
           </div>
         ))}
       </div>
-      <div className="score-sub hint">
-        实测平均 {s.avg_fps.toFixed(1)} 帧/秒 · 送达 {s.frames_recv}/{s.frames_sent} 帧
-      </div>
+      <div className="hint">实测平均 {s.avg_fps.toFixed(1)} 帧/秒 · 送达 {s.frames_recv}/{s.frames_sent} 帧</div>
     </div>
   );
 }
 
-interface LiveState {
-  running: boolean;
-  presetName: string;
-  stats: Stat[];
-  events: string[];
-}
-
+// ── 主组件 ──
 export default function RuntimeView() {
   const [selected, setSelected] = useState<Preset>(PRESETS[0]);
-  const [live, setLive] = useState<LiveState>({ running: false, presetName: '', stats: [], events: [] });
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [testPreset, setTestPreset] = useState('');
+  const [elapsed, setElapsed] = useState(0);
+  const [stats, setStats] = useState<Stat[]>([]);
+  const [events, setEvents] = useState<{ icon: string; text: string }[]>([]);
   const [results, setResults] = useState<Result[]>([]);
-  const [busy, setBusy] = useState<string>('');
-  const [detail, setDetail] = useState<{ r: Result } | null>(null);   // 正在跑的提示（含依次测试进度）
+  const [lastScore, setLastScore] = useState<{ s: Score; name: string } | null>(null);
+  const [errMsg, setErrMsg] = useState('');
+
   const wsRef = useRef<WebSocket | null>(null);
   const stopRef = useRef(false);
   const runningRef = useRef(false);
-  // 审查 #8：组件卸载时关闭 WS（会话由时长兜底结束）
-  useEffect(
-    () => () => {
-      wsRef.current?.close();
-    },
-    []
-  );
+  const sessionIdRef = useRef<number | null>(null);
 
-  const stop = useCallback(() => {
+  // 卸载清理
+  useEffect(() => () => { wsRef.current?.close(); }, []);
+
+  // ── 停止 ──
+  const doStop = useCallback(() => {
     stopRef.current = true;
     wsRef.current?.close();
-    wsRef.current = null;
-    setLive((l) => ({ ...l, running: false }));
+    if (sessionIdRef.current !== null) {
+      void fetch(`/api/session/${sessionIdRef.current}`, { method: 'DELETE' });
+    }
+    setPhase('idle');
   }, []);
 
-  /** 跑一个方案直到出分；resolve 出 Score */
-  const runOne = useCallback((preset: Preset): Promise<Score> => {
+  // ── 跑一个方案 ──
+  const runPreset = useCallback((preset: Preset): Promise<Score> => {
     return new Promise((resolve, reject) => {
-      if (runningRef.current) return; // 竞态锁
-    runningRef.current = true;
-    setLive({ running: true, presetName: preset.name, stats: [], events: [] });
+      setTestPreset(preset.name);
+      setPhase('testing');
+      setStats([]);
+      setEvents([]);
+      setElapsed(0);
+
       fetch('/api/session', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(preset.params),
       })
-        .then((r) => r.json())
+        .then((r) => {
+          if (!r.ok) throw new Error(`daemon 返回 ${r.status}`);
+          return r.json();
+        })
         .then(({ id }) => {
+          sessionIdRef.current = id;
           const ws = new WebSocket(`ws://${location.host}/api/live/${id}`);
           wsRef.current = ws;
           let settled = false;
-          const settle = (fn: (v: Score) => void, v: Score) => {
-            if (!settled) {
-              settled = true;
-              fn(v);
-            }
-          };
+          const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
           ws.onmessage = (ev) => {
-            if (ev.data === '__end__') {
-              ws.close();
-              return;
-            }
+            if (ev.data === '__end__') { ws.close(); return; }
             const msg = JSON.parse(ev.data);
             if (msg.type === 'stats') {
-              setLive((l) => ({
-                ...l,
-                stats: [...l.stats, msg as Stat].slice(-120),
-              }));
+              setStats((old) => [...old, msg as Stat].slice(-MAX_PTS));
             } else if (msg.type === 'event') {
-              const human: Record<string, string> = {
-                fec_recovered: '🔧 自动修复丢包',
-                frame_lost: '💔 丢了一帧',
-                frame_drop: '⏱ 来不及发送，扔帧',
-              };
-              const text = (human[msg.event] ?? msg.event) + ' 帧#' + (msg.detail?.frame_id ?? '');
-              setLive((l) => ({ ...l, events: [text, ...l.events].slice(0, 12) }));
+              const icon = EVENT_ICON[msg.event] ?? '❓';
+              const text = EVENT_TEXT[msg.event] ?? msg.event;
+              setEvents((e) => [{ icon, text }, ...e].slice(0, 12));
             } else if (msg.type === 'ended') {
-              runningRef.current = false;
-              ws.close();
-              // 审查 #9：score 缺失（如手动停止无评分）也要 settle，不挂死
-              if (msg.score) {
-                settle(resolve, msg.score as Score);
-              } else {
-                settle(reject as unknown as (v: Score) => void, {
-                  total: 0, smoothness: 0, delivery: 0, latency: 0, robustness: 0,
-                  avg_fps: 0, frames_sent: 0, frames_recv: 0,
-                } as Score);
-              }
+              done(() => {
+                setPhase('done');
+                if (msg.score) resolve(msg.score as Score);
+                else reject(new Error('无评分'));
+              });
             }
           };
-          ws.onerror = () => {
-            if (!settled) reject(new Error('连接 daemon 失败'));
-          };
-          // 审查 #2：点「停止」→ ws.close() → 服务端杀会话；前端必须 settle，不挂死
-          ws.onclose = () => {
-            if (!settled) {
-              settled = true;
-              reject(new Error('已停止'));
-            }
-          };
+          ws.onerror = () => done(() => reject(new Error('连接 daemon 失败')));
+          ws.onclose = () => done(() => { if (!settled) reject(new Error('连接已断开')); });
         })
-        .catch(reject);
+        .catch((e) => { runningRef.current = false; reject(e); });
     });
   }, []);
 
-  /** 测试当前选中的方案 */
-  const testSelected = useCallback(async () => {
-    stopRef.current = false;
-    const preset = selected;
-    setBusy(`正在测试 ${preset.name}…`);
-    try {
-      const score = await runOne(preset);
-      setResults((rs) => [...rs, { presetName: preset.name, score }]);
-    } catch (e) {
-      setBusy('测试中断: ' + String(e));
-      return;
-    }
-    setBusy('');
-    setLive((l) => ({ ...l, running: false })); // 审查 #1：出分后复位，UI 不砖化
-  }, [selected, runOne]);
+  // 计时器
+  useEffect(() => {
+    if (phase !== 'testing') return;
+    const iv = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(iv);
+  }, [phase]);
 
-  /** 依次测试所有「开箱即用」方案 */
-  const testAll = useCallback(async () => {
+  // ── 测试一个 ──
+  const testOne = useCallback(async (preset: Preset) => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     stopRef.current = false;
+    setErrMsg('');
+    try {
+      const score = await runPreset(preset);
+      setResults((rs) => [...rs, { presetName: preset.name, score, ts: Date.now() }]);
+      setLastScore({ s: score, name: preset.name });
+    } catch (e) {
+      setErrMsg(e instanceof Error ? e.message : String(e));
+      setPhase('idle');
+    } finally {
+      runningRef.current = false;
+    }
+  }, [runPreset]);
+
+  // ── 依次测全部 ──
+  const testAll = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    stopRef.current = false;
+    setErrMsg('');
     const ready = PRESETS.filter((p) => p.badge === '开箱即用');
-    setBusy(`准备依次测试 ${ready.length} 套方案…`);
     for (const p of ready) {
       if (stopRef.current) break;
       setSelected(p);
-      setBusy(`正在测试 ${p.name}…`);
       try {
-        const score = await runOne(p);
-        setResults((rs) => [...rs, { presetName: p.name, score }]);
+        const score = await runPreset(p);
+        setResults((rs) => [...rs, { presetName: p.name, score, ts: Date.now() }]);
       } catch (e) {
-        setBusy('测试中断: ' + String(e));
-        setLive((l) => ({ ...l, running: false }));
-        return;
+        setErrMsg(e instanceof Error ? e.message : String(e));
+        break;
       }
-      setLive((l) => ({ ...l, running: false }));
     }
-    setBusy('');
-  }, [runOne]);
+    runningRef.current = false;
+    setPhase('idle');
+  }, [runPreset]);
 
+  // ── 渲染 ──
+  const fpsData = stats.map((s) => s.fps);
+  const mbpsData = stats.map((s) => s.recv_mbps);
+  const lossData = stats.map((s) => s.loss_pct);
+  const progressPct = phase === 'testing' && testPreset
+    ? Math.min(100, (elapsed / (selected.params.duration_s || 10)) * 100)
+    : 0;
 
-  // 实时曲线数据（最近 120 个点）
-  const fpsData = live.stats.map((s) => s.fps);
-  const mbpsData = live.stats.map((s) => s.recv_mbps);
-  const lossData = live.stats.map((s) => s.loss_pct);
+  const ranked = [...results].sort((a, b) => b.score.total - a.score.total);
 
   return (
     <div className="plan-page">
+      {/* ── 标题 + 步骤指示 ── */}
       <div className="plan-head">
-        <h2>三步测出哪个方案适合你</h2>
-        <p className="hint">
-          第 1 步选场景 → 第 2 步点「测试这个方案」→ 第 3 步看分数。所有方案都在本机演示网络里跑，绿色=流畅。
-        </p>
-      </div>
-
-      <details className="basis">
-        <summary>这个测试是怎么进行的？（测试依据）</summary>
-        <div className="basis-body">
-          <p><b>真实的部分：</b>纠错编码、分片打包、丢帧恢复这些<b>模块代码是真实运行的</b>——同样的代码将来跑在真实连接里。</p>
-          <p><b>模拟的部分：</b>网络是参数化模拟的（延迟/丢包/限速由上方参数决定），所以分数用于<b>横向对比不同方案在同一网络下的表现</b>。</p>
-          <p><b>评分依据：</b>《Switchboard 规范》04 篇的锚点口径（流畅 40% + 送达 30% + 延迟 20% + 抗丢包 10%）。</p>
-          <p><b>边界：</b>模拟网络 ≠ 真实公网。要拿真实成绩，需要两台真机 + 部署中转（见下方部署指引），走实网 T3/T4 剖面。</p>
+        <h2>选择使用场景，一键测出哪个方案最适合你</h2>
+        <div className="steps-ind">
+          <span className={`step ${phase === 'idle' ? 'step-on' : ''}`}>① 选场景</span>
+          <span className="step-arrow">→</span>
+          <span className={`step ${phase === 'testing' ? 'step-on' : ''}`}>② 点测试</span>
+          <span className="step-arrow">→</span>
+          <span className={`step ${results.length > 0 ? 'step-on' : ''}`}>③ 看分数</span>
         </div>
-      </details>
-
-      {/* 第 1 步：方案卡片 */}
-      <div className="preset-grid">
-        {PRESETS.map((p) => (
-          <div
-            key={p.id}
-            className={`preset-card ${selected.id === p.id ? 'preset-on' : ''}`}
-            onClick={() => setSelected(p)}
-          >
-            <div className="preset-head">
-              <b>{p.name}</b>
-              <span className={p.badge === '开箱即用' ? 'badge badge-lc' : 'badge badge-warn'}>
-                {p.badge}
-              </span>
-            </div>
-            <div className="preset-scene">{p.scene}</div>
-            <div className="preset-chain">{p.chain.join(' → ')}</div>
-          </div>
-        ))}
       </div>
 
-      {/* 第 2 步：测试 */}
+      {/* ── 方案卡片 ── */}
+      <div className="preset-grid">
+        {PRESETS.map((p) => {
+          const best = ranked.find((r) => r.presetName === p.name);
+          return (
+            <div
+              key={p.id}
+              className={`preset-card ${selected.id === p.id ? 'preset-on' : ''}`}
+              onClick={() => setSelected(p)}
+            >
+              <div className="preset-head">
+                <b>{p.name}</b>
+                <span className={`badge ${p.badge === '开箱即用' ? 'badge-lc' : 'badge-warn'}`}>{p.badge}</span>
+              </div>
+              <div className="preset-scene">{p.scene}</div>
+              <div className="preset-chain">{p.chain.join(' → ')}</div>
+              {best && (
+                <div className="preset-score" style={{ color: scoreColor(best.score.total) }}>
+                  上次：{best.score.total.toFixed(0)} 分
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── 操作按钮 ── */}
       <div className="plan-actions">
-        <button className="btn" disabled={live.running} onClick={() => void testSelected()}>
+        <button className="btn btn-primary" disabled={phase === 'testing'} onClick={() => void testOne(selected)}>
           ▶ 测试「{selected.name.replace(/^方案 [A-D] · /, '')}」
         </button>
-        <button className="btn ghost" disabled={live.running} onClick={() => void testAll()}>
-          ▶ 依次测试全部（约 1 分钟）
+        <button className="btn btn-outline" disabled={phase === 'testing'} onClick={() => void testAll()}>
+          ▶ 依次测试全部
         </button>
-        {live.running && <button className="btn ghost" onClick={stop}>停止</button>}
-        {busy && <span className="hint">{busy}</span>}
+        {phase === 'testing' && (
+          <button className="btn btn-danger" onClick={doStop}>■ 停止</button>
+        )}
       </div>
 
-      {/* 实时区：曲线 + 事件 */}
-      {live.running && (
+      {/* ── 进度条 ── */}
+      {phase === 'testing' && (
+        <div className="test-progress">
+          <div className="test-progress-label">
+            正在测试 <b>{testPreset}</b>（{elapsed}s）
+          </div>
+          <div className="test-progress-bar">
+            <div className="test-progress-fill" style={{ width: `${progressPct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* ── 实时曲线 ── */}
+      {stats.length > 0 && (
         <div className="rt-charts">
           <Spark data={fpsData} color="#3fb950" label="画面流畅度" unit="帧/秒" />
           <Spark data={mbpsData} color="#58a6ff" label="占用网速" unit="Mbps" />
           <Spark data={lossData} color="#e5484d" label="丢帧比例" unit="%" />
         </div>
       )}
-      {live.running && (
+
+      {/* ── 事件流 ── */}
+      {events.length > 0 && (
         <div className="rt-events">
           <b>刚才发生了什么</b>
           <div className="rt-event-list">
-            {live.events.length === 0 && <span className="hint">网络正常时这里很安静</span>}
-            {live.events.map((e, i) => (
-              <div key={i} className="rt-event">{e}</div>
+            {events.map((e, i) => (
+              <div key={i} className="rt-event">{e.icon} {e.text}</div>
             ))}
           </div>
         </div>
       )}
 
-      {/* 第 3 步：分数排行榜 */}
+      {/* ── 最近评分卡 ── */}
+      {lastScore && phase !== 'testing' && (
+        <ScoreReveal s={lastScore.s} name={lastScore.name} />
+      )}
+
+      {/* ── 排行榜 ── */}
       {results.length > 0 && (
         <div className="results">
-          <h3>本轮测试排名（满分 100）</h3>
-          {[...results]
-            .sort((a, b) => b.score.total - a.score.total)
-            .map((r, i) => (
-              <div key={i} className="result-row">
-                <span className="rank">{i + 1}</span>
-                <span className="rname">{r.presetName}</span>
-                <div className="bar-track">
-                  <div className="bar-fill" style={{ width: `${r.score.total}%`, background: '#3fb950' }} />
-                  <span className="bar-val">{r.score.total.toFixed(0)} 分</span>
-                </div>
-                <button className="btn ghost" onClick={() => setDetail({ r })}>详情</button>
-              </div>
-            ))}
-        </div>
-      )}
-
-      {detail && (
-        <div className="modal-mask" onClick={() => setDetail(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{detail.r.presetName} 的评分明细</h3>
-            <ScoreCard s={detail.r.score} />
-            <div className="modal-actions">
-              <button className="btn ghost" onClick={() => setDetail(null)}>关闭</button>
-            </div>
+          <div className="results-head">
+            <h3>测试排名（满分 100）</h3>
+            <button className="btn-export" onClick={() => exportResults(results)}>
+              导出结果
+            </button>
           </div>
+          {ranked.map((r, i) => (
+            <div key={i} className="result-row">
+              <span className={`rank rank-${i + 1}`}>{i + 1}</span>
+              <span className="rname">{r.presetName}</span>
+              <div className="bar-track">
+                <div className="bar-fill" style={{ width: `${r.score.total}%`, background: scoreColor(r.score.total) }} />
+                <span className="bar-val">{r.score.total.toFixed(0)} 分</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* 部署指引：真实环境需要额外部署的说明 */}
+      {/* ── 错误 ── */}
+      {errMsg && (
+        <div className="err-banner">{errMsg}</div>
+      )}
+
+      {/* ── 测试依据 ── */}
+      <details className="basis">
+        <summary>这个测试是怎么进行的？（测试依据）</summary>
+        <div className="basis-body">
+          <p><b>真实的部分：</b>纠错编码、分片打包、丢帧恢复这些模块代码是真实运行的——同样的代码将来跑在真实连接里。</p>
+          <p><b>模拟的部分：</b>网络是参数化模拟的，分数用于横向对比不同方案在同一网络下的表现。</p>
+          <p><b>评分依据：</b>Switchboard 规范 04 篇（流畅 40% + 送达 30% + 延迟 20% + 抗丢包 10%）。</p>
+          <p><b>边界：</b>模拟 ≠ 真实公网。真实成绩需要两台真机 + 部署中转（见下方指引）。</p>
+        </div>
+      </details>
+
+      {/* ── 部署指引 ── */}
       <details className="deploy-guide">
         <summary>真实环境部署指引（中转服务器 / 穿墙打洞 / 组网）</summary>
         <div className="deploy-body">
-          {DEPLOY_ITEMS.map((d) => (
-            <div key={d.title} className="deploy-item">
-              <b>{d.title}</b>
-              <ol>
-                {d.steps.map((st, i) => (
-                  <li key={i}>{st}</li>
-                ))}
-              </ol>
+          {PRESETS.filter((p) => p.deploy).map((p) => (
+            <div key={p.id} className="deploy-item">
+              <b>{p.deploy!.title}</b>
+              <ol>{p.deploy!.steps.map((st, i) => <li key={i}>{st}</li>)}</ol>
             </div>
           ))}
         </div>
@@ -352,4 +356,25 @@ export default function RuntimeView() {
   );
 }
 
-// 供上方 JSX 使用的常量与工具（文件底部集中定义）
+// ── 导出结果 ──
+function exportResults(results: Result[]) {
+  const data = results.map((r) => ({
+    方案: r.presetName,
+    总分: r.score.total.toFixed(1),
+    流畅: r.score.smoothness.toFixed(1),
+    送达: r.score.delivery.toFixed(1),
+    延迟: r.score.latency.toFixed(1),
+    抗丢包: r.score.robustness.toFixed(1),
+    测试时间: new Date(r.ts).toLocaleString(),
+  }));
+  const csv = [
+    Object.keys(data[0]).join(','),
+    ...data.map((d) => Object.values(d).join(',')),
+  ].join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '方案测试结果.csv';
+  a.click();
+}
+
