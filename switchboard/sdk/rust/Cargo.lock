@@ -1274,12 +1274,14 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
+ "http-body-util",
  "serde",
  "serde_json",
  "switchboard-core",
  "switchboard-mod-fec-rs",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
 ]
 
