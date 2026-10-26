@@ -27,6 +27,7 @@ import {
 import { WindowGroupView } from "../session/WindowGroupView";
 import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
+import { FloatingToolbar } from "../session/FloatingToolbar";
 import { DEFAULT_TERM_SHELL, parseShell } from "../api/term";
 import type { FitMode } from "../api/session";
 import styles from "../session/Session.module.css";
@@ -229,6 +230,41 @@ export function Session({ deviceId }: { deviceId: string }) {
     };
   }, []);
 
+  // ── 工具栏操作（T-028） ──
+  async function doScreenshot() {
+    if (exportFnRef.current) {
+      const path = await exportFnRef.current();
+      console.log("screenshot saved:", path);
+    }
+  }
+  async function doFullscreen() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  }
+  async function doLockScreen() {
+    try { const m = await import("../api/input"); await m.textInput(deviceId, "__RD_LOCK__"); } catch {}
+  }
+  async function doCtrlAltDel() {
+    try { const m = await import("../api/input"); await m.textInput(deviceId, "__RD_CAD__"); } catch {}
+  }
+  async function doSendText(text: string) {
+    try { const m = await import("../api/input"); await m.textInput(deviceId, text); } catch {}
+  }
+  async function doSendCombo(keys: string[]) {
+    try {
+      const { keyEvent } = await import("../api/input");
+      const SCAN: Record<string, [number, boolean]> = {
+        Ctrl: [0x1D, false], Alt: [0x38, false], Shift: [0x2A, false],
+        Win: [0x5B, true], Enter: [0x1C, false], Escape: [0x01, false],
+        Tab: [0x0F, false], Backspace: [0x0E, false], Delete: [0xD3, true],
+        ArrowUp: [0xC8, true], ArrowDown: [0xD0, true],
+        ArrowLeft: [0xCB, true], ArrowRight: [0xCD, true],
+      };
+      for (const k of keys) { const sc = SCAN[k]; if (sc) await keyEvent(deviceId, sc[0], sc[1], true, 0); }
+      for (const k of [...keys].reverse()) { const sc = SCAN[k]; if (sc) await keyEvent(deviceId, sc[0], sc[1], false, 0); }
+    } catch {}
+  }
+
   return (
     <main className={styles.page}>
       <div className={styles.toolbar}>
@@ -349,15 +385,26 @@ export function Session({ deviceId }: { deviceId: string }) {
             />
           </div>
         ) : (
-          <WindowGroupView
-            key={activeTab.id}
-            deviceId={deviceId}
-            windowId={activeTab.id}
-            store={activeTab.store}
-            showHud={hudVisible}
-            exportFnRef={exportFnRef}
-            onRootGone={() => closeTab(activeTab.id)}
-          />
+          <div className={styles.stage} style={{ position: "relative" }}>
+            <FloatingToolbar
+              onScreenshot={() => void doScreenshot()}
+              onFullscreen={() => void doFullscreen()}
+              onLockScreen={() => void doLockScreen()}
+              onCtrlAltDel={() => void doCtrlAltDel()}
+              onQualityChange={(q) => console.log("quality:", q)}
+              onSendText={(text) => void doSendText(text)}
+              onSendCombo={(keys) => void doSendCombo(keys)}
+            />
+            <WindowGroupView
+              key={activeTab.id}
+              deviceId={deviceId}
+              windowId={activeTab.id}
+              store={activeTab.store}
+              showHud={hudVisible}
+              exportFnRef={exportFnRef}
+              onRootGone={() => closeTab(activeTab.id)}
+            />
+          </div>
         )}
       </div>
     </main>
