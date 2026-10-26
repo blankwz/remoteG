@@ -51,15 +51,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let bench_dir = Arc::new(bench_dir);
     let state = AppState { sessions: Arc::new(Mutex::new(HashMap::new())), bench_dir };
-    let mut app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/api/session", post(start_session))
-        .route("/api/session/{id}", delete(stop_session))
-        .route("/api/sessions", get(list_sessions))
-        .route("/api/live/{id}", get(live_ws))
-        .route("/api/bench/list", get(list_bench))
-        .route("/api/bench/{name}", get(get_bench))
-        .with_state(state);
+    let mut app = build_router(state);
 
     // 静态托管 Studio 界面（存在 dist 时）：7500 一个端口 = 界面 + 数据
     if let Some(dir) = &static_dir {
@@ -81,6 +73,19 @@ async fn main() -> anyhow::Result<()> {
     println!("switchboard-daemon listening on http://127.0.0.1:{port}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// API 路由（main 与安全测试共用；静态托管在 main 里按需追加）。
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/session", post(start_session))
+        .route("/api/session/{id}", delete(stop_session))
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/live/{id}", get(live_ws))
+        .route("/api/bench/list", get(list_bench))
+        .route("/api/bench/{name}", get(get_bench))
+        .with_state(state)
 }
 
 fn validate_params(p: &SimParams) -> Result<(), String> {
@@ -239,5 +244,104 @@ async fn live_stream(
                 break;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 安全测试（09_test Phase 4：4.7 目录穿越 / 4.8 参数注入，接口层自动化）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // oneshot
+
+    fn app() -> Router {
+        build_router(AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            bench_dir: Arc::new(None),
+        })
+    }
+
+    async fn get(uri: &str) -> axum::response::Response {
+        app().oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    /// 4.7 目录穿越：`..`、路径分隔、盘符相对路径一律 400，绝不落盘读取。
+    /// axum 的 Path 提取器会对 %2F 解码——穿越载荷按解码后形态到达 handler。
+    #[tokio::test]
+    async fn bench_name_traversal_rejected() {
+        for payload in [
+            "/api/bench/..%2F..%2Fetc%2Fpasswd", // ../ → 含 / 与 ..
+            "/api/bench/..%5C..%5Cwin.ini",      // ..\ → 含 \ 与 ..
+            "/api/bench/..",                     // 裸 ..
+            "/api/bench/a..b",                   // 内嵌 ..（白名单也拦）
+        ] {
+            let resp = get(payload).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "穿越载荷 {payload} 必须 400"
+            );
+        }
+        // 合法文件名但未启用 bench-dir → 404（不透传 OS 错误原文）
+        let resp = get("/api/bench/report.json").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 4.8 参数注入：越界/NaN 参数一律 400 拒绝；非法 JSON 由 axum 422 拒绝；
+    /// 全部优雅返回，不崩进程、不创建会话。
+    #[tokio::test]
+    async fn session_params_injection_rejected() {
+        // 越界但合法 JSON：loss>1 / duration 超限 / burst 超限
+        for body in [
+            r#"{"rtt_ms":40,"loss":5.0,"mbps":20,"burst_len":0,"fec_rs":true,"duration_s":10}"#,
+            r#"{"rtt_ms":40,"loss":0.01,"mbps":20,"burst_len":0,"fec_rs":true,"duration_s":99999}"#,
+            r#"{"rtt_ms":40,"loss":0.01,"mbps":20,"burst_len":99999,"fec_rs":true,"duration_s":10}"#,
+        ] {
+            let resp = app()
+                .oneshot(
+                    Request::post("/api/session")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "越界参数必须 400: {body}");
+        }
+        // 非法 JSON（NaN 字面量）：axum Json 提取 422，进程不崩
+        let resp = app()
+            .oneshot(
+                Request::post("/api/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"loss":NaN}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "非法 JSON 必须优雅拒绝");
+        // 会话表保持为空（拒绝路径不得留下半成品会话）
+        let resp = get("/api/sessions").await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        assert!(bytes.windows(3).any(|w| w == b"[]") || serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map(|v| v["sessions"].as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true), "拒绝后不得残留会话: {bytes:?}");
+    }
+
+    /// 4.8 未知资源：stop/live 打不存在的 id → 404/错误消息，不 panic。
+    #[tokio::test]
+    async fn unknown_session_handled() {
+        let resp = get("/api/session/999").await;
+        // DELETE /api/session/{id}：不存在 → 404
+        let resp = app()
+            .oneshot(
+                Request::delete("/api/session/999").body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

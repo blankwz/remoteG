@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use rd_proto::v0::{envelope, Envelope, Hello, PairRequest, PairResult};
+use rd_proto::v0::{envelope, Envelope, Hello, HelloAck, PairRequest, PairResult};
 use rd_security::{ControllerPairing, PairStep};
 use rd_transport::{
     connect, Conn, ControlRx, ControlTx, DataFrame, DataRx, Fingerprint, Identity, StreamKind,
@@ -75,6 +75,7 @@ fn setup_env() -> Result<Env> {
     kill_orphans();
     ensure_testwin_built()?;
     let config_dir = tempfile::tempdir().context("创建 Agent 临时配置目录失败")?;
+    println!("[e2e] agent 日志目录: {}", config_dir.path().join("logs").display());
     let testwin = spawn_testwin()?;
     let testwin_pid = testwin.child.id();
     // 按子进程 PID 锁定自己的 testwin——桌面上可能有历史遗留的同名窗口。
@@ -271,7 +272,7 @@ fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", std::env::var("RD_AGENT_RUST_LOG").unwrap_or_else(|_| "info".into()))
         .spawn()
         .context("启动 rd-agent 子进程失败")?;
     let stdout = child.stdout.take().context("未捕获 rd-agent stdout")?;
@@ -320,21 +321,28 @@ pub struct Client {
     pub conn: Conn,
     pub tx: ControlTx,
     pub rx: ControlRx,
+    /// Agent 的 HelloAck（协商结果、主机名、版本；t09 消费 media_fec 位）。
+    pub hello_ack: HelloAck,
     next_req: u32,
 }
 
 impl Client {
     /// 建立连接并完成 Hello 握手；首次调用附带 4 步配对。
     pub async fn connect() -> Result<Self> {
+        Self::connect_with(false).await
+    }
+
+    /// 同 [`connect`]，但可指定 fec-shards 视频路径协商位（T-027/T-028 t09）。
+    pub async fn connect_with(media_fec: bool) -> Result<Self> {
         let env = env();
         let conn = connect(env.addr, client_identity(), None)
             .await
             .context("连接 Agent 失败")?;
         let agent_fp = conn.peer_fingerprint();
         let (mut tx, mut rx) = conn.open_control().await.context("打开控制流失败")?;
-        tx.send(&hello_envelope()).await?;
-        if PAIRED.swap(true, Ordering::SeqCst) {
-            expect_hello_ack(&mut rx).await?;
+        tx.send(&hello_envelope(media_fec)).await?;
+        let hello_ack = if PAIRED.swap(true, Ordering::SeqCst) {
+            expect_hello_ack(&mut rx).await?
         } else {
             // 未信任:Agent 对 Hello 回 Error{1}(req_id 沿用),消费后再发起配对
             let rejected = tokio::time::timeout(RECV_TIMEOUT, rx.recv())
@@ -347,12 +355,13 @@ impl Client {
                 "配对前期望 Error{{code:1}},实际 {rejected:?}"
             );
             pair_over(&mut tx, &mut rx, agent_fp).await?;
-            expect_hello_ack(&mut rx).await?;
-        }
+            expect_hello_ack(&mut rx).await?
+        };
         Ok(Self {
             conn,
             tx,
             rx,
+            hello_ack,
             next_req: 1,
         })
     }
@@ -411,7 +420,7 @@ impl Client {
     }
 }
 
-fn hello_envelope() -> Envelope {
+fn hello_envelope(media_fec: bool) -> Envelope {
     Envelope {
         req_id: 1,
         msg: Some(envelope::Msg::Hello(Hello {
@@ -419,7 +428,7 @@ fn hello_envelope() -> Envelope {
             device_name: "rd-e2e-client".to_string(),
             decode_caps: Vec::new(),
             supports_444: false,
-            media_fec: false,
+            media_fec,
         })),
     }
 }
@@ -478,14 +487,14 @@ async fn recv_pair_result(rx: &mut ControlRx) -> Result<PairResult> {
     }
 }
 
-async fn expect_hello_ack(rx: &mut ControlRx) -> Result<()> {
+async fn expect_hello_ack(rx: &mut ControlRx) -> Result<HelloAck> {
     let ack = tokio::time::timeout(RECV_TIMEOUT, rx.recv())
         .await
         .context("等待 HelloAck 超时")?
         .context("控制流已关闭")?
         .context("解码信封失败")?;
     match ack.msg {
-        Some(envelope::Msg::HelloAck(_)) => Ok(()),
+        Some(envelope::Msg::HelloAck(a)) => Ok(a),
         Some(other) => bail!("受信任连接应直接 HelloAck，实际 {other:?}"),
         None => bail!("收到空信封"),
     }
@@ -577,6 +586,39 @@ pub async fn open_window(c: &mut Client, hwnd: u64) -> Result<WindowStreams> {
         "第二条数据流应为瓦片，实际 {kind2:?}"
     );
     Ok(WindowStreams { ack, video, tile })
+}
+
+/// fec 模式开窗（t09）：视频走 datagram 分片，不建视频流——只收瓦片流，
+/// ack 的 `video_stream_id` 为哨兵 `u32::MAX`。
+pub async fn open_window_fec(
+    c: &mut Client,
+    hwnd: u64,
+) -> Result<(rd_proto::v0::OpenWindowAck, DataRx)> {
+    let reply = c
+        .call(envelope::Msg::OpenWindow(rd_proto::v0::OpenWindow {
+            window_id: hwnd,
+            fit: rd_proto::v0::FitMode::Fit as i32,
+            max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
+            max_fps: 30,
+            view_only: false,
+        }))
+        .await?;
+    let ack = match reply.msg {
+        Some(envelope::Msg::OpenWindowAck(ack)) => ack,
+        Some(other) => bail!("期望 OpenWindowAck，实际 {other:?}"),
+        None => bail!("收到空信封"),
+    };
+    anyhow::ensure!(
+        ack.video_stream_id == u32::MAX,
+        "fec 模式 ack.video_stream_id 应为哨兵 u32::MAX，实际 {}",
+        ack.video_stream_id
+    );
+    let (kind, _, tile) = c.conn.accept_data().await?;
+    anyhow::ensure!(
+        kind == StreamKind::Tile,
+        "fec 模式唯一数据流应为瓦片，实际 {kind:?}"
+    );
+    Ok((ack, tile))
 }
 
 /// 从视频流收下一个属于 `window_id` 的帧（Annex-B AU）。

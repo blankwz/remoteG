@@ -547,7 +547,9 @@ async fn finish_pairing(
     crate::audit::log("pair_success", &hello.device_name, &peer_fp.short_hex(), serde_json::json!({}));
     // HelloAck 尽力发送:对端配对成功后可能立即断开重连
     // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
-    let _ = ctl_tx.send(&hello_ack(0, false)).await; // 配对期 ack 不协商 fec
+    // 配对期 ack 同样回带协商位：会话上下文以 hello.media_fec 生效，ack 若
+    // 撒谎 false，控制端会按非 fec 路径解码而收不到视频流（两端认知分裂）
+    let _ = ctl_tx.send(&hello_ack(0, hello.media_fec)).await;
     Ok(())
 }
 

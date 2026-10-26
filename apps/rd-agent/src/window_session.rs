@@ -1805,6 +1805,15 @@ async fn video_send_task(
                                     data: switchboard_core::Bytes::from(payload),
                                 })
                                 .await
+                                .map(|qd| {
+                                    tracing::debug!(
+                                        window = format!("{window_id:#x}"),
+                                        fid,
+                                        bytes = n,
+                                        "fec 帧已提交(切块发送)"
+                                    );
+                                    qd
+                                })
                                 .map(|_| ())
                                 .map_err(|e| anyhow::anyhow!("fec submit: {e}"))
                         }

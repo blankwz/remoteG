@@ -693,3 +693,119 @@ async fn t08_terminal_echo() -> Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// t09 fec-shards 视频路径（T-027/T-028：协商 + 分片真到达 + 重组出帧）
+// ---------------------------------------------------------------------------
+
+/// fec wire 头（switchboard-mod-fec-rs，big-endian）：
+/// `frame_id:u32 | orig_len:u32 | shard_size:u16 | k:u16 | idx:u16 | m:u8 | pidx:u8 | type:u8`
+const FEC_HEADER: usize = 17;
+const FEC_TYPE_DATA: u8 = 0;
+
+#[derive(Clone)]
+struct FecShard {
+    frame_id: u32,
+    orig_len: u32,
+    shard_size: u16,
+    k: u16,
+    idx: u16,
+    data: Vec<u8>,
+}
+
+fn parse_fec_shard(pkt: &[u8]) -> Option<FecShard> {
+    if pkt.len() < FEC_HEADER {
+        return None;
+    }
+    let ty = pkt[16];
+    if ty != FEC_TYPE_DATA {
+        return None; // 校验片对重组非必需（环回无丢片）
+    }
+    Some(FecShard {
+        frame_id: u32::from_be_bytes(pkt[0..4].try_into().ok()?),
+        orig_len: u32::from_be_bytes(pkt[4..8].try_into().ok()?),
+        shard_size: u16::from_be_bytes(pkt[8..10].try_into().ok()?),
+        k: u16::from_be_bytes(pkt[10..12].try_into().ok()?),
+        idx: u16::from_be_bytes(pkt[12..14].try_into().ok()?),
+        data: pkt[FEC_HEADER..].to_vec(),
+    })
+}
+
+/// Hello 带 `media_fec=true` → ack 确认 → 开窗无视频流（哨兵流 id）→
+/// datagram 分片到达 → 攒齐 k 个数据片按偏移重组 → 解出 keyframe AU。
+/// 帧级 RS 重建由 switchboard-mod-fec-rs 单测覆盖；本用例验证 rd 全链路
+/// （协商位贯穿、路径建立、分片真正经 QUIC datagram 面到达控制端）。
+#[tokio::test(flavor = "multi_thread")]
+async fn t09_media_fec_video_datagrams() -> Result<()> {
+    let _guard = common::serial_lock().await;
+    let env = common::env();
+    if skip_if_no_wgc() {
+        return Ok(());
+    }
+    let mut c = Client::connect_with(true).await?;
+    // 协商位经 HelloAck 回带（配对路径也必须如实回带——两端认知一致）
+    anyhow::ensure!(
+        c.hello_ack.media_fec,
+        "HelloAck.media_fec 应为 true（协商位 echo），实际 false"
+    );
+
+    let (ack, _tile) = common::open_window_fec(&mut c, env.hwnd).await?;
+    anyhow::ensure!(
+        ack.codec == rd_proto::v0::Codec::H264420 as i32,
+        "fec 模式 ack.codec 应为 H264_420，实际 {}",
+        ack.codec
+    );
+
+    // 攒 frame 0（next_fid 从 0 起）的数据片；总预算 30s（套件内 t09 排最后，
+    // MFT 反复创建使首帧冷启动显著慢于隔离运行；同 t02 只保证到达不断言时序）
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut shards: Vec<Option<FecShard>> = Vec::new();
+    let (mut k_total, mut orig_len, mut shard_size) = (0u16, 0u32, 0u16);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !left.is_zero(),
+            "15s 内未攒齐 fec 数据片（已收 {} 片）",
+            shards.iter().filter(|s| s.is_some()).count()
+        );
+        let pkt = tokio::time::timeout(left, c.conn.read_datagram())
+            .await
+            .context("等待 fec datagram 超时")?
+            .context("读取 datagram 失败")?;
+        let Some(s) = parse_fec_shard(&pkt) else { continue };
+        if s.frame_id != 0 {
+            continue; // 只重组首帧（IDR）
+        }
+        if k_total == 0 {
+            k_total = s.k;
+            orig_len = s.orig_len;
+            shard_size = s.shard_size;
+            shards.resize_with(k_total as usize, || None);
+        }
+        let i = s.idx as usize;
+        anyhow::ensure!(i < k_total as usize, "数据片 idx {i} 越界（k={k_total}）");
+        shards[i] = Some(s);
+        if shards.iter().all(|s| s.is_some()) {
+            break;
+        }
+    }
+
+    // 环回无丢片：k 个数据片按 idx 偏移直接拼接即原 payload（无需 RS 重建）
+    let mut frame = vec![0u8; orig_len as usize];
+    for (i, s) in shards.iter().enumerate() {
+        let s = s.as_ref().context("片缺失")?;
+        let base = i * shard_size as usize;
+        let n = (base + shard_size as usize).min(orig_len as usize) - base;
+        frame[base..base + n].copy_from_slice(&s.data[..n]);
+    }
+    let (header, _au_len) = rd_transport::framing::decode_video_header(&frame)
+        .map(|(h, _)| (h, ()))
+        .context("fec 重组帧的 VideoHeader 解析失败")?;
+    anyhow::ensure!(header.window_id == env.hwnd, "重组帧 window_id 不符");
+    anyhow::ensure!(header.keyframe, "fec 首帧必须是 IDR keyframe");
+    println!(
+        "t09 ok: fec-shards 协商+分片到达+重组，首帧 {} 字节 keyframe（k={k_total} 片）",
+        orig_len
+    );
+    Ok(())
+}
