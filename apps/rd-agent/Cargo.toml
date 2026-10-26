@@ -30,6 +30,7 @@ switchboard-core = { path = "../../switchboard/sdk/rust/switchboard-core" }
 switchboard-mod-fec-rs = { path = "../../switchboard/sdk/rust/switchboard-mod-fec-rs" }
 rd-window-win = { path = "../../crates/rd-window-win" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"
 toml = "0.8"

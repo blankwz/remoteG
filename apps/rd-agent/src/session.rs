@@ -19,7 +19,7 @@
 //!   前就完成信任列表写入,因此控制端断开重连即直接 `HelloAck`。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -47,6 +47,8 @@ const ERR_UNAUTHENTICATED: u32 = 1;
 const ERR_TERMINAL_DISABLED: u32 = 30;
 /// 协议错误码 50:剪贴板操作失败(05_api §4,v0.1 追加)。
 const ERR_CLIPBOARD: u32 = 50;
+/// 协议错误码 70:免费版权益限制(T-029 商业化门控;升级 Pro 解除)。
+const ERR_LICENSE_LIMIT: u32 = 70;
 /// 连接确认等待时长:超时未确认视为拒绝。
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -141,6 +143,9 @@ pub struct AgentState {
     pub identity: Identity,
     pub local_fp: Fingerprint,
     pub trust: Mutex<rd_security::TrustStore>,
+    /// 授权状态（`None` = 免费版；`license.key` 验签通过才有值）。
+    /// 免费版门控：并发连接 1、信任设备 2（见 rd-security license 常量）。
+    pub license: Option<rd_security::License>,
     pub pairing: Mutex<AgentPairing>,
     pub terms: TermManager,
     pub injector: Mutex<Injector>,
@@ -176,11 +181,16 @@ pub struct SessionCtx {
     /// Arc 包装:PeerInfo(托盘推 SessionState)共享同一发送端。
     pub ctl: Arc<tokio::sync::Mutex<ControlTx>>,
     pub peer_name: String,
+    /// 对端指纹短码（审计埋点的真实身份锚点；name 可伪造、fp 不可）。
+    pub peer_fp: String,
     /// 对端 `Hello`(含 decode_caps,供 T-016 编码选路)。
     #[allow(dead_code)]
     pub hello: Hello,
     /// T-027：视频是否走 fec-shards（Hello 协商 + 被控端开关）
     pub media_fec: bool,
+    /// T-028 F5：控制端手动画质档位（`QualityPreset` as i32，默认 AUTO）。
+    /// 非 AUTO 时会话码率自适应停用，`apply_rate` 直接按档位下发。
+    pub user_quality: Arc<AtomicU32>,
     /// 窗口子会话(T-016 实现;桩阶段无读者)。
     #[allow(dead_code)]
     pub windows: WindowSessions,
@@ -254,6 +264,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     // debug 构建默认关(e2e),生产默认开。
     if state.config.confirm_connection && !confirm_connection(&hello.device_name, &peer_fp).await {
         tracing::info!(peer = peer_fp.short_hex(), "对方未确认控制请求,断开");
+        crate::audit::log("confirm_denied", &hello.device_name, &peer_fp.short_hex(), serde_json::json!({}));
         return Ok(());
     }
 
@@ -266,6 +277,31 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
     let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
     let cancel = CancellationToken::new();
+
+    // 免费版门控 1/2:并发控制端连接数(T-029;Pro 不限)。在注册与任何
+    // 能力授予前拒绝,提示大白话 + 升级路径。
+    let is_pro = state
+        .license
+        .as_ref()
+        .is_some_and(|l| l.plan == rd_security::Plan::Pro);
+    if !is_pro && state.peers.lock().expect("peers 锁中毒").len() >= rd_security::license::FREE_CONN_MAX {
+        tracing::info!(peer = peer_fp.short_hex(), "免费版并发连接已达上限,拒绝");
+        crate::audit::log(
+            "license_reject_conn",
+            &hello.device_name,
+            &peer_fp.short_hex(),
+            serde_json::json!({}),
+        );
+        ctl_tx
+            .send(&error_env(
+                0,
+                ERR_LICENSE_LIMIT,
+                "免费版同一时间只能 1 台电脑连接。请在被控端放入授权码升级(托盘→授权)。",
+            ))
+            .await?;
+        return Ok(());
+    }
+
     // 控制流发送端 Arc:SessionCtx(分发回包)与 PeerInfo(托盘推 SessionState)共享
     let ctl_shared = Arc::new(tokio::sync::Mutex::new(ctl_tx));
 
@@ -278,8 +314,10 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         conn: Arc::new(conn),
         ctl: Arc::clone(&ctl_shared),
         peer_name: hello.device_name.clone(),
+        peer_fp: peer_fp.short_hex().to_string(),
         hello,
         media_fec,
+        user_quality: Arc::new(AtomicU32::new(0)),
         windows: WindowSessions,
         terms: TermAttachments,
     });
@@ -301,6 +339,14 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     spawn_datagram_loop(&ctx);
 
     tracing::info!(peer = peer_fp.short_hex(), name = %ctx.peer_name, "会话进入已鉴权状态");
+    // 审计（合规留痕）：会话开始。media_fec 单列，画质档位变化另有事件。
+    crate::audit::log(
+        "session_start",
+        &ctx.peer_name,
+        &ctx.peer_fp,
+        serde_json::json!({ "conn": conn_id, "media_fec": media_fec }),
+    );
+    let started_at = SystemTime::now();
     let dispatch_result = dispatch_loop(&ctx, &mut ctl_rx).await;
 
     // --- 断开清理(任务卡步骤 5)---
@@ -310,6 +356,15 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     term_handler::on_disconnect(&ctx);
     if let Some(peer) = state.peers.lock().expect("peers 锁中毒").remove(&conn_id) {
         peer.cancel.cancel();
+    }
+    {
+        let secs = started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+        crate::audit::log(
+            "session_end",
+            &ctx.peer_name,
+            &peer_fp.short_hex(),
+            serde_json::json!({ "conn": conn_id, "duration_s": secs }),
+        );
     }
     tracing::info!(peer = peer_fp.short_hex(), "连接断开");
 
@@ -442,12 +497,45 @@ async fn finish_pairing(
     hello: &Hello,
     peer_fp: Fingerprint,
 ) -> anyhow::Result<()> {
+    // 免费版门控 2/2:受信任设备数上限(T-029;Pro 不限)。配对码已验证
+    // 正确仍在此时拦下——码是当场授权,门控是长期权益,两回事。
+    let is_pro = state
+        .license
+        .as_ref()
+        .is_some_and(|l| l.plan == rd_security::Plan::Pro);
+    if !is_pro {
+        let count = lock_trust(state).list().len();
+        if count >= rd_security::license::FREE_DEVICE_MAX as usize {
+            tracing::info!(peer = peer_fp.short_hex(), count, "免费版信任设备已达上限,拒绝配对");
+            crate::audit::log(
+                "license_reject_pair",
+                &hello.device_name,
+                &peer_fp.short_hex(),
+                serde_json::json!({ "trusted": count }),
+            );
+            ctl_tx
+                .send(&Envelope {
+                    req_id: 0,
+                    msg: Some(envelope::Msg::PairRes(PairResult {
+                        ok: false,
+                        spake2_msg: Vec::new(),
+                        reason: format!(
+                            "免费版最多记住 {} 台电脑。删除不再用的设备(托盘→信任设备),或放入授权码升级。",
+                            rd_security::FREE_DEVICE_MAX
+                        ),
+                    })),
+                })
+                .await?;
+            return Ok(());
+        }
+    }
     {
         lock_trust(state)
             .add(peer_fp, &hello.device_name)
             .context("配对成功但写入信任列表失败")?;
     }
     tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已加入信任列表");
+    crate::audit::log("pair_success", &hello.device_name, &peer_fp.short_hex(), serde_json::json!({}));
     // HelloAck 尽力发送:对端配对成功后可能立即断开重连
     // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
     let _ = ctl_tx.send(&hello_ack(0, false)).await; // 配对期 ack 不协商 fec
@@ -475,6 +563,11 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
             envelope::Msg::Viewport(m) => handle_soft(
                 &ctx.peer_name,
                 window_session::handle(ctx, env.req_id, WindowMsg::Viewport(m)),
+            ),
+            // 画质档位（T-028 F5）：请求-应答（echo），失败回 Error{60}
+            envelope::Msg::SetQuality(m) => handle_soft(
+                &ctx.peer_name,
+                window_session::set_quality(ctx, env.req_id, m).await,
             ),
             // 输入 → T-017;UIPI 拦截(管理员窗口)按 30s 去抖回一次性 Error
             envelope::Msg::Key(m) => {
@@ -563,6 +656,13 @@ async fn handle_clipboard(ctx: &SessionCtx, req_id: u32, m: ClipboardData) -> an
         let chars = m.text.chars().count();
         let ok = crate::clipboard::write_text(&m.text);
         tracing::info!(name = %ctx.peer_name, ok, chars, "写入本机剪贴板");
+        // 审计：只记方向与字符数，内容绝不落痕
+        crate::audit::log(
+            "clipboard_write",
+            &ctx.peer_name,
+            &ctx.peer_fp,
+            serde_json::json!({ "chars": chars, "ok": ok }),
+        );
         if !ok {
             ctx.send(
                 envelope::Msg::Error(error_msg(ERR_CLIPBOARD, "写入被控端剪贴板失败")),
@@ -574,6 +674,12 @@ async fn handle_clipboard(ctx: &SessionCtx, req_id: u32, m: ClipboardData) -> an
     } else {
         let text = crate::clipboard::read_text().unwrap_or_default();
         tracing::info!(name = %ctx.peer_name, chars = text.chars().count(), "回读本机剪贴板");
+        crate::audit::log(
+            "clipboard_read",
+            &ctx.peer_name,
+            &ctx.peer_fp,
+            serde_json::json!({ "chars": text.chars().count() }),
+        );
         ctx.send(
             envelope::Msg::Clipboard(ClipboardData { write: false, text }),
             req_id,

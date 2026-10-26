@@ -7,6 +7,7 @@
 //! - 日志初始化（lib 不抢；
 //! - 驻留与退出（UI 事件循环 / Ctrl+C）。
 
+pub mod audit;
 pub mod clipboard;
 pub mod config;
 pub mod discover;
@@ -91,6 +92,8 @@ pub fn start(
     let config = config::Config::load(config_dir)?;
     // 本机优先检测（D-013 包5）：幂等（线程已起则空转）
     host_activity::init();
+    // 操作审计（合规留痕）：与 tracing 日志同目录，audit.jsonl
+    audit::init(&config_dir.join("logs"));
 
     let identity = rd_security::load_or_create_identity(config_dir, "rd-agent")
         .context("加载/生成本机身份失败")?;
@@ -98,12 +101,15 @@ pub fn start(
     tracing::info!(fingerprint = local_fp.short_hex(), "本机指纹(前 8 字节)");
     let trust =
         TrustStore::open(config_dir.join("trusted.json").as_path()).context("打开信任列表失败")?;
+    // 授权（T-029）：license.key 验签通过 = Pro；缺失/无效一律免费版，不阻断服务
+    let license = rd_security::load_license(config_dir);
 
     let state = Arc::new(AgentState {
         config: config.clone(),
         identity,
         local_fp,
         trust: Mutex::new(trust),
+        license,
         pairing: Mutex::new(rd_security::AgentPairing::new()),
         terms: rd_term::TermManager::new(TERM_IDLE_TIMEOUT),
         injector: Mutex::new(input_handler::Injector::new()),

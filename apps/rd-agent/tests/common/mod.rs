@@ -243,6 +243,20 @@ fn wait_testwin_window(pid: u32) -> Result<u64> {
 
 /// 启动 `rd-agent run`（随机端口）并从 stdout 读取实际监听地址（同 tests/auth.rs）。
 fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
+    // 写入 Pro 授权（T-029 免费版门控的 e2e 放行）：并行用例共享同一
+    // agent 进程，免费版「同时 1 连接」会把并行的第二条连接拒掉。顺带
+    // 覆盖 license.key 的加载路径（无效码回落免费版的行为由单测覆盖）。
+    let license_code = rd_security::license::sign_payload(
+        &serde_json::json!({
+            "plan": "pro", "name": "e2e", "devices_max": 99,
+            "expires": null, "issued": 0u64
+        })
+        .to_string(),
+        &rd_security::license::dev_seed_hex(),
+    )?;
+    std::fs::write(config_dir.join("license.key"), license_code)
+        .context("写入 e2e 授权文件失败")?;
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_rd-agent"))
         .args([
             "run",

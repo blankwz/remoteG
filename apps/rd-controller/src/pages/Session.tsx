@@ -264,6 +264,17 @@ export function Session({ deviceId }: { deviceId: string }) {
       for (const k of [...keys].reverse()) { const sc = SCAN[k]; if (sc) await keyEvent(deviceId, sc[0], sc[1], false, 0); }
     } catch {}
   }
+  /** 画质档位（T-028 F5）：会话内全部窗口生效，成功/失败都提示。 */
+  async function doQuality(preset: "auto" | "high" | "medium" | "low") {
+    try {
+      const { setQuality } = await import("../api/session");
+      await setQuality(deviceId, preset);
+      const label = { auto: "自动", high: "高清", medium: "均衡", low: "流畅" }[preset];
+      showToast(`画质已切换：${label}`, false);
+    } catch (e) {
+      showToast(`切换画质失败：${String(e)}`, true);
+    }
+  }
 
   return (
     <main className={styles.page}>
@@ -391,7 +402,7 @@ export function Session({ deviceId }: { deviceId: string }) {
               onFullscreen={() => void doFullscreen()}
               onLockScreen={() => void doLockScreen()}
               onCtrlAltDel={() => void doCtrlAltDel()}
-              onQualityChange={(q) => console.log("quality:", q)}
+              onQualityChange={(q) => void doQuality(q)}
               onSendText={(text) => void doSendText(text)}
               onSendCombo={(keys) => void doSendCombo(keys)}
             />

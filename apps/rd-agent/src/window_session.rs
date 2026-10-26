@@ -65,13 +65,13 @@ use rd_proto::v0::envelope::Msg;
 use rd_proto::v0::window_event::Kind;
 use rd_proto::v0::{
     session_state, CloseWindow, Codec, Error, FitMode, ListWindows, OpenWindow, OpenWindowAck,
-    RenderLevel, SessionState, StatsReport, ViewportInfo, WindowEvent, WindowInfo, WindowList,
+    QualityPreset, RenderLevel, SessionState, SetQuality, StatsReport, ViewportInfo, WindowEvent,
+    WindowInfo, WindowList,
 };
 use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
-use rd_switch::RdChannel;
 use rd_transport::framing::encode_video_header;
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
-use switchboard_core::stages::{EncodedFrame, FrameSink, MediaAdapt};
+use switchboard_core::stages::{FrameSink, MediaAdapt};
 use rd_window_win::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
 use rd_window_win::resize::{fit_window, restore_placement, save_placement, target_client_size};
 use rd_window_win::resize::{FitResult, SavedPlacement};
@@ -88,6 +88,14 @@ const ERR_NO_WINDOW: u32 = 10;
 const ERR_NOT_CAPTURABLE: u32 = 11;
 /// 协议错误码 12：无法调整尺寸（已退化为 SCALE；05_api §4，非致命）。
 const ERR_FIT_DEGRADED: u32 = 12;
+/// 协议错误码 60：画质档位无效（T-028 F5）。
+const ERR_QUALITY: u32 = 60;
+
+/// 手动画质档位的目标码率（kbps；下标 = `QualityPreset`，AUTO 不使用）。
+/// 上限仍受会话 `cfg` 约束见 `set_quality`——档位只升到配置允许的范围。
+const PRESET_KBPS: [u32; 4] = [0, 20_000, 8_000, 2_000];
+/// 手动画质档位的帧率上限（fps；同上）。
+const PRESET_FPS: [u32; 4] = [0, 60, 30, 15];
 /// 同一窗口视口上报的去抖间隔（任务卡步骤 6）。
 const VIEWPORT_DEBOUNCE: Duration = Duration::from_millis(150);
 /// 瓦片 tick 周期（任务卡步骤 4）。
@@ -308,8 +316,26 @@ impl WindowSessions {
 pub fn handle(ctx: &SessionCtx, req_id: u32, msg: WindowMsg) -> anyhow::Result<()> {
     match msg {
         WindowMsg::List(_) => handle_list(ctx, req_id),
-        WindowMsg::Open(m) => handle_open(ctx, req_id, m),
-        WindowMsg::Close(m) => handle_close(m),
+        WindowMsg::Open(m) => {
+            // 审计（合规留痕）：远端打开窗口的画面即开始被观看——先记后做，
+            // 失败（不可捕获）会话里有 Error 上报，审计侧不回滚（痕迹宁多勿缺）
+            crate::audit::log(
+                "window_open",
+                &ctx.peer_name,
+                &ctx.peer_fp,
+                serde_json::json!({ "window": format!("{:#x}", m.window_id) }),
+            );
+            handle_open(ctx, req_id, m)
+        }
+        WindowMsg::Close(m) => {
+            crate::audit::log(
+                "window_close",
+                &ctx.peer_name,
+                &ctx.peer_fp,
+                serde_json::json!({ "window": format!("{:#x}", m.window_id) }),
+            );
+            handle_close(m)
+        }
         WindowMsg::Viewport(m) => handle_viewport(ctx, m),
     }
 }
@@ -676,13 +702,22 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
 
     let cfg = &ctx.state.config;
     // max_fps = min(请求, 配置)；请求 0 视为未指定，用配置默认
-    let fps = if open.max_fps == 0 {
+    let mut fps = if open.max_fps == 0 {
         cfg.max_fps
     } else {
         open.max_fps.min(cfg.max_fps)
     }
     .max(1);
-    let kbps = cfg.start_kbps.max(1);
+    let mut kbps = cfg.start_kbps.max(1);
+    // 会话已有手动档位时（T-028 F5），新窗口直接按档位起步（否则首个
+    // rate tick 前的 ~200 ms 会以配置默认值全速发送）
+    if let Ok(p) = QualityPreset::try_from(ctx.user_quality.load(Ordering::Relaxed) as i32) {
+        if p != QualityPreset::Auto {
+            let i = p as usize;
+            kbps = PRESET_KBPS[i].max(1);
+            fps = fps.min(PRESET_FPS[i].max(1)).max(1);
+        }
+    }
     let refine = cfg.refine_enabled;
 
     // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
@@ -1079,6 +1114,90 @@ async fn send_error(
     let message = message.into();
     tracing::info!(code, %message, "回错误消息");
     ctx.send(Msg::Error(Error { code, message }), req_id).await
+}
+
+// ---------------------------------------------------------------------------
+// 画质档位（T-028 F5）
+// ---------------------------------------------------------------------------
+
+/// `SetQuality` 处理（请求-应答）：校验档位 → 记入会话 → 立即落到本会话
+/// 全部管线（`window_id` 限定单窗口时只落该窗口）。成功原样 echo。
+///
+/// 生效语义：
+/// - 非 AUTO：会话码率自适应停用（[`apply_rate`] 读到档位后按固定预算
+///   下发），直到控制端改回 AUTO——固定期间网络劣化不再自动降码率，
+///   由帧率上限与 QUIC 拥塞控制兜底；
+/// - AUTO：立即恢复自适应——下个 200 ms rate tick 由 [`RateController`]
+///   接管（EWMA 基线重新收敛，无需复位）。
+pub async fn set_quality(ctx: &SessionCtx, req_id: u32, m: SetQuality) -> anyhow::Result<()> {
+    let Ok(preset) = QualityPreset::try_from(m.preset) else {
+        return send_error(ctx, req_id, ERR_QUALITY, format!("画质档位无效: {}", m.preset)).await;
+    };
+    let key = ctx_key(ctx);
+    // window_id 限定：窗口须已由本会话打开（防跨会话误伤其他连接的管线）
+    if m.window_id != 0 {
+        let owned = pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .get(&m.window_id)
+            .map(|h| h.owner == key)
+            .unwrap_or(false);
+        if !owned {
+            return send_error(
+                ctx,
+                req_id,
+                ERR_NO_WINDOW,
+                format!("窗口 {:#x} 不在当前会话中", m.window_id),
+            )
+            .await;
+        }
+    }
+    ctx.user_quality.store(m.preset as u32, Ordering::Relaxed);
+    apply_quality(ctx, preset, m.window_id);
+    tracing::info!(preset = ?preset, window = format!("{:#x}", m.window_id), "画质档位已生效");
+    ctx.send(
+        Msg::SetQuality(SetQuality { window_id: m.window_id, preset: m.preset }),
+        req_id,
+    )
+    .await
+}
+
+/// 把档位立即写入管线槽位（不等下个 rate tick，控制端切档即时可感）。
+///
+/// - 非 AUTO：目标码率 = 档位值（多窗口按面积分摊，总预算 = 档位值），
+///   帧率上限 = min(档位, 配置 max_fps)；
+/// - AUTO：不动槽位——下个 rate tick 由 [`RateController`] 全量覆盖。
+fn apply_quality(ctx: &SessionCtx, preset: QualityPreset, window_id: u64) {
+    if preset == QualityPreset::Auto {
+        return;
+    }
+    let key = ctx_key(ctx);
+    let idx = preset as usize;
+    let fps = PRESET_FPS[idx]
+        .min(ctx.state.config.max_fps.max(1))
+        .max(1);
+    let mut slots: Vec<(u64, Arc<AtomicU32>, Arc<AtomicU32>)> = pipes()
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .iter()
+        .filter(|(_, h)| h.owner == key && (window_id == 0 || h.hwnd == window_id))
+        .map(|(id, h)| (*id, Arc::clone(&h.target_kbps), Arc::clone(&h.fps_cap)))
+        .collect();
+    if slots.is_empty() {
+        return;
+    }
+    // 多窗口按面积分摊档位总预算（与 apply_rate 同一策略）
+    let areas: Vec<u64> = {
+        let map = pipes().lock().unwrap_or_else(lock_poisoned);
+        slots.iter()
+            .map(|(id, _, _)| map.get(id).map(|h| h.area).unwrap_or(1))
+            .collect()
+    };
+    let shares = allocate_kbps(PRESET_KBPS[idx], &areas);
+    for ((_, target, cap), kbps) in slots.drain(..).zip(shares) {
+        target.store(kbps, Ordering::Relaxed);
+        cap.store(fps, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2280,6 +2399,27 @@ fn apply_rate(
         return; // 本会话暂无打开窗口
     }
 
+    // 手动画质档位优先（T-028 F5）：非 AUTO 时停用自适应，按档位预算全量
+    // 下发（编码器 set_bitrate / fps_cap 节流兜底网络劣化）；采样与决策
+    // 全部跳过，改回 AUTO 后由下个 tick 无缝接管。
+    let user = ctx.user_quality.load(Ordering::Relaxed);
+    if let Ok(preset) = QualityPreset::try_from(user as i32) {
+        if preset != QualityPreset::Auto {
+            let idx = preset as usize;
+            let fps = PRESET_FPS[idx]
+                .min(ctx.state.config.max_fps.max(1))
+                .max(1);
+            let areas: Vec<u64> = slots.iter().map(|s| s.area).collect();
+            let shares = allocate_kbps(PRESET_KBPS[idx], &areas);
+            for (s, kbps) in slots.iter().zip(shares) {
+                s.target.store(kbps, Ordering::Relaxed);
+                s.fps_cap.store(fps, Ordering::Relaxed);
+            }
+            tracing::debug!(preset = ?preset, kbps = PRESET_KBPS[idx], fps, windows = slots.len(), "手动档位码率下发");
+            return;
+        }
+    }
+
     let path = ctx.conn.stats().path;
     let d_sent = path.sent_packets.saturating_sub(*prev_sent);
     let d_lost = path.lost_packets.saturating_sub(*prev_lost);
@@ -2784,5 +2924,41 @@ mod tests {
         );
         assert_eq!(unregister_pipe(wid, 8).map(|h| h.serial), Some(8));
         drop_pipe(wid);
+    }
+
+    // ── 画质档位（T-028 F5） ──
+
+    /// 档位表与 proto 枚举对齐：echo/apply 都按下标索引，错位即静默错档。
+    #[test]
+    fn preset_tables_align_with_proto_enum() {
+        for raw in 0..=3i32 {
+            let p = QualityPreset::try_from(raw).expect("0..=3 都是合法档位");
+            assert_eq!(p as i32, raw, "枚举值即表下标");
+        }
+        assert!(QualityPreset::try_from(4).is_err(), "越界档位必须报 Error{{60}}");
+        // AUTO 不查表（apply_quality/apply_rate 对 AUTO 直接放行自适应）
+        assert_eq!(QualityPreset::try_from(0), Ok(QualityPreset::Auto));
+    }
+
+    /// 档位语义单调：高 ≥ 中 ≥ 低（码率与帧率），且帧率不超过常见配置上限。
+    #[test]
+    fn preset_tables_monotonic() {
+        let (hi, mid, low) = (1, 2, 3);
+        assert!(PRESET_KBPS[hi] > PRESET_KBPS[mid]);
+        assert!(PRESET_KBPS[mid] > PRESET_KBPS[low]);
+        assert!(PRESET_FPS[hi] > PRESET_FPS[mid]);
+        assert!(PRESET_FPS[mid] > PRESET_FPS[low]);
+        // 高档也不越过 RateController 的兜底上限语义（50M），低档可用即流畅
+        assert!(PRESET_KBPS[hi] <= 50_000);
+        assert!(PRESET_FPS[low] >= 10, "低档至少保留可用流畅度");
+    }
+
+    /// echo 语义：SetQuality 原样回传依赖 `preset as i32 → try_from` 往返稳定。
+    #[test]
+    fn preset_roundtrip() {
+        for raw in 0..=3i32 {
+            let p = QualityPreset::try_from(raw).unwrap();
+            assert_eq!(p as i32, raw);
+        }
     }
 }

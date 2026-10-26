@@ -169,6 +169,17 @@ export function setViewport(
   return invoke("set_viewport", { deviceId, windowId, cssW, cssH, dpr });
 }
 
+/** 画质档位（T-028 F5；`windowId` 省略 = 会话内全部窗口）。 */
+export type QualityPreset = "auto" | "high" | "medium" | "low";
+
+export function setQuality(
+  deviceId: string,
+  preset: QualityPreset,
+  windowId?: string,
+): Promise<void> {
+  return invoke("set_quality", { deviceId, preset, windowId: windowId ?? null });
+}
+
 /**
  * 订阅窗口组事件流；事件异步到达 `onEvent`。
  *

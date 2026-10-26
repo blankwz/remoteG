@@ -63,6 +63,7 @@ mod imp {
     const ID_PAUSE: &str = "pause";
     const ID_AUTOSTART: &str = "autostart";
     const ID_OPEN_LOGS: &str = "open-logs";
+    const ID_LICENSE: &str = "license";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
     const DEVICE_ID_PREFIX: &str = "device-";
@@ -112,6 +113,7 @@ mod imp {
             CheckMenuItem::with_id(ID_AUTOSTART, "开机自启", true, autostart_enabled(), None);
         let trust = Submenu::with_id("trust", "信任设备", true);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
+        let license_item = MenuItem::with_id(ID_LICENSE, "授权…", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
         let menu = Menu::new();
@@ -125,6 +127,7 @@ mod imp {
         let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&open_logs);
+        let _ = menu.append(&license_item);
         let _ = menu.append(&quit_item);
 
         let mut builder = TrayIconBuilder::new()
@@ -260,6 +263,10 @@ mod imp {
                 }
             }
             ID_OPEN_LOGS => open_log_dir(),
+            ID_LICENSE => {
+                // 授权状态弹窗（T-029）：当前档位 + 升级操作说明（大白话）
+                show_pair_code_dialog(license_dialog_text(&state));
+            }
             ID_QUIT => {
                 tracing::info!("托盘请求退出");
                 disconnect_all(runtime);
@@ -438,6 +445,23 @@ mod imp {
             }
             CODE_DIALOG_OPEN.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// 授权弹窗内容（T-029）：档位、限制余量与升级操作，一次说清。
+    fn license_dialog_text(state: &AgentState) -> String {
+        let trusted = state.trust.lock().expect("trust 锁中毒").list().len();
+        match state.license.as_ref() {
+            Some(l) if l.plan == rd_security::Plan::Pro => format!(
+                "当前版本:专业版(Pro)\n授权给:{}\n可信任设备数:{}\n\n感谢支持!",
+                if l.name.is_empty() { "(未署名)" } else { &l.name },
+                l.devices_max
+            ),
+            _ => format!(
+                "当前版本:免费版\n已信任 {trusted}/{} 台设备,同一时间支持 1 台电脑连接。\n\n升级专业版:\n1. 联系购买获得一串「授权码」\n2. 把授权码保存为文件: {}\\license.key\n3. 重启本程序即生效\n\n(免费版永久可用,无时间限制)",
+                rd_security::FREE_DEVICE_MAX,
+                rd_agent::default_config_dir().display()
+            ),
+        }
     }
 
     /// 撤销对某设备的信任(D-013 包3/E4:被控端此前无撤销入口,控制端设备

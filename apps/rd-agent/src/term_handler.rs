@@ -65,6 +65,13 @@ pub struct TermAttachments;
 pub fn handle(ctx: &SessionCtx, req_id: u32, msg: TermMsg) -> anyhow::Result<()> {
     match msg {
         TermMsg::Open(m) => {
+            // 审计（合规留痕）：远端开了 shell（敏感度最高的一类操作）
+            crate::audit::log(
+                "terminal_open",
+                &ctx.peer_name,
+                &ctx.peer_fp,
+                serde_json::json!({ "shell": m.shell }),
+            );
             // 共享暂停时拒绝新终端(D-013 包3):暂停语义 = 一切控制通道停止
             if ctx.state.paused.load(std::sync::atomic::Ordering::SeqCst) {
                 let rt = tokio::runtime::Handle::current();

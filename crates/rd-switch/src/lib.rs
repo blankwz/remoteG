@@ -20,7 +20,7 @@ use switchboard_core::executor::{execute, ModuleProvider};
 use switchboard_core::plan::Plan;
 use switchboard_core::stages::{Discoverer, Transport};
 use switchboard_core::telemetry::{EventBus, PathTag, Stage, StageStats};
-use switchboard_core::types::{Measured, PathHandle, PathKind};
+use switchboard_core::types::{PathHandle, PathKind};
 
 use rd_transport::{Conn, Fingerprint, Identity};
 
@@ -126,7 +126,8 @@ impl RdChannel {
 
     /// 从 rd Conn 直接构造 Channel 视图（T-027 fec-shards 视频路径：
     /// datagram 走 Conn 数据报面，与可靠流共存于同一条连接）。
-    pub fn from_conn(conn: Arc<Conn>, path: PathKind) -> Self {
+    /// `path` 仅用于调用方表达路径语义，Channel 视图本身不携带。
+    pub fn from_conn(conn: Arc<Conn>, _path: PathKind) -> Self {
         Self {
             conn,
             addr_string: "fec-datagrams".into(),
