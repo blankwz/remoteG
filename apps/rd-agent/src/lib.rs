@@ -14,6 +14,7 @@ pub mod discover;
 pub mod host_activity;
 pub mod input_handler;
 pub mod power;
+pub mod privacy;
 pub mod server;
 pub mod session;
 pub mod term_handler;
@@ -94,6 +95,8 @@ pub fn start(
     host_activity::init();
     // 操作审计（合规留痕）：与 tracing 日志同目录，audit.jsonl
     audit::init(&config_dir.join("logs"));
+    // 隐私屏黑罩线程（T-028 F9）：进程内一次，常驻待命
+    privacy::init();
 
     let identity = rd_security::load_or_create_identity(config_dir, "rd-agent")
         .context("加载/生成本机身份失败")?;

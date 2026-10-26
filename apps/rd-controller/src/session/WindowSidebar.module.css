@@ -1,0 +1,142 @@
+/* 窗口列表侧边栏（T-028 F4） */
+.sidebar {
+  width: 220px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border, #2c3038);
+  background: var(--bg-surface, #181b1f);
+  overflow: hidden;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
+}
+
+.title {
+  font-size: 12px;
+  color: var(--text-secondary, #8e8e8e);
+}
+
+.refresh {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #8e8e8e);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.refresh:hover {
+  color: var(--text-primary, #d8d9da);
+  background: var(--bg-hover, #22252b);
+}
+
+.search {
+  margin: 0 12px 8px;
+  padding: 6px 10px;
+  background: var(--bg-input, #111217);
+  color: var(--text-primary, #d8d9da);
+  border: 1px solid var(--border, #2c3038);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.search:focus {
+  outline: none;
+  border-color: var(--accent, #3d71d9);
+}
+
+.error {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--warning, #ff9830);
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 6px 8px;
+}
+
+.empty {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--text-secondary, #8e8e8e);
+  text-align: center;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.item:hover {
+  background: var(--bg-hover, #22252b);
+}
+.item.active {
+  background: var(--bg-active, #2c3038);
+  border-color: var(--success, #73bf69);
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.iconPh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #8e8e8e);
+  font-size: 12px;
+}
+
+.meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.name {
+  font-size: 12px;
+  color: var(--text-primary, #d8d9da);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proc {
+  font-size: 10px;
+  color: var(--text-secondary, #8e8e8e);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #8e8e8e);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.close:hover {
+  color: var(--error, #f2495c);
+}
+
+.badge {
+  font-size: 10px;
+  color: var(--success, #73bf69);
+  flex-shrink: 0;
+}

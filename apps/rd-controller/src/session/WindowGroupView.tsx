@@ -38,7 +38,7 @@ import {
   closeWindow,
   openWindow,
   requestClipboard,
-  savePngToDownloads,
+  saveFileToDownloads,
   sendClipboard,
   sessionStateText,
   setViewport,
@@ -284,6 +284,12 @@ function WindowSurface({
   );
 }
 
+/** 录屏控制器（T-028 F10）：页面层经 ref 调 start/stop；stop 完成返回文件路径。 */
+export interface RecordControl {
+  start: () => Promise<void>;
+  stop: () => Promise<string>;
+}
+
 interface GroupViewProps {
   deviceId: string;
   windowId: string;
@@ -292,6 +298,8 @@ interface GroupViewProps {
   showHud: boolean;
   /** 导出函数注册位（页面层 Ctrl+Shift+S 触发）。 */
   exportFnRef: RefObject<(() => Promise<string>) | null>;
+  /** 录屏控制注册位（页面层工具栏 ⏺ 触发；null = 未挂载）。 */
+  recordCtlRef: RefObject<RecordControl | null>;
   /** 根窗口被远端销毁（DESTROYED 事件命中根）→ 页面移除标签。 */
   onRootGone: () => void;
 }
@@ -303,6 +311,7 @@ export function WindowGroupView({
   store,
   showHud,
   exportFnRef,
+  recordCtlRef,
   onRootGone,
 }: GroupViewProps) {
   const snapshot = useSessionSnapshot(store);
@@ -884,7 +893,7 @@ export function WindowGroupView({
     }
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    return savePngToDownloads(`rd-${windowId}-${stamp}.png`, bytes);
+    return saveFileToDownloads(`rd-${windowId}-${stamp}.png`, bytes);
   }, [windowId]);
 
   useEffect(() => {
@@ -895,6 +904,95 @@ export function WindowGroupView({
       }
     };
   }, [exportFnRef, exportPng]);
+
+  // ---- 录屏（T-028 F10）：video+tile 逐帧合成 → MediaRecorder(webm) → 下载目录 ----
+
+  /** 录制器（null = 未在录）；rAF 合成循环句柄与收流 Promise 随行。 */
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const rafRef = useRef(0);
+  const blobDoneRef = useRef<Promise<Blob> | null>(null);
+
+  const startRecording = useCallback(async (): Promise<void> => {
+    if (recorderRef.current !== null) {
+      throw new Error("已在录制中");
+    }
+    const root = surfacesRef.current.get(windowId);
+    const video = root?.videoCanvas;
+    if (video === undefined || video === null || video.width === 0 || video.height === 0) {
+      throw new Error("尚无视频帧，无法录制");
+    }
+    // 常驻合成画布：rAF 把 video+tile 画进去（tile 是文字精修层，合成才是完整画面）
+    const canvas = document.createElement("canvas");
+    canvas.width = video.width;
+    canvas.height = video.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx === null) {
+      throw new Error("无法创建录制画布");
+    }
+    const stream = canvas.captureStream(30);
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+      ? "video/webm;codecs=vp9"
+      : "video/webm";
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+    const chunks: Blob[] = [];
+    rec.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        chunks.push(e.data);
+      }
+    };
+    blobDoneRef.current = new Promise<Blob>((resolve) => {
+      rec.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+    });
+    rec.start(1000);
+    recorderRef.current = rec;
+    const loop = () => {
+      ctx.drawImage(video, 0, 0);
+      const tile = root?.tileCanvas;
+      if (tile !== undefined && tile !== null) {
+        ctx.drawImage(tile, 0, 0);
+      }
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+  }, [windowId]);
+
+  const stopRecording = useCallback(async (): Promise<string> => {
+    const rec = recorderRef.current;
+    const done = blobDoneRef.current;
+    if (rec === null || done === null) {
+      throw new Error("未在录制中");
+    }
+    cancelAnimationFrame(rafRef.current);
+    recorderRef.current = null;
+    blobDoneRef.current = null;
+    if (rec.state !== "inactive") {
+      rec.stop();
+    }
+    const blob = await done;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return saveFileToDownloads(`rd-rec-${windowId}-${stamp}.webm`, bytes);
+  }, [windowId]);
+
+  // 注册到页面层（工具栏 ⏺ 经此启停）；卸载时录制中直接停（丢文件），不留 rAF 空转
+  useEffect(() => {
+    if (recordCtlRef) {
+      recordCtlRef.current = { start: startRecording, stop: stopRecording };
+    }
+    return () => {
+      if (recordCtlRef && recordCtlRef.current !== null) {
+        recordCtlRef.current = null;
+      }
+      if (recorderRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        if (recorderRef.current.state !== "inactive") {
+          recorderRef.current.stop();
+        }
+        recorderRef.current = null;
+        blobDoneRef.current = null;
+      }
+    };
+  }, [recordCtlRef, startRecording, stopRecording]);
 
   // ---- 渲染 ----
 

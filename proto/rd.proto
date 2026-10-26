@@ -12,7 +12,9 @@ message Envelope { uint32 req_id = 1; oneof msg {
   ClipboardData clipboard = 41;
   SessionState session_state = 42;
   // v0.2(T-028 F5):画质档位(见 SetQuality)
-  SetQuality set_quality = 43; } }
+  SetQuality set_quality = 43;
+  // v0.2(T-028 F9):隐私屏(见 SetPrivacy;Pro 功能)
+  SetPrivacy set_privacy = 44; } }
 
 // 画质档位(T-028 F5):控制端手动选择,覆盖码率自适应。
 // window_id=0 表示会话内全部窗口;成功时 Agent 原样回 SetQuality(echo),
@@ -24,6 +26,11 @@ enum QualityPreset {
   LOW = 3;     // 流畅优先:2Mbps / 15fps(弱网救急)
 }
 message SetQuality { uint64 window_id = 1; QualityPreset preset = 2; }
+
+// 隐私屏(T-028 F9):被控机屏幕整体黑屏(置顶黑罩,点击穿透),远控画面照常。
+// window_id 预留(当前黑罩是机器级);成功时原样回 SetPrivacy(echo),
+// 失败回 Error{code:60 参数错 / 70 非 Pro}。会话断开自动解除。
+message SetPrivacy { uint64 window_id = 1; bool on = 2; }
 
 message Hello { uint32 proto_ver = 1; string device_name = 2; repeated Codec decode_caps = 3; bool supports_444 = 4;
   // v0.2(T-027):控制端请求 fec-shards 视频路径（默认关，双端协商才生效）

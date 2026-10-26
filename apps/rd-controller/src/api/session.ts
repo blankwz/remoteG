@@ -180,6 +180,11 @@ export function setQuality(
   return invoke("set_quality", { deviceId, preset, windowId: windowId ?? null });
 }
 
+/** 隐私屏开关（T-028 F9，Pro 功能；被控端断开自动解除）。 */
+export function setPrivacy(deviceId: string, on: boolean): Promise<void> {
+  return invoke("set_privacy", { deviceId, on });
+}
+
 /**
  * 订阅窗口组事件流；事件异步到达 `onEvent`。
  *
@@ -202,10 +207,10 @@ export function subscribeGroupEvents(
  * IPC headers（与 tauri-plugin-fs 官方 JS 封装的调用形态一致，避免为导出
  * 单帧 PNG 引入 plugin-fs npm 依赖）。
  */
-export async function savePngToDownloads(fileName: string, png: Uint8Array): Promise<string> {
+export async function saveFileToDownloads(fileName: string, bytes: Uint8Array): Promise<string> {
   const dir = await downloadDir();
   const path = `${dir}/${fileName}`;
-  await invoke("plugin:fs|write_file", png, {
+  await invoke("plugin:fs|write_file", bytes, {
     headers: {
       path: encodeURIComponent(path),
       options: JSON.stringify({}),

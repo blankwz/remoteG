@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use rd_proto::v0::{envelope, ClipboardData, Envelope, Error, Hello, HelloAck, PairResult};
+use rd_proto::v0::{envelope, ClipboardData, Envelope, Error, Hello, HelloAck, PairResult, SetPrivacy};
 use rd_security::{AgentPairing, PairError, PairStep};
 use rd_term::TermManager;
 use rd_transport::{Conn, ControlRx, ControlTx, Fingerprint, Identity};
@@ -191,6 +191,8 @@ pub struct SessionCtx {
     /// T-028 F5：控制端手动画质档位（`QualityPreset` as i32，默认 AUTO）。
     /// 非 AUTO 时会话码率自适应停用，`apply_rate` 直接按档位下发。
     pub user_quality: Arc<AtomicU32>,
+    /// T-028 F9：本会话是否开启了隐私屏（断开时据此自动解除黑罩）。
+    pub privacy_on: AtomicBool,
     /// 窗口子会话(T-016 实现;桩阶段无读者)。
     #[allow(dead_code)]
     pub windows: WindowSessions,
@@ -318,6 +320,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         hello,
         media_fec,
         user_quality: Arc::new(AtomicU32::new(0)),
+        privacy_on: AtomicBool::new(false),
         windows: WindowSessions,
         terms: TermAttachments,
     });
@@ -365,6 +368,12 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
             &peer_fp.short_hex(),
             serde_json::json!({ "conn": conn_id, "duration_s": secs }),
         );
+    }
+    // 隐私屏随会话解除（T-028 F9）：绝不允许黑罩在无会话时残留——家人屏幕
+    // 被永远盖住是最坏故障形态
+    if ctx.privacy_on.load(Ordering::SeqCst) {
+        crate::privacy::set(false);
+        ctx.privacy_on.store(false, Ordering::SeqCst);
     }
     tracing::info!(peer = peer_fp.short_hex(), "连接断开");
 
@@ -569,6 +578,11 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
                 &ctx.peer_name,
                 window_session::set_quality(ctx, env.req_id, m).await,
             ),
+            // 隐私屏（T-028 F9，Pro）：机器级黑罩；断开自动解除
+            envelope::Msg::SetPrivacy(m) => handle_soft(
+                &ctx.peer_name,
+                handle_privacy(ctx, env.req_id, m).await,
+            ),
             // 输入 → T-017;UIPI 拦截(管理员窗口)按 30s 去抖回一次性 Error
             envelope::Msg::Key(m) => {
                 if let Some((code, message)) =
@@ -647,6 +661,54 @@ fn handle_soft(peer: &str, result: anyhow::Result<()>) {
     if let Err(err) = result {
         tracing::warn!(name = peer, "消息处理失败: {err:#}");
     }
+}
+
+/// 隐私屏开关（T-028 F9，Pro 功能）：黑罩盖住被控机全屏幕（点击穿透、
+/// 远控画面不受影响），会话断开自动解除。
+///
+/// 开启时先弹系统提示框（家人点「确定」后才进入黑屏）——被控端知情是
+/// 合规底线；关闭即时生效无提示。
+async fn handle_privacy(ctx: &SessionCtx, req_id: u32, m: SetPrivacy) -> anyhow::Result<()> {
+    let is_pro = ctx
+        .state
+        .license
+        .as_ref()
+        .is_some_and(|l| l.plan == rd_security::Plan::Pro);
+    if !is_pro {
+        return ctx
+            .send(
+                envelope::Msg::Error(error_msg(
+                    ERR_LICENSE_LIMIT,
+                    "隐私屏是专业版功能。可在被控端放入授权码升级(托盘→授权)。",
+                )),
+                req_id,
+            )
+            .await;
+    }
+    if m.on {
+        // 知情提示先行（异步弹窗，不阻塞回包）；黑罩随后升起
+        crate::privacy::notify_user(&ctx.peer_name);
+        if !crate::privacy::set(true) {
+            return ctx
+                .send(
+                    envelope::Msg::Error(error_msg(60, "隐私屏开启失败(黑罩线程不可用)")),
+                    req_id,
+                )
+                .await;
+        }
+        ctx.privacy_on.store(true, Ordering::SeqCst);
+        crate::audit::log("privacy_on", &ctx.peer_name, &ctx.peer_fp, serde_json::json!({}));
+    } else {
+        let _ = crate::privacy::set(false);
+        ctx.privacy_on.store(false, Ordering::SeqCst);
+        crate::audit::log("privacy_off", &ctx.peer_name, &ctx.peer_fp, serde_json::json!({}));
+    }
+    tracing::info!(on = m.on, name = %ctx.peer_name, "隐私屏已切换");
+    ctx.send(
+        envelope::Msg::SetPrivacy(SetPrivacy { window_id: m.window_id, on: m.on }),
+        req_id,
+    )
+    .await
 }
 
 /// 剪贴板同步(v0.1/D-013 包4):write=写本机剪贴板;read=回发当前文本。

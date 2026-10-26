@@ -223,6 +223,13 @@
 
 /* ---- 舞台 ---- */
 
+/* 会话主体：窗口列表侧边栏 + 舞台（T-028 F4） */
+.sessionBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 .stageArea {
   position: relative;
   flex: 1;

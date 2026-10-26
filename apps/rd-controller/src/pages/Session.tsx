@@ -25,6 +25,8 @@ import {
   type SessionSnapshot,
 } from "../session/SessionStore";
 import { WindowGroupView } from "../session/WindowGroupView";
+import type { RecordControl } from "../session/WindowGroupView";
+import { WindowSidebar } from "../session/WindowSidebar";
 import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
 import { FloatingToolbar } from "../session/FloatingToolbar";
@@ -66,6 +68,14 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [tabs, setTabs] = useState<readonly SessionTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [hudVisible, setHudVisible] = useState(true);
+  /** 隐私屏状态（T-028 F9；Agent echo 确认后翻转）。 */
+  const [privacyOn, setPrivacyOn] = useState(false);
+  /** 录屏状态（T-028 F10）。 */
+  const [recordingOn, setRecordingOn] = useState(false);
+  /** 激活标签注册的录屏控制器（WindowGroupView 挂载时写入）。 */
+  const recordCtlRef = useRef<RecordControl | null>(null);
+  /** 窗口列表侧边栏显隐（T-028 F4；默认展开）。 */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   /** 导出结果 / 错误提示（数秒后自动消失）。 */
   const [toast, setToast] = useState<string | null>(null);
   const [toastError, setToastError] = useState(false);
@@ -275,6 +285,39 @@ export function Session({ deviceId }: { deviceId: string }) {
       showToast(`切换画质失败：${String(e)}`, true);
     }
   }
+  /** 隐私屏（T-028 F9，Pro）：黑罩开关，状态翻转由后端 echo 确认。 */
+  async function doPrivacy(on: boolean) {
+    try {
+      const { setPrivacy } = await import("../api/session");
+      await setPrivacy(deviceId, on);
+      setPrivacyOn(on);
+      showToast(on ? "隐私屏已开启：对方屏幕已黑屏" : "隐私屏已关闭", false);
+    } catch (e) {
+      showToast(`隐私屏切换失败：${String(e)}`, true);
+    }
+  }
+  /** 录屏（T-028 F10）：启停由激活标签注册的控制器执行。 */
+  async function doRecordToggle() {
+    const ctl = recordCtlRef.current;
+    if (ctl === null) {
+      showToast("请先打开一个远程窗口", true);
+      return;
+    }
+    try {
+      if (!recordingOn) {
+        await ctl.start();
+        setRecordingOn(true);
+        showToast("开始录制远程画面", false);
+      } else {
+        const path = await ctl.stop();
+        setRecordingOn(false);
+        showToast(`录制已保存：${path}`, false);
+      }
+    } catch (e) {
+      setRecordingOn(false);
+      showToast(`录屏失败：${String(e)}`, true);
+    }
+  }
 
   return (
     <main className={styles.page}>
@@ -361,9 +404,28 @@ export function Session({ deviceId }: { deviceId: string }) {
         >
           + 终端
         </button>
+        <button
+          type="button"
+          className={styles.toolBtn}
+          title={sidebarOpen ? "收起窗口列表" : "展开窗口列表"}
+          onClick={() => setSidebarOpen((v) => !v)}
+        >
+          {sidebarOpen ? "📌 收起列表" : "📌 窗口列表"}
+        </button>
       </nav>
 
-      <div className={styles.stageArea}>
+      <div className={styles.sessionBody}>
+        {sidebarOpen && (
+          <WindowSidebar
+            deviceId={deviceId}
+            openIds={new Set(tabs.filter((t) => t.kind === "window").map((t) => t.id))}
+            activeId={activeId}
+            onSelect={setActiveId}
+            onOpen={openTab}
+            onCloseTab={closeTab}
+          />
+        )}
+        <div className={styles.stageArea}>
         {activeTab === null ? (
           <div className={styles.empty}>
             <p className={styles.emptyTitle}>未打开任何会话</p>
@@ -403,6 +465,10 @@ export function Session({ deviceId }: { deviceId: string }) {
               onLockScreen={() => void doLockScreen()}
               onCtrlAltDel={() => void doCtrlAltDel()}
               onQualityChange={(q) => void doQuality(q)}
+              onPrivacyToggle={(on) => void doPrivacy(on)}
+              privacyOn={privacyOn}
+              onRecordToggle={() => void doRecordToggle()}
+              recordingOn={recordingOn}
               onSendText={(text) => void doSendText(text)}
               onSendCombo={(keys) => void doSendCombo(keys)}
             />
@@ -413,10 +479,12 @@ export function Session({ deviceId }: { deviceId: string }) {
               store={activeTab.store}
               showHud={hudVisible}
               exportFnRef={exportFnRef}
+              recordCtlRef={recordCtlRef}
               onRootGone={() => closeTab(activeTab.id)}
             />
           </div>
         )}
+        </div>
       </div>
     </main>
   );

@@ -15,6 +15,14 @@ interface Props {
   onQualityChange: (q: Quality) => void;
   onSendText: (text: string) => void;
   onSendCombo: (keys: string[]) => void;
+  /** 隐私屏开关（T-028 F9；Pro 功能）。 */
+  onPrivacyToggle: (on: boolean) => void;
+  /** 当前是否已开启隐私屏（按钮高亮态）。 */
+  privacyOn: boolean;
+  /** 录屏开关（T-028 F10）。 */
+  onRecordToggle: () => void;
+  /** 当前是否正在录制（按钮高亮态）。 */
+  recordingOn: boolean;
 }
 
 const QUALITY_LABELS: Record<Quality, string> = {
@@ -65,6 +73,18 @@ export function FloatingToolbar(props: Props) {
       <Sep />
       <ToolBtn icon="📸" title="截屏 (Ctrl+Alt+S)" onClick={props.onScreenshot} />
       <ToolBtn icon="🖥" title="全屏 (F11)" onClick={props.onFullscreen} />
+      <ToolBtn
+        icon="⬛"
+        title="隐私屏：对方屏幕黑屏，操作照常（专业版）"
+        active={props.privacyOn}
+        onClick={() => props.onPrivacyToggle(!props.privacyOn)}
+      />
+      <ToolBtn
+        icon="⏺"
+        title={props.recordingOn ? "停止录制（存到下载目录）" : "录制远程画面（存到下载目录）"}
+        active={props.recordingOn}
+        onClick={props.onRecordToggle}
+      />
       <Sep />
       <ToolBtn icon="🔒" title="远程锁屏" onClick={props.onLockScreen} />
       <ToolBtn icon="⚠" title="Ctrl+Alt+Del (Ctrl+Alt+Q)" onClick={props.onCtrlAltDel} />
