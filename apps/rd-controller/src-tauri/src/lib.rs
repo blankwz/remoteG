@@ -112,6 +112,8 @@ pub fn run() {
             commands::session::open_window,
             commands::session::close_window,
             commands::session::set_viewport,
+            commands::session::set_quality,
+            commands::session::set_privacy,
             commands::session::subscribe_group_events,
             commands::session::subscribe_session_state,
             // T-022：输入

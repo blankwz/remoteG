@@ -16,8 +16,8 @@
 //! window_id 沿用 T-020 约定：前端十进制字符串，Rust 侧解析 u64。
 
 use rd_proto::v0::{
-    CloseWindow, Envelope, FitMode, OpenWindow, OpenWindowAck, RenderLevel, StatsReport,
-    ViewportInfo, WindowInfo, envelope, window_event,
+    CloseWindow, Envelope, FitMode, OpenWindow, OpenWindowAck, QualityPreset, RenderLevel,
+    SetPrivacy, SetQuality, StatsReport, ViewportInfo, WindowInfo, envelope, window_event,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -340,6 +340,67 @@ pub async fn set_viewport(
     }))
     .await
     .map_err(|e| format!("上报视口失败：{e:#}"))
+}
+
+/// 画质档位（T-028 F5）：RPC `SetQuality`，Agent 成功时原样 echo。
+///
+/// `window_id` 传 `None`/空串 = 会话内全部窗口；`preset` 为
+/// `"auto"|"high"|"medium"|"low"`（前端工具栏字符串直传）。
+#[tauri::command]
+pub async fn set_quality(
+    device_id: String,
+    window_id: Option<String>,
+    preset: String,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let proto_preset = match preset.as_str() {
+        "auto" => QualityPreset::Auto,
+        "high" => QualityPreset::High,
+        "medium" => QualityPreset::Medium,
+        "low" => QualityPreset::Low,
+        other => return Err(format!("未知画质档位：{other}")),
+    };
+    let root = match window_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => parse_window_id(s)?,
+        None => 0, // 全部窗口
+    };
+    let conn = get_conn(&state, &device_id)?;
+    let msg = envelope::Msg::SetQuality(SetQuality {
+        window_id: root,
+        preset: proto_preset as i32,
+    });
+    let reply = conn.rpc(msg).await.map_err(|e| format!("设置画质失败：{e:#}"))?;
+    match reply.msg {
+        // Agent 原样 echo = 已生效
+        Some(envelope::Msg::SetQuality(echo)) => {
+            tracing::info!(device = %device_id, window = format!("{root:#x}"), ?echo.preset, "画质档位已生效");
+            Ok(())
+        }
+        Some(envelope::Msg::Error(e)) => Err(agent_error(&e)),
+        _ => Err("对端回复了意外的消息类型".into()),
+    }
+}
+
+/// 隐私屏开关（T-028 F9，Pro 功能）：RPC `SetPrivacy`，Agent 原样 echo。
+///
+/// `on=true` 时被控端先弹知情提示再黑屏；会话断开自动解除。
+#[tauri::command]
+pub async fn set_privacy(
+    device_id: String,
+    on: bool,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let conn = get_conn(&state, &device_id)?;
+    let msg = envelope::Msg::SetPrivacy(SetPrivacy { window_id: 0, on });
+    let reply = conn.rpc(msg).await.map_err(|e| format!("设置隐私屏失败：{e:#}"))?;
+    match reply.msg {
+        Some(envelope::Msg::SetPrivacy(echo)) => {
+            tracing::info!(device = %device_id, on = echo.on, "隐私屏已切换");
+            Ok(())
+        }
+        Some(envelope::Msg::Error(e)) => Err(agent_error(&e)),
+        _ => Err("对端回复了意外的消息类型".into()),
+    }
 }
 
 /// 订阅窗口组事件流（该设备的广播中 root 命中的子集）。
