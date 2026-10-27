@@ -70,11 +70,10 @@ fn shield_thread(rx: std::sync::mpsc::Receiver<Req>) {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetSystemMetrics, PeekMessageW, RegisterClassW,
-        SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_MESSAGE,
+        SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU,
         HWND_TOPMOST, MSG, PM_REMOVE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SYSTEM_METRICS_INDEX, WINDOW_EX_STYLE, WNDCLASSW,
-        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-        WS_POPUP,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
     use windows::core::w;
 
@@ -100,15 +99,14 @@ fn shield_thread(rx: std::sync::mpsc::Receiver<Req>) {
         m(SM_CXVIRTUALSCREEN),
         m(SM_CYVIRTUALSCREEN),
     );
-    // windows 0.62 的 CreateWindowExW 返回 Result<HWND>
+    // windows 0.62 的 CreateWindowExW 返回 Result<HWND>。
+    // parent 必须是桌面顶层（None）：HWND_MESSAGE 是 message-only 窗口，
+    // 带 WS_POPUP 创建失败、即便成功也永远不可见——黑罩无从谈起；
+    // 「不进任务栏/Alt-Tab」由 WS_EX_TOOLWINDOW 承担。
     let hwnd = match unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(
-                WS_EX_TOPMOST.0
-                    | WS_EX_TOOLWINDOW.0
-                    | WS_EX_TRANSPARENT.0
-                    | WS_EX_LAYERED.0
-                    | WS_EX_NOACTIVATE.0,
+                WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0,
             ),
             class_name,
             w!("rd 隐私屏"),
@@ -117,18 +115,19 @@ fn shield_thread(rx: std::sync::mpsc::Receiver<Req>) {
             vy,
             vw,
             vh,
-            Some(HWND_MESSAGE), // 不进任务栏/Alt-Tab
+            None,
             Some(HMENU::default()),
             Some(hinstance.into()),
             None,
         )
     } {
         Ok(h) if !h.is_invalid() => h,
-        _ => {
-            tracing::error!("隐私屏黑窗创建失败，privacy::set 将无效果");
+        Err(err) => {
+            tracing::error!("隐私屏黑窗创建失败({err})，privacy::set 将无效果");
             while rx.recv().is_ok() {} // 排空：send 方的受理返回只是乐观值
             return;
         }
+        Ok(_) => unreachable!("Ok 但句柄无效"),
     };
 
     let mut shown = false;
