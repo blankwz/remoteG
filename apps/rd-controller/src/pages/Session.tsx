@@ -77,6 +77,9 @@ export function Session({ deviceId }: { deviceId: string }) {
   const recordCtlRef = useRef<RecordControl | null>(null);
   /** 窗口列表侧边栏显隐（T-028 F4；默认展开）。 */
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** 自控自会话（设备地址是 loopback）：注入类操作停用并提示（2026-10-27
+   * 鼠标拉扯反馈——同机注入与控制端光标互斥，输入功能由双机场景验证）。 */
+  const [loopback, setLoopback] = useState(false);
   /** 导出结果 / 错误提示（数秒后自动消失）。 */
   const [toast, setToast] = useState<string | null>(null);
   const [toastError, setToastError] = useState(false);
@@ -210,6 +213,32 @@ export function Session({ deviceId }: { deviceId: string }) {
       .catch((e: unknown) => showToast(`导出失败：${errText(e)}`, true));
   }, [showToast]);
 
+  // 自控自检测：设备地址是 loopback → 输入类操作提示停用（注入在 Agent
+  // 侧也已停用，双保险；画面/工具栏 UI 不受影响）
+  useEffect(() => {
+    let alive = true;
+    void import("../api/devices").then(async (m) => {
+      try {
+        const list = await m.listDevices();
+        const dev = list.find((d) => d.id === deviceId);
+        if (alive) {
+          setLoopback(
+            Boolean(
+              dev?.addr.includes("127.0.0.1") ||
+                dev?.addr.includes("[::1]") ||
+                dev?.addr.includes("localhost"),
+            ),
+          );
+        }
+      } catch {
+        /* 列表失败不影响会话 */
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [deviceId]);
+
   /** 返回该设备的窗口列表（导航主出口）。 */
   const goWindows = useCallback(() => {
     window.location.hash = `#/windows/${deviceId}`;
@@ -298,9 +327,17 @@ export function Session({ deviceId }: { deviceId: string }) {
     try { const m = await import("../api/input"); await m.textInput(deviceId, "__RD_CAD__"); } catch {}
   }
   async function doSendText(text: string) {
+    if (loopback) {
+      showToast("本机自测模式：注入已停用（自己控自己，文字本来就在本机）。连接第二台电脑即可使用", true);
+      return;
+    }
     try { const m = await import("../api/input"); await m.textInput(deviceId, text); } catch {}
   }
   async function doSendCombo(keys: string[]) {
+    if (loopback) {
+      showToast("本机自测模式：注入已停用。连接第二台电脑即可使用", true);
+      return;
+    }
     try {
       const { keyEvent } = await import("../api/input");
       const SCAN: Record<string, [number, boolean]> = {

@@ -93,10 +93,18 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
+    // 自控自(loopback):注入 = SendInput 打在本机,与控制端光标形成反馈
+    // 循环(鼠标被拉扯),文字/按键打进控制端自己的焦点——release 构建全部
+    // 停用,注入功能由双机场景验证(2026-10-27 用户实测鼠标被拉扯)。
+    // debug 构建放行:无头 e2e 没有真实用户光标(无循环、busy 恒 false),
+    // 注入协议/管线的自动化验证依赖它(与 confirm_connection 的 debug
+    // 豁免同一先例)。
+    if ctx.loopback && !cfg!(debug_assertions) {
+        return Ok(());
+    }
     // 本机优先(D-013 包5):被控机真实键鼠 2s 窗口期内,控制端注入挂起
-    // (防止两边抢鼠标;向日葵式行为)。自控自(loopback)豁免:同一块键鼠
-    // 不存在抢占,门控只会让工具栏常用语/虚拟按键全部静默失效。
-    if crate::host_activity::busy() && !ctx.loopback {
+    // (防止两边抢鼠标;向日葵式行为)
+    if crate::host_activity::busy() {
         return Ok(());
     }
     match msg {
@@ -413,8 +421,13 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
-    // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜);loopback 豁免
-    if crate::host_activity::busy() && !ctx.loopback {
+    // 自控自:移动注入与控制端光标互相拉扯(见 handle),release 停用
+    // (debug 放行供 e2e 验证注入协议,见 handle 注释)
+    if ctx.loopback && !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜)
+    if crate::host_activity::busy() {
         return Ok(());
     }
     if !ctx.windows.is_open(mv.window_id) {
