@@ -702,6 +702,7 @@ async fn t08_terminal_echo() -> Result<()> {
 /// `frame_id:u32 | orig_len:u32 | shard_size:u16 | k:u16 | idx:u16 | m:u8 | pidx:u8 | type:u8`
 const FEC_HEADER: usize = 17;
 const FEC_TYPE_DATA: u8 = 0;
+const FEC_TYPE_PARITY: u8 = 1;
 
 #[derive(Clone)]
 struct FecShard {
@@ -709,7 +710,10 @@ struct FecShard {
     orig_len: u32,
     shard_size: u16,
     k: u16,
+    m: u8,
     idx: u16,
+    pidx: u8,
+    ty: u8,
     data: Vec<u8>,
 }
 
@@ -718,15 +722,18 @@ fn parse_fec_shard(pkt: &[u8]) -> Option<FecShard> {
         return None;
     }
     let ty = pkt[16];
-    if ty != FEC_TYPE_DATA {
-        return None; // 校验片对重组非必需（环回无丢片）
+    if ty != FEC_TYPE_DATA && ty != FEC_TYPE_PARITY {
+        return None;
     }
     Some(FecShard {
         frame_id: u32::from_be_bytes(pkt[0..4].try_into().ok()?),
         orig_len: u32::from_be_bytes(pkt[4..8].try_into().ok()?),
         shard_size: u16::from_be_bytes(pkt[8..10].try_into().ok()?),
         k: u16::from_be_bytes(pkt[10..12].try_into().ok()?),
+        m: pkt[14],
         idx: u16::from_be_bytes(pkt[12..14].try_into().ok()?),
+        pidx: pkt[15],
+        ty,
         data: pkt[FEC_HEADER..].to_vec(),
     })
 }
@@ -756,47 +763,99 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
         ack.codec
     );
 
-    // 攒 frame 0（next_fid 从 0 起）的数据片；总预算 30s（套件内 t09 排最后，
-    // MFT 反复创建使首帧冷启动显著慢于隔离运行；同 t02 只保证到达不断言时序）
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut shards: Vec<Option<FecShard>> = Vec::new();
-    let (mut k_total, mut orig_len, mut shard_size) = (0u16, 0u32, 0u16);
+    // 攒 frame 0 的分片（数据+校验）；QUIC datagram 尽力而为，**环回也会丢**
+    // （实测 50 片丢 2）——丢片 ≤m 时 RS 重建，这正是 fec-shards 的价值主张。
+    // 总预算 60s（套件内 t09 排最后，MFT 冷启动不可预测；只保证恢复不断言时序）。
+    // 单块假设：帧 ≤ 128×1024B（MAX_BLOCK_DATA）；多块重组由 fec-rs 单测覆盖。
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut data_slots: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut parity_slots: Vec<Option<Vec<u8>>> = Vec::new();
+    let (mut k_total, mut m_total, mut orig_len, mut shard_size) = (0u16, 0u8, 0u32, 0u16);
+    let mut recovered = 0usize;
+    // 诊断统计：收到的全部 datagram 数 + 各 frame_id 计数（超时时打印定位丢片层）
+    let mut total_pkts = 0usize;
+    let mut fid_hist: std::collections::HashMap<u32, usize> = Default::default();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
+        let present = data_slots.iter().chain(parity_slots.iter()).filter(|s| s.is_some()).count();
         anyhow::ensure!(
             !left.is_zero(),
-            "15s 内未攒齐 fec 数据片（已收 {} 片）",
-            shards.iter().filter(|s| s.is_some()).count()
+            "60s 内未攒齐/未恢复 fec 帧 0（有效片 {present}，datagram 共 {total_pkts} 个，fid 分布 {:?}）",
+            {
+                let mut v: Vec<_> = fid_hist.iter().collect();
+                v.sort_by_key(|(k, _)| **k);
+                v.into_iter().take(12).collect::<Vec<_>>()
+            }
         );
-        let pkt = tokio::time::timeout(left, c.conn.read_datagram())
-            .await
-            .context("等待 fec datagram 超时")?
-            .context("读取 datagram 失败")?;
+        let pkt = match tokio::time::timeout(left, c.conn.read_datagram()).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => return Err(e).context("读取 datagram 失败"),
+            Err(_) => continue, // 单次读超时 → 回到外层打印统计并退出
+        };
+        total_pkts += 1;
         let Some(s) = parse_fec_shard(&pkt) else { continue };
+        *fid_hist.entry(s.frame_id).or_insert(0) += 1;
         if s.frame_id != 0 {
-            continue; // 只重组首帧（IDR）
+            continue; // 只恢复首帧（IDR）
         }
         if k_total == 0 {
             k_total = s.k;
+            m_total = s.m;
             orig_len = s.orig_len;
             shard_size = s.shard_size;
-            shards.resize_with(k_total as usize, || None);
+            data_slots.resize_with(k_total as usize, || None);
+            parity_slots.resize_with(m_total as usize, || None);
         }
-        let i = s.idx as usize;
-        anyhow::ensure!(i < k_total as usize, "数据片 idx {i} 越界（k={k_total}）");
-        shards[i] = Some(s);
-        if shards.iter().all(|s| s.is_some()) {
+        anyhow::ensure!(
+            s.k == k_total && s.m == m_total,
+            "分片头参数漂移（k {}/{} m {}/{}）",
+            s.k,
+            k_total,
+            s.m,
+            m_total
+        );
+        if s.ty == FEC_TYPE_DATA {
+            let i = s.idx as usize;
+            anyhow::ensure!(i < k_total as usize, "数据片 idx {i} 越界（k={k_total}）");
+            data_slots[i] = Some(s.data);
+        } else {
+            let p = s.pidx as usize;
+            anyhow::ensure!(p < m_total as usize, "校验片 pidx {p} 越界（m={m_total}）");
+            parity_slots[p] = Some(s.data);
+        }
+        let present = data_slots.iter().chain(parity_slots.iter()).filter(|s| s.is_some()).count();
+        if present >= k_total as usize {
+            if data_slots.iter().all(|s| s.is_some()) {
+                break; // 数据片齐，无需重建
+            }
+            // RS 重建（同 fec-rs：Option<Vec<u8>> 缺失槽，reconstruct 后填充）
+            let rs = reed_solomon_erasure::galois_8::ReedSolomon::new(
+                k_total as usize,
+                m_total as usize,
+            )
+            .map_err(|e| anyhow::anyhow!("RS 编码器创建失败: {e:?}"))?;
+            let mut shards: Vec<Option<Vec<u8>>> =
+                data_slots.iter().cloned().chain(parity_slots.iter().cloned()).collect();
+            rs.reconstruct(&mut shards)
+                .map_err(|e| anyhow::anyhow!("RS 重建失败: {e:?}"))?;
+            data_slots = shards[..k_total as usize].to_vec();
+            parity_slots = shards[k_total as usize..].to_vec();
+            recovered = data_slots.iter().filter(|s| s.is_none()).count();
+            anyhow::ensure!(
+                data_slots.iter().all(|s| s.is_some()),
+                "RS 重建后仍有缺失（有效片 {present}/{k_total}）"
+            );
             break;
         }
     }
 
-    // 环回无丢片：k 个数据片按 idx 偏移直接拼接即原 payload（无需 RS 重建）
+    // 数据片按 idx 偏移拼接即原 payload（RS 重建后与全齐等价）
     let mut frame = vec![0u8; orig_len as usize];
-    for (i, s) in shards.iter().enumerate() {
-        let s = s.as_ref().context("片缺失")?;
+    for (i, slot) in data_slots.iter().enumerate() {
+        let s = slot.as_ref().context("重建后数据片仍缺失")?;
         let base = i * shard_size as usize;
         let n = (base + shard_size as usize).min(orig_len as usize) - base;
-        frame[base..base + n].copy_from_slice(&s.data[..n]);
+        frame[base..base + n].copy_from_slice(&s[..n]);
     }
     let (header, _au_len) = rd_transport::framing::decode_video_header(&frame)
         .map(|(h, _)| (h, ()))
@@ -804,8 +863,9 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
     anyhow::ensure!(header.window_id == env.hwnd, "重组帧 window_id 不符");
     anyhow::ensure!(header.keyframe, "fec 首帧必须是 IDR keyframe");
     println!(
-        "t09 ok: fec-shards 协商+分片到达+重组，首帧 {} 字节 keyframe（k={k_total} 片）",
-        orig_len
+        "t09 ok: fec-shards 协商+分片到达+重组，首帧 {} 字节 keyframe（k={k_total} 片，RS 重建 {} 个缺失槽，datagram 共 {total_pkts}）",
+        orig_len,
+        if recovered > 0 { recovered } else { 0 }
     );
     Ok(())
 }

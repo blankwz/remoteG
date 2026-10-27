@@ -39,6 +39,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
+reed-solomon-erasure = "6"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]

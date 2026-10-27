@@ -4079,6 +4079,7 @@ dependencies = [
  "rd-term",
  "rd-transport",
  "rd-window-win",
+ "reed-solomon-erasure",
  "serde",
  "serde_json",
  "switchboard-core",
