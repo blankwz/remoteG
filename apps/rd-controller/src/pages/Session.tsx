@@ -25,7 +25,7 @@ import {
   type SessionSnapshot,
 } from "../session/SessionStore";
 import { WindowGroupView } from "../session/WindowGroupView";
-import type { RecordControl } from "../session/WindowGroupView";
+import type { RecordControl, SessionControl } from "../session/WindowGroupView";
 import { WindowSidebar } from "../session/WindowSidebar";
 import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
@@ -67,7 +67,8 @@ type SessionTab = WindowTab | TermTab;
 export function Session({ deviceId }: { deviceId: string }) {
   const [tabs, setTabs] = useState<readonly SessionTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [hudVisible, setHudVisible] = useState(true);
+  /** HUD 信息显隐（默认隐藏；工具栏 ℹ 或 Ctrl+Shift+H 切换，2026-10-27 用户反馈）。 */
+  const [hudVisible, setHudVisible] = useState(false);
   /** 隐私屏状态（T-028 F9；Agent echo 确认后翻转）。 */
   const [privacyOn, setPrivacyOn] = useState(false);
   /** 录屏状态（T-028 F10）。 */
@@ -81,6 +82,8 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [toastError, setToastError] = useState(false);
   /** 激活标签注册的导出函数（WindowGroupView 挂载时写入）。 */
   const exportFnRef = useRef<(() => Promise<string>) | null>(null);
+  /** 激活标签注册的会话操作（只看/剪贴板；工具栏迁移 2026-10-27）。 */
+  const sessionCtlRef = useRef<SessionControl | null>(null);
   const toastTimerRef = useRef<number | undefined>(undefined);
 
   const showToast = useCallback((message: string, isError: boolean) => {
@@ -242,9 +245,46 @@ export function Session({ deviceId }: { deviceId: string }) {
 
   // ── 工具栏操作（T-028） ──
   async function doScreenshot() {
-    if (exportFnRef.current) {
+    // 静默失败 = 用户视角的「没反应」（2026-10-27 反馈）——所有路径都给提示
+    if (!exportFnRef.current) {
+      showToast("截屏不可用：请先打开一个远程窗口", true);
+      return;
+    }
+    try {
       const path = await exportFnRef.current();
-      console.log("screenshot saved:", path);
+      showToast(`截屏已保存：${path}`, false);
+    } catch (e) {
+      showToast(`截屏失败：${String(e)}`, true);
+    }
+  }
+  /** 只看不控切换（工具栏 👁）：操作在激活标签内，结果 toast。 */
+  function doToggleViewOnly() {
+    const ctl = sessionCtlRef.current;
+    if (ctl === null) {
+      showToast("请先打开一个远程窗口", true);
+      return;
+    }
+    const before = ctl.viewOnly;
+    ctl.toggleViewOnly();
+    showToast(before ? "已恢复控制（键鼠生效）" : "已开启只看不控（键鼠停发）", false);
+  }
+  /** 剪贴板互传（工具栏 📤📥）：成功/失败都 toast（原静默失败已修）。 */
+  async function doCopy(kind: "to" | "from") {
+    const ctl = sessionCtlRef.current;
+    if (ctl === null) {
+      showToast("请先打开一个远程窗口", true);
+      return;
+    }
+    try {
+      if (kind === "to") {
+        await ctl.copyToRemote();
+        showToast("已发送到远端剪贴板（远端 Ctrl+V 粘贴）", false);
+      } else {
+        await ctl.copyFromRemote();
+        showToast("已取回远端剪贴板（本机 Ctrl+V 粘贴）", false);
+      }
+    } catch (e) {
+      showToast(`剪贴板操作失败：${String(e)}`, true);
     }
   }
   async function doFullscreen() {
@@ -469,6 +509,12 @@ export function Session({ deviceId }: { deviceId: string }) {
               privacyOn={privacyOn}
               onRecordToggle={() => void doRecordToggle()}
               recordingOn={recordingOn}
+              onToggleViewOnly={doToggleViewOnly}
+              viewOnly={sessionCtlRef.current?.viewOnly ?? false}
+              onCopyToRemote={() => void doCopy("to")}
+              onCopyFromRemote={() => void doCopy("from")}
+              onToggleHud={() => setHudVisible((v) => !v)}
+              hudVisible={hudVisible}
               onSendText={(text) => void doSendText(text)}
               onSendCombo={(keys) => void doSendCombo(keys)}
             />
@@ -480,6 +526,7 @@ export function Session({ deviceId }: { deviceId: string }) {
               showHud={hudVisible}
               exportFnRef={exportFnRef}
               recordCtlRef={recordCtlRef}
+              sessionCtlRef={sessionCtlRef}
               onRootGone={() => closeTab(activeTab.id)}
             />
           </div>

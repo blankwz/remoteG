@@ -106,6 +106,8 @@ pub fn run() {
             commands::devices::set_decode_caps,
             commands::devices::send_clipboard,
             commands::devices::request_clipboard,
+            commands::devices::local_clipboard_read,
+            commands::devices::local_clipboard_write,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
             commands::devices::edit_device,

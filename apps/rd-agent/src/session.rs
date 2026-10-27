@@ -183,6 +183,10 @@ pub struct SessionCtx {
     pub peer_name: String,
     /// 对端指纹短码（审计埋点的真实身份锚点；name 可伪造、fp 不可）。
     pub peer_fp: String,
+    /// 自控自（对端是本机 loopback）：豁免「本机优先」注入挂起——同一块
+    /// 键鼠不存在抢占，busy 门控只会让工具栏常用语/虚拟按键全部失效
+    /// （2026-10-27 用户手测实锤）。
+    pub loopback: bool,
     /// 对端 `Hello`(含 decode_caps,供 T-016 编码选路)。
     #[allow(dead_code)]
     pub hello: Hello,
@@ -279,6 +283,8 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
     let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
     let cancel = CancellationToken::new();
+    // 自控自判定（conn move 前取地址）：loopback 连接豁免「本机优先」挂起
+    let is_loopback = conn.peer_addr().ip().is_loopback();
 
     // 免费版门控 1/2:并发控制端连接数(T-029;Pro 不限)。在注册与任何
     // 能力授予前拒绝,提示大白话 + 升级路径。
@@ -317,6 +323,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         ctl: Arc::clone(&ctl_shared),
         peer_name: hello.device_name.clone(),
         peer_fp: peer_fp.short_hex().to_string(),
+        loopback: is_loopback,
         hello,
         media_fec,
         user_quality: Arc::new(AtomicU32::new(0)),

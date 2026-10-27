@@ -23,6 +23,18 @@ interface Props {
   onRecordToggle: () => void;
   /** 当前是否正在录制（按钮高亮态）。 */
   recordingOn: boolean;
+  /** 只看不控开关（原左侧会话工具条迁移）。 */
+  onToggleViewOnly: () => void;
+  /** 当前只看态（高亮）。 */
+  viewOnly: boolean;
+  /** 控制端剪贴板 → 远端。 */
+  onCopyToRemote: () => void;
+  /** 远端剪贴板 → 控制端。 */
+  onCopyFromRemote: () => void;
+  /** HUD 信息显隐切换。 */
+  onToggleHud: () => void;
+  /** 当前 HUD 显隐（高亮 = 常显）。 */
+  hudVisible: boolean;
 }
 
 const QUALITY_LABELS: Record<Quality, string> = {
@@ -84,6 +96,28 @@ export function FloatingToolbar(props: Props) {
         title={props.recordingOn ? "停止录制（存到下载目录）" : "录制远程画面（存到下载目录）"}
         active={props.recordingOn}
         onClick={props.onRecordToggle}
+      />
+      <ToolBtn
+        icon="👁"
+        title="只看不控：开启后键鼠不发给远端（防误操作），再点一次恢复"
+        active={props.viewOnly}
+        onClick={props.onToggleViewOnly}
+      />
+      <ToolBtn
+        icon="📤"
+        title="复制到远端：把本机剪贴板文字发给远端（远端 Ctrl+V 粘贴）"
+        onClick={props.onCopyToRemote}
+      />
+      <ToolBtn
+        icon="📥"
+        title="从远端复制：取回远端剪贴板文字到本机"
+        onClick={props.onCopyFromRemote}
+      />
+      <ToolBtn
+        icon="ℹ"
+        title={props.hudVisible ? "隐藏画面信息（延迟/码率）" : "常显画面信息（延迟/码率）"}
+        active={props.hudVisible}
+        onClick={props.onToggleHud}
       />
       <Sep />
       <ToolBtn icon="🔒" title="远程锁屏" onClick={props.onLockScreen} />

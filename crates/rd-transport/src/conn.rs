@@ -171,6 +171,11 @@ impl Conn {
         })
     }
 
+    /// 对端 socket 地址（loopback 自控自豁免「本机优先」门控用）。
+    pub fn peer_addr(&self) -> std::net::SocketAddr {
+        self.conn.remote_address()
+    }
+
     pub fn peer_fingerprint(&self) -> Fingerprint {
         self.peer_fingerprint
     }

@@ -94,8 +94,9 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
         return Ok(());
     }
     // 本机优先(D-013 包5):被控机真实键鼠 2s 窗口期内,控制端注入挂起
-    // (防止两边抢鼠标;向日葵式行为)
-    if crate::host_activity::busy() {
+    // (防止两边抢鼠标;向日葵式行为)。自控自(loopback)豁免:同一块键鼠
+    // 不存在抢占,门控只会让工具栏常用语/虚拟按键全部静默失效。
+    if crate::host_activity::busy() && !ctx.loopback {
         return Ok(());
     }
     match msg {
@@ -412,8 +413,8 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
-    // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜)
-    if crate::host_activity::busy() {
+    // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜);loopback 豁免
+    if crate::host_activity::busy() && !ctx.loopback {
         return Ok(());
     }
     if !ctx.windows.is_open(mv.window_id) {

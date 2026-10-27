@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 bytes = "1"
 if-addrs = "0.13"
 qoi = "0.4"

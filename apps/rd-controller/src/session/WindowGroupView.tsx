@@ -290,6 +290,18 @@ export interface RecordControl {
   stop: () => Promise<string>;
 }
 
+/** 会话操作控制器（悬浮工具栏迁移，2026-10-27）：只看切换 + 剪贴板互传。 */
+export interface SessionControl {
+  /** 翻转只看不控（重开会话生效）。 */
+  toggleViewOnly: () => void;
+  /** 控制端剪贴板 → 远端。失败抛错（人话）。 */
+  copyToRemote: () => Promise<void>;
+  /** 远端剪贴板 → 控制端。失败抛错（人话）。 */
+  copyFromRemote: () => Promise<void>;
+  /** 当前只看态（工具栏高亮）。 */
+  viewOnly: boolean;
+}
+
 interface GroupViewProps {
   deviceId: string;
   windowId: string;
@@ -300,6 +312,8 @@ interface GroupViewProps {
   exportFnRef: RefObject<(() => Promise<string>) | null>;
   /** 录屏控制注册位（页面层工具栏 ⏺ 触发；null = 未挂载）。 */
   recordCtlRef: RefObject<RecordControl | null>;
+  /** 会话操作注册位（只看/剪贴板；null = 未挂载）。 */
+  sessionCtlRef: RefObject<SessionControl | null>;
   /** 根窗口被远端销毁（DESTROYED 事件命中根）→ 页面移除标签。 */
   onRootGone: () => void;
 }
@@ -312,6 +326,7 @@ export function WindowGroupView({
   showHud,
   exportFnRef,
   recordCtlRef,
+  sessionCtlRef,
   onRootGone,
 }: GroupViewProps) {
   const snapshot = useSessionSnapshot(store);
@@ -696,7 +711,7 @@ export function WindowGroupView({
     // M1 固定以 Fit 打开（远端 1:1 适配默认）；切 Scale/Native 只停止视口
     // 上报并本地缩放，切回 Fit 无需重开（open.fit 恒为 FIT）。
     // viewOnly（v0.1）变更需重开会话（注入门在 Agent 侧按打开参数判定）。
-    openWindow(deviceId, windowId, "FIT", 0, viewOnly, onFrame)
+    openWindow(deviceId, windowId, "SCALE", 0, viewOnly, onFrame)
       .then((ack) => {
         if (cancelled) {
           return;
@@ -751,31 +766,28 @@ export function WindowGroupView({
     };
   }, [deviceId, phase]);
 
-  /** 工具条:只看不控切换(重开会话)/剪贴板互传(v0.1)。 */
+  /** 工具条:只看不控切换(重开会话)/剪贴板互传(v0.1)。经 sessionCtlRef
+   * 暴露给页面层悬浮工具栏（2026-10-27 用户反馈迁移）；操作返回
+   * Result 语义（Ok=成功, Err=人话错误），提示由页面层 toast 统一。 */
   const onToggleViewOnly = useCallback(() => {
     setViewOnly((v) => !v);
     setEpoch((n) => n + 1);
   }, []);
 
-  const onCopyToRemote = useCallback(async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text.length > 0) {
-        await sendClipboard(deviceId, text);
-      }
-    } catch (e) {
-      setError(`复制到远端失败：${errText(e)}`);
+  const onCopyToRemote = useCallback(async (): Promise<void> => {
+    // 本机剪贴板走 Rust 侧（WebView 的 navigator.clipboard 在 Tauri 下无权限）
+    const { invoke } = await import("@tauri-apps/api/core");
+    const text = await invoke<string>("local_clipboard_read");
+    if (text.length > 0) {
+      await sendClipboard(deviceId, text);
     }
   }, [deviceId]);
 
-  const onCopyFromRemote = useCallback(async () => {
-    try {
-      const text = await requestClipboard(deviceId);
-      if (text.length > 0) {
-        await navigator.clipboard.writeText(text);
-      }
-    } catch (e) {
-      setError(`从远端复制失败：${errText(e)}`);
+  const onCopyFromRemote = useCallback(async (): Promise<void> => {
+    const text = await requestClipboard(deviceId);
+    if (text.length > 0) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("local_clipboard_write", { text });
     }
   }, [deviceId]);
 
@@ -994,6 +1006,23 @@ export function WindowGroupView({
     };
   }, [recordCtlRef, startRecording, stopRecording]);
 
+  // 会话操作（只看切换/剪贴板互传）注册到页面层悬浮工具栏（T-028 工具栏迁移）
+  useEffect(() => {
+    if (sessionCtlRef) {
+      sessionCtlRef.current = {
+        toggleViewOnly: onToggleViewOnly,
+        copyToRemote: onCopyToRemote,
+        copyFromRemote: onCopyFromRemote,
+        viewOnly,
+      };
+    }
+    return () => {
+      if (sessionCtlRef && sessionCtlRef.current !== null) {
+        sessionCtlRef.current = null;
+      }
+    };
+  }, [sessionCtlRef, onToggleViewOnly, onCopyToRemote, onCopyFromRemote, viewOnly]);
+
   // ---- 渲染 ----
 
   const dpr = window.devicePixelRatio || 1;
@@ -1158,32 +1187,6 @@ export function WindowGroupView({
       ref={containerRef}
       style={hostBusy ? { cursor: "not-allowed" } : undefined}
     >
-      {/* 会话工具条(v0.1/D-013 包4):只看不控 + 剪贴板互传 */}
-      <div className={styles.sessionBar}>
-        <label
-          className={styles.sessionBarItem}
-          title="开启后只能观看画面,键鼠注入被被控端拦截(防误操作/只监控场景)"
-        >
-          <input type="checkbox" checked={viewOnly} onChange={onToggleViewOnly} />
-          只看不控
-        </label>
-        <button
-          type="button"
-          className={styles.sessionBarBtn}
-          onClick={() => void onCopyToRemote()}
-          title="把控制端剪贴板文本发送到远端(远端 Ctrl+V 粘贴)"
-        >
-          复制到远端
-        </button>
-        <button
-          type="button"
-          className={styles.sessionBarBtn}
-          onClick={() => void onCopyFromRemote()}
-          title="取回远端剪贴板文本到控制端"
-        >
-          从远端复制
-        </button>
-      </div>
       {banner !== null && <div className={styles.banner}>{banner}</div>}
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
         <div

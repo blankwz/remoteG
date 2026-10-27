@@ -808,3 +808,34 @@ mod addr_tests {
         assert_eq!(normalize_addr("fe80::1"), "fe80::1");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 控制端本机剪贴板（2026-10-27 手测修复）：WebView 的 navigator.clipboard
+// 在 Tauri v2/WebView2 下默认无权限（readText/writeText 全部 reject），
+// 剪贴板互传因此全部无效——改走 Rust 侧 arboard，权限与浏览器无关。
+// ---------------------------------------------------------------------------
+
+/// 读控制端本机剪贴板文本（剪贴板互传「复制到远端」的第一步）。
+#[tauri::command]
+pub async fn local_clipboard_read() -> Result<String, String> {
+    // arboard 非线程安全句柄：每次新建（剪贴板操作低频，开销可忽略）
+    tokio::task::spawn_blocking(|| {
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.get_text())
+            .map_err(|e| format!("读取本机剪贴板失败:{e}"))
+    })
+    .await
+    .map_err(|e| format!("剪贴板任务失败:{e}"))?
+}
+
+/// 写控制端本机剪贴板文本（「从远端复制」的最后一步）。
+#[tauri::command]
+pub async fn local_clipboard_write(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.set_text(text))
+            .map_err(|e| format!("写入本机剪贴板失败:{e}"))
+    })
+    .await
+    .map_err(|e| format!("剪贴板任务失败:{e}"))?
+}

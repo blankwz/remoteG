@@ -38,7 +38,23 @@ struct AppState {
 async fn main() -> anyhow::Result<()> {
     let mut port: u16 = 7500;
     let mut bench_dir: Option<String> = None;
-    let mut static_dir: Option<String> = Some("switchboard/studio/dist".into());
+    // 界面产物目录：相对路径随启动目录漂移（2026-10-27 手测反馈：双击 exe
+    // 时找不到 dist）——按候选顺序探测，命中第一个含 index.html 的
+    let mut static_dir: Option<String> = None;
+    if static_dir.is_none() {
+        let candidates = [
+            "switchboard/studio/dist",
+            "../studio/dist",
+            "../../studio/dist",
+            "../../../studio/dist",
+            // 双击 target/release/switchboard-daemon.exe 时 cwd = release 目录
+            "../../../../studio/dist",
+        ];
+        static_dir = candidates
+            .iter()
+            .find(|c| std::path::Path::new(c).join("index.html").exists())
+            .map(|c| c.to_string());
+    }
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
