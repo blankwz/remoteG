@@ -327,17 +327,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     try { const m = await import("../api/input"); await m.textInput(deviceId, "__RD_CAD__"); } catch {}
   }
   async function doSendText(text: string) {
-    if (loopback) {
-      showToast("本机自测模式：注入已停用（自己控自己，文字本来就在本机）。连接第二台电脑即可使用", true);
-      return;
-    }
     try { const m = await import("../api/input"); await m.textInput(deviceId, text); } catch {}
   }
   async function doSendCombo(keys: string[]) {
-    if (loopback) {
-      showToast("本机自测模式：注入已停用。连接第二台电脑即可使用", true);
-      return;
-    }
     try {
       const { keyEvent } = await import("../api/input");
       const SCAN: Record<string, [number, boolean]> = {
@@ -490,6 +482,12 @@ export function Session({ deviceId }: { deviceId: string }) {
           {sidebarOpen ? "📌 收起列表" : "📌 窗口列表"}
         </button>
       </nav>
+
+      {loopback && (
+        <div className={styles.loopbackBar}>
+          🖥 本机自测模式：点击会「穿透」到真实窗口（该窗口会弹到前台，点本窗口切回）；鼠标移动不跟随、文字/常用语在点击后生效。双机连接无此限制。
+        </div>
+      )}
 
       <div className={styles.sessionBody}>
         {sidebarOpen && (

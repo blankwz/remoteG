@@ -1,64 +1,99 @@
+/* 悬浮工具栏（2026-10-28 重设计）：图文双行按钮 + 常驻 + 手动收起 */
 .bar {
   position: absolute; top: 0; left: 50%; transform: translateX(-50%);
   z-index: 50;
-  display: flex; align-items: center; gap: 2px;
-  background: rgba(22,23,25,.92);
+  display: flex; align-items: stretch; flex-wrap: wrap; justify-content: center;
+  max-width: 96vw;
+  background: rgba(22,23,25,.95);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border, #2c3038);
-  border-radius: 0 0 10px 10px;
-  padding: 4px 8px;
+  border-radius: 0 0 12px 12px;
+  padding: 5px 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
 }
+
+/* 手动收起后的小圆点 */
 .dot {
   position: absolute; top: 4px; left: 50%; transform: translateX(-50%);
-  z-index: 50; width: 32px; height: 32px; border-radius: 50%;
-  background: rgba(22,23,25,.92); border: 1px solid var(--border, #2c3038);
-  color: var(--text-secondary, #9d9ea3); cursor: pointer; font-size: 14px;
+  z-index: 50; width: 34px; height: 34px; border-radius: 50%;
+  background: rgba(22,23,25,.95); border: 1px solid var(--border, #2c3038);
+  color: var(--text-secondary, #9d9ea3); cursor: pointer; font-size: 15px;
   display: flex; align-items: center; justify-content: center;
 }
-.dot:hover { border-color: var(--accent, #6c9ef8); }
-.group { display: flex; align-items: center; }
-.select {
-  background: transparent; color: var(--text-primary, #d8d9da);
-  border: 1px solid var(--border, #2c3038); border-radius: 4px;
-  padding: 2px 6px; font-size: 11px; cursor: pointer;
+.dot:hover { border-color: var(--accent, #6c9ef8); color: var(--text-primary, #d8d9da); }
+
+/* 画质下拉（select + 底部标签） */
+.qualityWrap {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; padding: 3px 8px;
 }
+.qualityLabel {
+  font-size: 10px; color: var(--text-secondary, #9d9ea3); line-height: 1;
+}
+.select {
+  background: var(--bg-input, #0b0c0e); color: var(--text-primary, #d8d9da);
+  border: 1px solid var(--border, #2c3038); border-radius: 5px;
+  padding: 3px 6px; font-size: 11px; cursor: pointer;
+}
+
+/* 图文双行按钮 */
 .toolBtn {
-  background: transparent; border: none; color: var(--text-secondary, #9d9ea3);
-  font-size: 15px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-width: 52px; padding: 5px 7px;
+  background: transparent; border: none; border-radius: 8px; cursor: pointer;
+  color: var(--text-secondary, #9d9ea3);
   transition: background .1s, color .1s;
 }
 .toolBtn:hover { background: var(--bg-hover, #22252b); color: var(--text-primary, #d8d9da); }
-.toolBtnOn { color: var(--accent, #6c9ef8); background: rgba(108,158,248,.12); }
-.sep { width: 1px; height: 18px; background: var(--border, #2c3038); margin: 0 2px; }
+.toolBtnOn {
+  color: var(--accent, #6c9ef8);
+  background: rgba(108,158,248,.14);
+}
+.toolIcon { font-size: 16px; line-height: 1; }
+.toolLabel {
+  font-size: 10px; line-height: 1; white-space: nowrap;
+}
+
+.sep { width: 1px; align-self: stretch; background: var(--border, #2c3038); margin: 2px 4px; }
+
+/* 收起按钮（最右，窄样式区别于工具按钮） */
+.collapse {
+  align-self: center;
+  background: transparent; border: none; color: var(--text-disabled, #5c5d63);
+  font-size: 14px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+}
+.collapse:hover { color: var(--text-primary, #d8d9da); background: var(--bg-hover, #22252b); }
+
+/* 面板（常用语/虚拟按键） */
 .panel {
   position: absolute; top: 100%; left: 0;
-  min-width: 200px; max-width: 280px;
-  background: rgba(22,23,25,.96);
+  min-width: 220px; max-width: 300px;
+  background: rgba(22,23,25,.97);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border, #2c3038);
-  border-radius: 10px; padding: 8px;
+  border-radius: 10px; padding: 10px;
   box-shadow: 0 8px 24px rgba(0,0,0,.45);
   z-index: 60;
 }
 .panelTitle { display: block; font-size: 11px; color: var(--text-secondary, #9d9ea3); margin-bottom: 6px; }
 .panelItem {
   display: block; width: 100%; text-align: left;
-  background: transparent; border: none; color: var(--text-primary, #d8d9da);
-  padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  background: transparent; border: none; color: var(--text-ph, #d8d9da);
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
 .panelItem:hover { background: var(--bg-hover, #22252b); }
 .panelAdd { display: flex; gap: 4px; margin-top: 6px; }
 .panelAdd input {
   flex: 1; background: var(--bg-input, #0b0c0e); color: var(--text-primary, #d8d9da);
-  border: 1px solid var(--border, #2c3038); border-radius: 4px; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--border, #2c3038); border-radius: 5px; padding: 5px 8px; font-size: 12px;
 }
 .panelAdd button {
   background: var(--accent, #6c9ef8); color: white; border: none;
-  border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 12px;
+  border-radius: 5px; padding: 5px 10px; cursor: pointer; font-size: 12px;
 }
 .modsRow { display: flex; gap: 4px; margin-bottom: 8px; }
 .modBtn {
-  flex: 1; padding: 4px 0; border-radius: 4px; font-size: 11px;
+  flex: 1; padding: 5px 0; border-radius: 5px; font-size: 11px;
   background: var(--bg-input, #0b0c0e); color: var(--text-secondary, #9d9ea3);
   border: 1px solid var(--border, #2c3038); cursor: pointer;
 }
@@ -66,7 +101,7 @@
 .modOn { background: var(--accent, #6c9ef8); color: white; border-color: var(--accent, #6c9ef8); }
 .keysGrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 8px; }
 .keyBtn {
-  padding: 5px 0; border-radius: 4px; font-size: 11px;
+  padding: 5px 0; border-radius: 5px; font-size: 11px;
   background: var(--bg-input, #0b0c0e); color: var(--text-primary, #d8d9da);
   border: 1px solid var(--border, #2c3038); cursor: pointer; text-align: center;
 }

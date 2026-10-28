@@ -93,18 +93,18 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
-    // 自控自(loopback):注入 = SendInput 打在本机,与控制端光标形成反馈
-    // 循环(鼠标被拉扯),文字/按键打进控制端自己的焦点——release 构建全部
-    // 停用,注入功能由双机场景验证(2026-10-27 用户实测鼠标被拉扯)。
-    // debug 构建放行:无头 e2e 没有真实用户光标(无循环、busy 恒 false),
-    // 注入协议/管线的自动化验证依赖它(与 confirm_connection 的 debug
-    // 豁免同一先例)。
-    if ctx.loopback && !cfg!(debug_assertions) {
-        return Ok(());
-    }
-    // 本机优先(D-013 包5):被控机真实键鼠 2s 窗口期内,控制端注入挂起
-    // (防止两边抢鼠标;向日葵式行为)
-    if crate::host_activity::busy() {
+    // 自控自(loopback)「穿透模式」（2026-10-28 定稿）：点击/滚轮/键盘/文字
+    // 放行——agent 端 ensure_fg 把远端窗口拉到前台后定点注入（用户直接看到
+    // 真实窗口被操作，点控制端画面即可切回）。全部停用会退化成"只能看"
+    // （用户反馈）；高频鼠标移动的拉扯问题见 on_datagram（仍停用）。
+    // busy 豁免：用户点工具栏的物理输入就是"本机活动"，不豁免则常用语/
+    // 虚拟按键 2s 窗口期内全被吞（实测）。debug 构建再豁免 busy：e2e 与
+    // 开发者共用一台机器，人在用电脑时物理输入会让注入用例随机挂掉
+    // （实测 t05 套件内间歇失败）——无头 e2e 不代表双机语义，release 不受影响。
+    if crate::host_activity::busy()
+        && !ctx.loopback
+        && !cfg!(debug_assertions)
+    {
         return Ok(());
     }
     match msg {
@@ -421,9 +421,10 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     if ctx.state.paused.load(Ordering::SeqCst) {
         return Ok(());
     }
-    // 自控自:移动注入与控制端光标互相拉扯(见 handle),release 停用
-    // (debug 放行供 e2e 验证注入协议,见 handle 注释)
-    if ctx.loopback && !cfg!(debug_assertions) {
+    // 自控自:高频移动注入与控制端光标互相拉扯(移动 → 真光标动 → 控制端
+    // 又收到 pointermove → 再注入),停用;点击/键盘的"穿透"见 handle。
+    // 真实场景里远端光标跟随靠画面内绘制的软光标(控制端),不依赖注入。
+    if ctx.loopback {
         return Ok(());
     }
     // 本机优先(D-013 包5):高频移动路径同样挂起(原子读,便宜)

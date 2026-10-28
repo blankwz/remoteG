@@ -1188,6 +1188,11 @@ export function WindowGroupView({
       style={hostBusy ? { cursor: "not-allowed" } : undefined}
     >
       {banner !== null && <div className={styles.banner}>{banner}</div>}
+      {viewOnly && (
+        <div className={styles.viewOnlyBar}>
+          👁 只看不控中——键鼠不会发送到远端。点工具栏「只看」按钮恢复控制。
+        </div>
+      )}
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
         <div
           className={styles.group}
