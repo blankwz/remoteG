@@ -866,14 +866,18 @@ pub async fn open_studio(app: tauri::AppHandle) -> Result<(), String> {
 
 /// fec 高清链路开关（Studio「方案」落到远程控制的落地开关）：写
 /// `settings.json`，连接设备时生效（RS 纠错分片通道，弱网更稳、开销 +20%）。
+/// 原子写（临时文件 + rename，与信任列表同一纪律）——写一半崩溃不损坏配置。
 #[tauri::command]
 pub async fn set_media_fec(
     enabled: bool,
     state: State<'_, ConnManager>,
 ) -> Result<(), String> {
-    let path = state.data_dir().join("settings.json");
+    let dir = state.data_dir();
+    let path = dir.join("settings.json");
+    let tmp = dir.join("settings.json.tmp");
     let body = serde_json::json!({ "media_fec": enabled }).to_string();
-    std::fs::write(&path, body).map_err(|e| format!("写入设置失败:{e}"))?;
+    std::fs::write(&tmp, body).map_err(|e| format!("写入设置失败:{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("提交设置失败:{e}"))?;
     tracing::info!(enabled, path = %path.display(), "fec 开关已更新");
     Ok(())
 }

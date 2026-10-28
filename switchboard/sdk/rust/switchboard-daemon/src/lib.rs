@@ -34,10 +34,22 @@ pub struct AppState {
     pub bench_dir: Arc<Option<String>>,
 }
 
-/// Studio 界面产物目录探测：相对路径随启动目录漂移，按候选顺序找第一个
-/// 含 index.html 的。外部宿主（rd-controller 内嵌）也用它。
+/// Studio 界面产物目录探测：相对路径随启动目录漂移（cwd 可能是 exe 目录、
+/// 安装后的 Program Files 甚至 system32），按候选顺序找第一个含 index.html
+/// 的。外部宿主（rd-controller 内嵌）也用它。
 pub fn default_static_dir() -> Option<String> {
-    let candidates = [
+    // exe 相对候选（安装版：资源随安装包落在 exe 旁；review R1 修复）
+    let exe_rel: Vec<std::path::PathBuf> = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .map(|dir| {
+            ["studio/dist", "../../studio/dist"]
+                .iter()
+                .map(|c| dir.join(c))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cwd_rel = [
         "switchboard/studio/dist",
         "../studio/dist",
         "../../studio/dist",
@@ -45,10 +57,14 @@ pub fn default_static_dir() -> Option<String> {
         // 双击 target/release/switchboard-daemon.exe 时 cwd = release 目录
         "../../../../studio/dist",
     ];
+    let candidates: Vec<std::path::PathBuf> = exe_rel
+        .into_iter()
+        .chain(cwd_rel.iter().map(std::path::PathBuf::from))
+        .collect();
     candidates
         .iter()
-        .find(|c| std::path::Path::new(c).join("index.html").exists())
-        .map(|c| c.to_string())
+        .find(|c| c.join("index.html").exists())
+        .map(|c| c.to_string_lossy().to_string())
 }
 
 /// 启动 HTTP/WS 服务（阻塞当前任务直到出错；宿主自行 spawn）。

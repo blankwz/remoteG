@@ -60,9 +60,20 @@ pub fn run() {
     // 方案实验室（Studio 内嵌，2026-10-28 用户需求「Studio 与 rd-controller 融合」）：
     // 同进程托管方案测试/跑分 API 与界面，设备页「方案实验室」开窗口加载。
     // 7500 被占 = 已有实例（独立 daemon），同一套 API，跳过即可。
+    // bench_dir 同步探测（review 补漏）：缺失时跑分对比页为空但不影响其他页。
     tauri::async_runtime::spawn(async {
         let static_dir = switchboard_daemon::default_static_dir();
-        if let Err(err) = switchboard_daemon::serve(7500, None, static_dir).await {
+        let bench_dir = [
+            "switchboard/registry/bench",
+            "../registry/bench",
+            "../../registry/bench",
+            "../../../registry/bench",
+            "../../../../registry/bench",
+        ]
+        .iter()
+        .find(|c| std::path::Path::new(c).exists())
+        .map(|c| c.to_string());
+        if let Err(err) = switchboard_daemon::serve(7500, bench_dir, static_dir).await {
             tracing::info!("方案实验室服务未启动(7500 占用=已有实例，不影响): {err:#}");
         }
     });
