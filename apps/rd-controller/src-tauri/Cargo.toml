@@ -20,6 +20,7 @@ anyhow = "1"
 arboard = "3"
 bytes = "1"
 if-addrs = "0.13"
+switchboard-daemon = { path = "../../../switchboard/sdk/rust/switchboard-daemon" }
 qoi = "0.4"
 rd-agent = { path = "../../../apps/rd-agent" }
 rd-proto = { path = "../../../crates/rd-proto" }

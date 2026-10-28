@@ -57,6 +57,16 @@ pub fn run() {
         "controller identity ready (ephemeral, persisted in T-013)"
     );
 
+    // 方案实验室（Studio 内嵌，2026-10-28 用户需求「Studio 与 rd-controller 融合」）：
+    // 同进程托管方案测试/跑分 API 与界面，设备页「方案实验室」开窗口加载。
+    // 7500 被占 = 已有实例（独立 daemon），同一套 API，跳过即可。
+    tauri::async_runtime::spawn(async {
+        let static_dir = switchboard_daemon::default_static_dir();
+        if let Err(err) = switchboard_daemon::serve(7500, None, static_dir).await {
+            tracing::info!("方案实验室服务未启动(7500 占用=已有实例，不影响): {err:#}");
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -108,6 +118,9 @@ pub fn run() {
             commands::devices::request_clipboard,
             commands::devices::local_clipboard_read,
             commands::devices::local_clipboard_write,
+            commands::devices::open_studio,
+            commands::devices::set_media_fec,
+            commands::devices::get_media_fec,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
             commands::devices::edit_device,

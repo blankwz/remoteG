@@ -543,6 +543,7 @@ impl DeviceConn {
         addr: &str,
         identity: &Identity,
         expected: Option<Fingerprint>,
+        media_fec: bool,
     ) -> anyhow::Result<Arc<Self>> {
         // M2 #4 切入点（默认关闭）：设置 RD_PLAN 环境变量时走 Switchboard Plan
         // 执行器选路（LAN 发现/回退语义，spec/02），传输仍是 rd 原生 QUIC。
@@ -580,7 +581,7 @@ impl DeviceConn {
             ctrl_tx,
             ctrl_rx,
             peer_fp,
-            media_fec_env(),
+            media_fec,
         );
         // T-027：已请求 fec-shards → 拉起视频泵（握手后远端才开始发分片）
         if device.inner.media_fec.load(Ordering::SeqCst) {
@@ -851,11 +852,6 @@ async fn video_pump(inner: Arc<Inner>, mut rx: DataRx) {
             }
         }
     }
-}
-
-/// T-027 开关：fec-shards 视频路径请求（默认关）
-fn media_fec_env() -> bool {
-    std::env::var("RD_MEDIA_FEC").as_deref() == Ok("1")
 }
 
 /// T-027：fec-shards 视频泵——datagram 收流 → RS 重组 → 前端投递。

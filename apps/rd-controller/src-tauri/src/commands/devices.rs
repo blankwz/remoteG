@@ -496,7 +496,7 @@ pub async fn pair_device(
     };
 
     // 首连不校验指纹（对端尚未进信任列表），配对成功后按实测指纹保存
-    let conn = DeviceConn::connect("pairing", &addr, state.identity(), None)
+    let conn = DeviceConn::connect("pairing", &addr, state.identity(), None, crate::commands::devices::media_fec_setting(state.data_dir()))
         .await
         .map_err(|e| describe_connect_error(&e))?;
     let result = run_pairing(&conn, &code, &addr, &name, &state).await;
@@ -543,7 +543,7 @@ pub async fn connect_device(
     // 自动重连循环会被单次慢失败拖住——快速失败让退避节奏生效。
     let conn = tokio::time::timeout(
         Duration::from_secs(3),
-        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp)),
+        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp), crate::commands::devices::media_fec_setting(state.data_dir())),
     )
     .await
     .map_err(|_| format!("连接 {} 超时（3s）", entry.addr))?
@@ -638,7 +638,7 @@ pub async fn probe_device(id: String, state: State<'_, ConnManager>) -> Result<b
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
     match tokio::time::timeout(
         PROBE_TIMEOUT,
-        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp)),
+        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp), crate::commands::devices::media_fec_setting(state.data_dir())),
     )
     .await
     {
@@ -838,4 +838,60 @@ pub async fn local_clipboard_write(text: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("剪贴板任务失败:{e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// 方案实验室（Studio 内嵌，2026-10-28 融合）：独立窗口加载本进程内嵌的
+// Studio（方案测试/跑分对比），不再单独开浏览器/daemon。
+// ---------------------------------------------------------------------------
+
+/// 打开（或聚焦已打开的）方案实验室窗口。
+#[tauri::command]
+pub async fn open_studio(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl};
+    if let Some(win) = app.get_webview_window("studio") {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let url: tauri::Url = "http://127.0.0.1:7500"
+        .parse()
+        .map_err(|e| format!("实验室地址解析失败:{e}"))?;
+    tauri::WebviewWindowBuilder::new(&app, "studio", WebviewUrl::External(url))
+        .title("方案实验室 · Switchboard Studio")
+        .inner_size(1150.0, 820.0)
+        .build()
+        .map(|_| ())
+        .map_err(|e| format!("打开实验室窗口失败:{e}"))
+}
+
+/// fec 高清链路开关（Studio「方案」落到远程控制的落地开关）：写
+/// `settings.json`，连接设备时生效（RS 纠错分片通道，弱网更稳、开销 +20%）。
+#[tauri::command]
+pub async fn set_media_fec(
+    enabled: bool,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let path = state.data_dir().join("settings.json");
+    let body = serde_json::json!({ "media_fec": enabled }).to_string();
+    std::fs::write(&path, body).map_err(|e| format!("写入设置失败:{e}"))?;
+    tracing::info!(enabled, path = %path.display(), "fec 开关已更新");
+    Ok(())
+}
+
+/// 读 fec 开关当前值（前端展示勾选态；缺省 = 关）。
+#[tauri::command]
+pub async fn get_media_fec(state: State<'_, ConnManager>) -> Result<bool, String> {
+    Ok(media_fec_setting(state.data_dir()))
+}
+
+/// fec 生效值：env 覆盖 > settings.json > 默认关（T-027 语义保留）。
+pub fn media_fec_setting(data_dir: &Path) -> bool {
+    if std::env::var("RD_MEDIA_FEC").as_deref() == Ok("1") {
+        return true;
+    }
+    std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("media_fec").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }

@@ -58,6 +58,8 @@ export function Devices() {
   /** 局域网扫描结果（发现 ≠ 信任，点击仅预填添加对话框）。 */
   const [discovered, setDiscovered] = useState<DiscoveredDeviceDto[] | null>(null);
   const [scanning, setScanning] = useState(false);
+  /** fec 高清链路开关（settings.json 持久化；下次连接生效）。 */
+  const [mediaFec, setMediaFec] = useState(false);
   /** 本机被控状态（融合版：本机也是被控机）。 */
   const [host, setHost] = useState<HostStatusDto | null>(null);
   /** 配对码卡（null = 未生成）。 */
@@ -78,6 +80,10 @@ export function Devices() {
 
   useEffect(() => {
     void refresh();
+    // fec 开关回显（settings.json）
+    void import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke<boolean>("get_media_fec").then(setMediaFec).catch(() => undefined),
+    );
     // ConnManager 断线（含主动断开）广播 → 刷新在线圆点
     const unlisten = listen<DisconnectedPayload>("device-disconnected", () => {
       void refresh();
@@ -158,6 +164,28 @@ export function Devices() {
       setScanning(false);
     }
   }, []);
+
+  /** 方案实验室（Studio 内嵌窗口，2026-10-28 融合）。 */
+  const onOpenStudio = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_studio");
+    } catch (e) {
+      setError(`打开方案实验室失败：${errText(e)}`);
+    }
+  }, []);
+
+  /** fec 高清链路开关（写 settings.json，下次连接生效）。 */
+  const onToggleMediaFec = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const next = !mediaFec;
+      await invoke("set_media_fec", { enabled: next });
+      setMediaFec(next);
+    } catch (e) {
+      setError(`保存 fec 开关失败：${errText(e)}`);
+    }
+  }, [mediaFec]);
 
   /** 把发现的设备预填进添加对话框（需再输配对码完成配对）。 */
   const onPickDiscovered = useCallback((d: DiscoveredDeviceDto) => {
@@ -290,6 +318,9 @@ export function Devices() {
       <header className={styles.header}>
         <h1 className={styles.title}>设备</h1>
         <div className={styles.headerActions}>
+          <button type="button" className={styles.actionBtn} onClick={() => void onOpenStudio()}>
+            🧪 方案实验室
+          </button>
           <button
             type="button"
             className={styles.actionBtn}
@@ -303,6 +334,11 @@ export function Devices() {
           </button>
         </div>
       </header>
+
+      <label className={styles.fecToggle} title="fec 高清链路（RS 纠错分片通道）：弱网/跨网更稳，带宽开销约 +20%。对应方案实验室里的 RS 方案；下次连接生效">
+        <input type="checkbox" checked={mediaFec} onChange={() => void onToggleMediaFec()} />
+        fec 高清链路（弱网/跨网推荐开）
+      </label>
 
       {error !== null && <p className={styles.error}>{error}</p>}
       {notice !== null && <p className={styles.notice}>{notice}</p>}

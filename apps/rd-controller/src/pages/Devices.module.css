@@ -413,3 +413,25 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* fec 高清链路开关（Studio 方案落地的远程控制开关） */
+.fecToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #2c3038);
+  border-radius: 8px;
+  background: var(--bg-surface, #181b1f);
+  color: var(--text-primary, #d8d9da);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.fecToggle input {
+  accent-color: var(--accent, #6c9ef8);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
