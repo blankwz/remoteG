@@ -98,6 +98,8 @@ export interface DesktopRect {
   readonly topPct: number;
   readonly widthPct: number;
   readonly heightPct: number;
+  /** 宽度不足 4% 的窗口：收成边缘窄条（icon-only），不再读作「渲染破了」。 */
+  readonly narrow: boolean;
 }
 
 /** 虚拟桌面基准（主流单屏；多屏超界窗口裁剪到界内）。 */
@@ -111,6 +113,7 @@ export function desktopMap(
     const top = Math.min(Math.max(0, w.y), VIRTUAL_DESKTOP.h - 60);
     const width = Math.min(Math.max(120, w.w), VIRTUAL_DESKTOP.w - left);
     const height = Math.min(Math.max(80, w.h), VIRTUAL_DESKTOP.h - top);
+    const widthPct = (width / VIRTUAL_DESKTOP.w) * 100;
     return {
       id: w.id,
       title: w.title.length > 0 ? w.title : "(无标题窗口)",
@@ -118,8 +121,9 @@ export function desktopMap(
       minimized: w.minimized,
       leftPct: (left / VIRTUAL_DESKTOP.w) * 100,
       topPct: (top / VIRTUAL_DESKTOP.h) * 100,
-      widthPct: (width / VIRTUAL_DESKTOP.w) * 100,
+      widthPct,
       heightPct: (height / VIRTUAL_DESKTOP.h) * 100,
+      narrow: widthPct < 4,
     };
   });
 }
@@ -466,13 +470,13 @@ export function Windows({ deviceId }: { deviceId: string }) {
             <button
               key={r.id}
               type="button"
-              className={styles.mapWin}
+              className={`${styles.mapWin} ${r.narrow ? styles.mapWinEdge : ""}`}
               data-minimized={r.minimized}
               style={{
                 left: `${r.leftPct}%`,
                 top: `${r.topPct}%`,
-                width: `${r.widthPct}%`,
-                height: `${r.heightPct}%`,
+                width: r.narrow ? "22px" : `${r.widthPct}%`,
+                height: r.narrow ? `${r.heightPct}%` : `${r.heightPct}%`,
               }}
               title={`${r.title} — 打开远程会话`}
               onClick={() => {

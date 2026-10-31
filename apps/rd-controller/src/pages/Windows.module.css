@@ -472,3 +472,18 @@
   font-size: var(--rd-fs-micro);
   color: var(--rd-text-faint);
 }
+
+/* 窄条边缘卡（R14 设计：宽 <4% 的窗口收成边缘指示条，不再读作「渲染破了」；
+ * 完整信息悬浮 title 提供） */
+.mapWinEdge {
+  padding: 4px 2px;
+  border-left: 2px solid var(--rd-accent);
+}
+.mapWinEdge .mapWinBar {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.mapWinEdge .mapWinTitle {
+  display: none;
+}

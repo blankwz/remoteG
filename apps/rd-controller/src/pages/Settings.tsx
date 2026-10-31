@@ -17,6 +17,7 @@ import {
   loadFontSize,
   saveFontSize,
 } from "../term/TermView";
+import { Switch } from "../ui/Switch";
 import styles from "./Settings.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
@@ -47,6 +48,12 @@ function readPhrases(): readonly string[] {
     return [];
   }
 }
+
+/** macOS 才显示 Cmd→Ctrl 行（Windows 上是无条件噪音）。 */
+const IS_MAC =
+  typeof navigator !== "undefined" &&
+  (navigator.platform?.toLowerCase().includes("mac") ||
+    navigator.userAgent.includes("Mac OS X"));
 
 export function Settings() {
   const [quality, setQuality] = useState<Quality>(readQuality);
@@ -106,6 +113,7 @@ export function Settings() {
     <main className={styles.page}>
       <h1 className={styles.title}>设置</h1>
       <ul className={styles.list}>
+        <li className={styles.section}>连接画质</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>新连接默认画质</b>
@@ -124,18 +132,23 @@ export function Settings() {
             ))}
           </select>
         </li>
+        {IS_MAC && (
+        <li className={styles.section}>输入映射</li>
+        )}
+        {IS_MAC && (
         <li className={styles.row}>
           <label className={styles.label}>
             <b>macOS：Cmd 组合键映射为远端 Ctrl</b>
-            <span className={styles.hint}>与会话 HUD 内开关同一偏好（{CMD_TO_CTRL_KEY}）</span>
+            <span className={styles.hint}>与会话内画面信息面板的开关保持同步</span>
           </label>
-          <input
-            type="checkbox"
-            className={styles.check}
+          <Switch
             checked={cmdToCtrl}
-            onChange={(e) => onCmdToCtrl(e.currentTarget.checked)}
+            onChange={onCmdToCtrl}
+            label="Cmd 组合键映射为远端 Ctrl"
           />
         </li>
+        )}
+        <li className={styles.section}>网络</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>弱网纠错（FEC）</b>
@@ -144,14 +157,14 @@ export function Settings() {
               {fecError !== null && ` · 保存失败：${fecError}`}
             </span>
           </span>
-          <input
-            type="checkbox"
-            className={styles.check}
+          <Switch
             checked={fec === true}
             disabled={fec === null}
-            onChange={(e) => void onFec(e.currentTarget.checked)}
+            onChange={(v) => void onFec(v)}
+            label="弱网纠错（FEC）"
           />
         </li>
+        <li className={styles.section}>终端与常用语</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>终端默认字号</b>

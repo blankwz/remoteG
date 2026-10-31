@@ -189,11 +189,15 @@ export type KeyAction =
  *   / C（取回剪贴板）/ X（发送剪贴板）
  * - Ctrl+Alt+1..9（切会话标签；用 Ctrl+Alt 而非 Ctrl+digit——后者是远端
  *   应用常用快捷键，不抢）
+ * - Ctrl(±Shift)+Tab（环形切标签）
  * 保留组合不下发远端——否则页面层热键与远端注入各走一次（R11 双入口回归）。
  */
 export function isReservedCombo(k: KeyInput): boolean {
   if (k.altGraph) {
     return false; // AltGr+数字是欧陆布局的 @#~ 等字符，不劫持
+  }
+  if (k.ctrlKey && !k.altKey && !k.metaKey && k.code === "Tab") {
+    return true; // Ctrl(±Shift)+Tab：本地环切会话标签（不下发远端）
   }
   if (k.metaKey || k.altKey) {
     // Ctrl+Shift+* 组合不含 Alt；Ctrl+Alt+digit 见下（Shift 必须未按）

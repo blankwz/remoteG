@@ -366,6 +366,17 @@ export function Session({ deviceId }: { deviceId: string }) {
   // 否则热键既下发远端又本地触发，R11 双入口回归）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+Tab / Ctrl+Shift+Tab 环形切签（保留表同步判定）
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === "Tab") {
+        e.preventDefault();
+        const idx = tabs.findIndex((t) => t.id === activeId);
+        const delta = e.shiftKey ? -1 : 1;
+        const next = tabs[(idx + delta + tabs.length) % tabs.length];
+        if (next !== undefined) {
+          setActiveId(next.id);
+        }
+        return;
+      }
       // Ctrl+Alt+1..9 切标签（保留表同步判定，不下发远端）；AltGr 让路
       if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
         if (e.getModifierState("AltGraph")) {
@@ -1019,21 +1030,34 @@ export function Session({ deviceId }: { deviceId: string }) {
               </button>
             </div>
           </div>
-        ) : activeTab.kind === "term" ? (
-          <div className={styles.stage}>
-            <TermView
-              key={activeTab.id}
-              deviceId={deviceId}
-              tabId={activeTab.id}
-              shell={activeTab.shell}
-              onTitle={(title) => setTermTitle(activeTab.id, title)}
-              onStatus={(s) => setTermStatus(activeTab.id, s)}
-            />
-          </div>
         ) : null}
+        {/* 终端标签保活（R14 交互：与窗口标签同权——曾切走即卸载，切回付
+         * 重挂载价且回放丢失；display:none 下 xterm fit 抛错被既有守卫吞掉，
+         * 重现时 ResizeObserver 重新对齐并补报 term_resize） */}
+        {tabs
+          .filter((t) => t.kind === "term")
+          .map((t) => (
+            <div
+              key={t.id}
+              className={styles.stage}
+              style={t.id === activeId ? undefined : { display: "none" }}
+            >
+              <TermView
+                key={t.id}
+                deviceId={deviceId}
+                tabId={t.id}
+                shell={t.shell}
+                onTitle={(title) => setTermTitle(t.id, title)}
+                onStatus={(st) => setTermStatus(t.id, st)}
+              />
+            </div>
+          ))}
         {/* 窗口标签保活（R13 交互#3）：全部挂载、非激活隐藏——切签不再
          * close/open 会话付全价黑屏重连；active 门控使 ref 注册/视口上报
-         * 只属于激活标签。 */}
+         * 只属于激活标签。
+         * 带宽语义（如实披露，R14 交互终审）：隐藏标签仍全速率收流解码
+         * （跳帧会让解码器错过参考帧直到下一个 IDR，黑屏风险＞带宽代价），
+         * N 标签 = N 路流；画质为设备级无按签降档，多标签场景注意带宽。 */}
         {tabs
           .filter((t) => t.kind === "window")
           .map((t) => (
@@ -1045,6 +1069,7 @@ export function Session({ deviceId }: { deviceId: string }) {
               <WindowGroupView
                 key={t.id}
                 active={t.id === activeId}
+                deviceName={deviceName}
                 deviceId={deviceId}
                 windowId={t.id}
                 store={t.store}

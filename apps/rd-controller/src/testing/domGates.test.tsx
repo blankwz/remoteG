@@ -15,6 +15,9 @@ import { axeScan } from "./axeScan";
 import { useDismiss } from "../ui/useDismiss";
 import { Devices } from "../pages/Devices";
 import { Settings } from "../pages/Settings";
+import { Windows } from "../pages/Windows";
+import { WindowSidebar } from "../session/WindowSidebar";
+import { FloatingToolbar } from "../session/FloatingToolbar";
 import { useState, useRef, useCallback } from "react";
 
 const { callMock } = vi.hoisted(() => ({ callMock: vi.fn() }));
@@ -28,6 +31,20 @@ vi.mock("../api/bridge", () => ({
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
 }));
+
+// Windows 页装载链路单独桩（subscribeWindowEvents 走 Channel，jsdom 下真实
+// 实现会抛错进 error 态——列表数据经 list_windows 命令表提供）
+vi.mock("../api/windows", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/windows")>();
+  return {
+    ...actual,
+    listWindows: vi.fn().mockResolvedValue([
+      { id: "101", title: "测试窗口 A", process: "a.exe", pid: 1, icon: null, x: 0, y: 0, w: 800, h: 600, dpi: 1, resizable: true, minimized: false },
+      { id: "102", title: "测试窗口 B", process: "b.exe", pid: 2, icon: null, x: 960, y: 200, w: 600, h: 400, dpi: 1, resizable: true, minimized: true },
+    ]),
+    subscribeWindowEvents: vi.fn().mockResolvedValue(() => undefined),
+  };
+});
 
 function mockReply(cmd: string): unknown {
   switch (cmd) {
@@ -46,6 +63,11 @@ function mockReply(cmd: string): unknown {
       return { listenAddrs: [], peers: [], paused: false };
     case "get_media_fec":
       return false;
+    case "list_windows":
+      return [
+        { id: "101", title: "测试窗口 A", process: "a.exe", pid: 1, icon: null, x: 0, y: 0, w: 800, h: 600, dpi: 1, resizable: true, minimized: false },
+        { id: "102", title: "测试窗口 B", process: "b.exe", pid: 2, icon: null, x: 0, y: 0, w: 600, h: 400, dpi: 1, resizable: true, minimized: true },
+      ];
     default:
       return true;
   }
@@ -162,6 +184,80 @@ describe("axe DOM 门禁（真实页面）", () => {
 // ---------------------------------------------------------------------------
 // Devices 添加设备对话框：焦点陷阱 + Esc 还原（D07 回归锁定）
 // ---------------------------------------------------------------------------
+
+/** FloatingToolbar 全 noop 挂载点（R14：会话主战场的工具栏纳入 axe）。 */
+function ToolbarHarness() {
+  return (
+    <FloatingToolbar
+      windowActions
+      inputLocked={false}
+      quality="auto"
+      privacyOn={false}
+      recordingOn={false}
+      viewOnly={false}
+      hudVisible={false}
+      onScreenshot={() => undefined}
+      onFullscreen={() => undefined}
+      onLockScreen={() => undefined}
+      onCtrlAltDel={() => undefined}
+      onQualityChange={() => undefined}
+      onPrivacyToggle={() => undefined}
+      onRecordToggle={() => undefined}
+      onToggleViewOnly={() => undefined}
+      onCopyToRemote={() => undefined}
+      onCopyFromRemote={() => undefined}
+      onToggleHud={() => undefined}
+      onSendText={() => undefined}
+      onSendCombo={() => undefined}
+    />
+  );
+}
+
+describe("axe DOM 门禁扩展（R14：会话组件与窗口页）", () => {
+  it("FloatingToolbar：aria-hidden-focus / nested-interactive 零违规", async () => {
+    const { container } = render(<ToolbarHarness />);
+    const results = await axeScan(container);
+    const bad = results.violations.filter(
+      (v) => v.id === "aria-hidden-focus" || v.id === "nested-interactive",
+    );
+    expect(
+      bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join("; ")}`),
+    ).toEqual([]);
+  });
+
+  it("WindowSidebar：两规则零违规", async () => {
+    const { container } = render(
+      <WindowSidebar
+        deviceId="dev-a"
+        openIds={new Set(["101"])}
+        activeId="101"
+        viewOnly={false}
+        onSelect={() => undefined}
+        onOpen={() => undefined}
+        onCloseTab={() => undefined}
+      />,
+    );
+    const results = await axeScan(container);
+    const bad = results.violations.filter(
+      (v) => v.id === "aria-hidden-focus" || v.id === "nested-interactive",
+    );
+    expect(
+      bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join("; ")}`),
+    ).toEqual([]);
+  });
+
+  it("Windows 窗口页：两规则零违规", async () => {
+    const { container } = render(<Windows deviceId="dev-a" />);
+    await screen.findAllByText("测试窗口 A"); // 桌面地图+列表各渲染一份
+    const results = await axeScan(container);
+    const bad = results.violations.filter(
+      (v) => v.id === "aria-hidden-focus" || v.id === "nested-interactive",
+    );
+    expect(
+      bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join("; ")}`),
+    ).toEqual([]);
+  });
+});
 
 describe("Devices 对话框焦点协议（D07）", () => {
   it("打开→Esc 关闭→焦点还原到「添加设备」触发钮", async () => {

@@ -374,6 +374,8 @@ interface GroupViewProps {
   onRecordingAutoStop: (path: string | null, error?: string) => void;
   /** 根窗口被远端销毁（DESTROYED 事件命中根）→ 页面移除标签。 */
   onRootGone: () => void;
+  /** 设备名（首帧品牌时刻显示，R14 设计：产品的第二个记忆瞬间）。 */
+  deviceName: string | null;
 }
 
 /** 窗口组视图：一个标签的全部内容。 */
@@ -382,6 +384,7 @@ export function WindowGroupView({
   windowId,
   store,
   active,
+  deviceName,
   showHud,
   exportFnRef,
   recordCtlRef,
@@ -417,6 +420,20 @@ export function WindowGroupView({
   useEffect(() => {
     onRecordingAutoStopRef.current = onRecordingAutoStop;
   });
+
+  /** 首帧品牌时刻：画面首帧（rootStats 首次非空）浮现设备名 2.6s（R14 设计
+   * ——产品的第二个记忆瞬间；装饰层 aria-hidden，连接成功已由占位层播报）。 */
+  const [brandFlash, setBrandFlash] = useState(false);
+  const seenFrameRef = useRef(false);
+  useEffect(() => {
+    if (seenFrameRef.current || rootStats === null || !active || deviceName === null) {
+      return undefined;
+    }
+    seenFrameRef.current = true;
+    setBrandFlash(true);
+    const t = window.setTimeout(() => setBrandFlash(false), 2600);
+    return () => window.clearTimeout(t);
+  }, [rootStats, active, deviceName]);
 
   /** 处理面注册表（子组件挂载注册、卸载注销）；条目只能经 registerSurface 增删。 */
   const register = useCallback((id: string, handle: SurfaceHandle | null) => {
@@ -1319,6 +1336,11 @@ export function WindowGroupView({
       ref={containerRef}
       style={hostBusy ? { cursor: "not-allowed" } : undefined}
     >
+      {brandFlash && (
+        <div className={styles.brandFlash} aria-hidden="true">
+          {deviceName}
+        </div>
+      )}
       {banner !== null && (
         <div className={styles.banner} aria-live="polite">{banner}</div>
       )}

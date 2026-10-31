@@ -131,3 +131,12 @@
 .phraseDel:hover {
   color: var(--rd-err);
 }
+
+/* 节标题（R14 设计 finish：五属性分组，非平铺表格） */
+.section {
+  padding: 10px 4px 0;
+  font-size: var(--rd-fs-dim);
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: var(--rd-accent-text);
+}
