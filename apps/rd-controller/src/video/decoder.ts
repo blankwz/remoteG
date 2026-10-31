@@ -98,22 +98,27 @@ export class H264Decoder {
     this.onStats = onStats;
     this.decoder = new VideoDecoder({
       output: (frame) => {
-        const w = window as unknown as { __dec?: number };
-        w.__dec = (w.__dec ?? 0) + 1;
         this.onOutput(frame);
       },
       error: (err) => {
-        // 解码器致命错误：M0 仅记录与上报，不自动重建
+        // 解码器致命错误：仅记录。不 emitStats——此时 canvas 仍是默认
+        // 300x150，当真实尺寸上报会让 HUD/占位显示假分辨率（R4 实测 bug）
         console.error("VideoDecoder error", err);
-        this.emitStats(true);
       },
     });
-    this.decoder.configure({
-      // profile/level 由协商结果决定；无 description → Annex-B
-      codec,
-      optimizeForLatency: true,
-      hardwareAcceleration: "prefer-hardware",
-    });
+    try {
+      this.decoder.configure({
+        // profile/level 由协商结果决定；无 description → Annex-B
+        codec,
+        optimizeForLatency: true,
+        hardwareAcceleration: "prefer-hardware",
+      });
+    } catch (err) {
+      // configure 失败（WebCodecs 不可用/老 GPU/无硬解）：标记关闭并静默——
+      // 抛出去会崩掉 WindowSurface 的挂载 effect，引发整页布局抖动（R5 实测）
+      console.error("VideoDecoder configure failed", err);
+      this.closed = true;
+    }
   }
 
   /** 推入一帧完整数据（25B 帧头 + AU）。 */

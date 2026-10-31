@@ -128,12 +128,13 @@
   white-space: nowrap;
 }
 
-/* 本机自测模式提示条（loopback 会话常驻） */
+/* 本机自测模式提示条（loopback 会话常驻；色值统一走 --rd-warn 令牌，
+ * R11 D13——曾引入第 4 种琥珀色散值） */
 .loopbackBar {
   padding: 5px 16px;
-  background: rgb(255 152 48 / 10%);
-  border-bottom: 1px solid rgb(255 152 48 / 30%);
-  color: var(--rd-warn, #ff9830);
+  background: color-mix(in srgb, var(--rd-warn) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--rd-warn) 30%, transparent);
+  color: var(--rd-warn);
   font-size: 12px;
   text-align: center;
 }
@@ -206,6 +207,30 @@
   white-space: nowrap;
 }
 
+/* 标签主体按钮（容器 div 内两枚同级真 button 之一——R11 D15 拍平嵌套） */
+.tabMain {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tabMain:focus-visible {
+  outline: 2px solid var(--rd-accent);
+  outline-offset: -2px;
+  border-radius: var(--rd-radius-sm);
+}
+.tabClose:focus-visible {
+  outline: 2px solid var(--rd-accent);
+  outline-offset: 1px;
+}
+
 .tabClose {
   flex: none;
   display: inline-flex;
@@ -214,7 +239,7 @@
   width: 18px;
   height: 18px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--rd-radius-sm);
   background: transparent;
   color: var(--rd-text-faint);
   font-size: 14px;
@@ -308,8 +333,52 @@
   position: relative;
   flex: 1;
   min-height: 0;
+  margin: 0 12px 12px;
   overflow: hidden;
-  background: var(--rd-bg-deep);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 10px;
+  /* 微纹理：中心微亮的径向渐变，消除等待期纯黑「破了洞」的观感 */
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 42%, #10131a 0%, #0a0c0f 100%);
+}
+
+/* 无视频帧时的等待占位（5 秒测试员：黑画面像坏了） */
+.stageWaiting {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.stageWaitingCard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 10px;
+  background: #161a20;
+  color: var(--rd-text-dim);
+  font-size: 14px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.stageWaitingSpin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgb(255 255 255 / 15%);
+  border-top-color: var(--rd-accent);
+  border-radius: 50%;
+  animation: rdSpin 0.9s linear infinite;
+}
+
+@keyframes rdSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 会话工具条(只看不控/剪贴板互传,v0.1):悬浮在画面左上,不占布局 */
@@ -501,4 +570,458 @@
 .hudCopyBtn:hover {
   border-color: var(--rd-border-strong);
   color: var(--rd-text);
+}
+
+/* ---- UX R1 新增 ---- */
+
+/* 顶栏设备上下文（当前会话属于哪台机器——跨页上下文主线） */
+.deviceContext {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--rd-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+/* 返回按钮带图标 */
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Fit/Scale/Native 分段控件（真 segmented：共享边框、激活底色） */
+.segGroup {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  overflow: hidden;
+}
+
+.segBtn {
+  padding: 5px 12px;
+  border: none;
+  border-right: 1px solid var(--rd-border);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.segBtn:last-of-type {
+  border-right: none;
+}
+
+.segBtn:hover:not(:disabled) {
+  color: var(--rd-text);
+  background: var(--rd-hover);
+}
+
+.segBtnActive,
+.segBtnActive:hover:not(:disabled) {
+  color: var(--rd-accent-text);
+  background: var(--rd-accent-soft);
+}
+
+.segBtn:disabled,
+.zoomSelect:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.zoomSelect {
+  border: none;
+  border-left: 1px solid var(--rd-border);
+  border-radius: 0;
+}
+
+/* 「+ 终端」下拉 */
+.termMenuWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.termCaret {
+  opacity: 0.6;
+}
+
+.termMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  box-shadow: var(--rd-shadow-pop);
+  z-index: 20;
+}
+
+.termMenuItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 0.1s ease,
+    background-color 0.1s ease;
+}
+
+.termMenuItem:hover {
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+}
+
+/* 侧栏开关按钮（标签栏内，图标化） */
+.sidebarToggle {
+  margin-left: auto;
+}
+
+/* toast：舞台底部居中（不再挤在顶栏右侧） */
+.toastAnchor {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 55;
+  padding: 7px 16px;
+  border: 1px solid rgb(70 209 126 / 35%);
+  border-radius: 999px;
+  background: rgb(16 18 22 / 92%);
+  backdrop-filter: blur(8px);
+  color: var(--rd-ok);
+  font-size: 12px;
+  max-width: min(560px, calc(100% - 32px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 40%);
+}
+
+.toastAnchor.toastError {
+  border-color: rgb(239 111 111 / 40%);
+  color: var(--rd-err);
+}
+
+/* 空态按钮（图标+文字） */
+.empty .toolBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  font-size: 13px;
+}
+
+/* REC 常驻指示（录制跨标签可见；Victor R1 要求） */
+.recBadge {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 56;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid rgb(239 111 111 / 45%);
+  border-radius: 999px;
+  background: rgb(16 18 22 / 88%);
+  backdrop-filter: blur(8px);
+  color: var(--rd-err);
+  font-family: var(--rd-font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+  pointer-events: auto;
+}
+
+.recDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rd-err);
+  animation: recPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes recPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 观察模式：画面容器琥珀描边（控制权状态常显——Buxton R2 Top1） */
+.stageViewOnly {
+  outline: 2px solid rgb(229 181 103 / 55%);
+  outline-offset: -2px;
+}
+
+/* 工具栏独立行（画面区外，零遮挡——Buxton R2）。chip 簇绝对定位右侧
+ * （R11 D11：曾与 bar 同行 flex，把居中 bar 挤偏 ~80px）。 */
+.toolbarRow {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding: 6px 12px 2px;
+  position: relative;
+}
+
+/* 加密/延迟/终端状态 chip 簇：右缘竖排对齐，不参与 bar 居中流 */
+.chipCluster {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 收起态小圆钮居中一行 */
+.toolbarRow .dot {
+  margin: 0 auto;
+}
+
+/* 标签容器/按钮继承页面字体（tab 拆容器+真 button 后仍适用） */
+.tab,
+.tabActive {
+  font: inherit;
+}
+
+/* 遮罩出口按钮组（Buley R2：断线不给出口=把用户锁在倒计时里） */
+.overlayActions {
+  display: flex;
+  gap: 10px;
+}
+
+.retryGhostBtn {
+  padding: 6px 18px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.retryGhostBtn:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-accent);
+}
+
+.overlayError {
+  margin: 0;
+  max-width: 480px;
+  color: var(--rd-text-faint);
+  font-size: 12px;
+  font-family: var(--rd-font-mono);
+  text-align: center;
+  word-break: break-all;
+}
+
+/* 对方正在用机：输入挂起常驻条（Jenson R2） */
+.hostBusyBar {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 6px 16px;
+  border: 1px solid rgb(229 181 103 / 45%);
+  border-radius: 999px;
+  background: rgb(20 24 34 / 88%);
+  color: var(--rd-warn);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 隐私屏常驻徽标（可点撤销——安全评委 R3） */
+.privacyBadge {
+  top: 44px;
+  border-color: rgb(229 181 103 / 50%);
+  color: var(--rd-warn);
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: normal;
+}
+
+.privacyBadge:hover {
+  border-color: var(--rd-warn);
+}
+
+/* 重连成功闪示（性能感知专家 R3：恢复瞬间需要正反馈） */
+.reconnectedFlash {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  padding: 6px 14px;
+  border: 1px solid rgb(70 209 126 / 40%);
+  border-radius: 999px;
+  background: rgb(16 18 22 / 90%);
+  color: var(--rd-ok);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 连接健康常显胶囊（竞品组 R4：画质下拉只是设置，健康度要常显） */
+.healthPill {
+  flex: none;
+  margin-left: 10px;
+  align-self: center;
+  padding: 4px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 3%);
+  color: var(--rd-text-dim);
+  font-family: var(--rd-font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 首帧淡入（画面从占位切换到真实帧时不生硬） */
+.surface {
+  animation: surfaceIn 0.25s ease-out;
+}
+
+@keyframes surfaceIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 延迟胶囊语义色（绿<50 / 黄<150 / 红） */
+.healthDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rd-ok);
+}
+
+.healthPill[data-level="fair"] .healthDot {
+  background: var(--rd-warn);
+}
+
+.healthPill[data-level="poor"] .healthDot {
+  background: var(--rd-err);
+}
+
+/* 加密标识 chip（信任评委 R8：会话内信任可视化） */
+.encryptChip {
+  flex: none;
+  margin-right: 8px;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid rgb(70 209 126 / 30%);
+  border-radius: 999px;
+  background: rgb(70 209 126 / 8%);
+  color: var(--rd-ok);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 快捷键速查浮层（? 呼出） */
+.helpOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 55%);
+  backdrop-filter: blur(2px);
+}
+
+.helpCard {
+  min-width: 320px;
+  padding: 18px 22px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  box-shadow: var(--rd-shadow-pop);
+}
+
+.helpCard b {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--rd-text);
+  font-size: 14px;
+}
+
+.helpCard ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--rd-text-dim);
+}
+
+.helpCard kbd {
+  padding: 2px 7px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 5px;
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-family: var(--rd-font-mono);
+  font-size: 11px;
+}
+
+/* 等待超时兜底（严苛席 GO 条件：等多久、失败会怎样） */
+.stageWaitingTimeout {
+  display: block;
+  margin-top: 6px;
+  color: var(--rd-warn);
+  font-size: 12px;
+}
+
+.stageWaitingRetry {
+  margin-left: 6px;
+  padding: 2px 10px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--rd-accent-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stageWaitingRetry:hover {
+  border-color: var(--rd-accent);
 }

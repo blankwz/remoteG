@@ -23,12 +23,7 @@
   gap: 8px;
 }
 
-/* 局域网扫描分组标题 */
-.scanHeading {
-  padding: 8px 2px 0;
-  color: var(--rd-text-faint);
-  font-size: 12px;
-}
+/* 局域网扫描分组标题样式收敛至 .fecToggle 同层的唯一 .scanHeading 定义（R11 D18） */
 
 /* 发现设备圆点:扫描结果(未配对)与已配对区分 */
 .dotScan {
@@ -62,7 +57,7 @@
 
 .title {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--rd-fs-h1);
   font-weight: 600;
   letter-spacing: 0.2px;
   color: var(--rd-text);
@@ -220,7 +215,7 @@
   flex: none;
   padding: 2px 6px;
   border: 1px solid var(--rd-border);
-  border-radius: 4px;
+  border-radius: var(--rd-radius-sm);
   font-family: var(--rd-font-mono);
   font-size: 12px;
   color: var(--rd-text-dim);
@@ -414,24 +409,477 @@
   word-break: break-all;
 }
 
-/* fec 高清链路开关（Studio 方案落地的远程控制开关） */
+/* fec 高清链路开关样式收敛至 .fecToggle 唯一定义（R11 D18：此处的旧定义
+ * 与下方「弱网纠错开关」冲突定义已删——双定义中后者才是生效样式） */
+
+/* ---- UX R1 新增 ---- */
+
+/* 在线/离线文字标签（色彩之外的第二通道） */
+.onlineTag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 400;
+  vertical-align: 1px;
+}
+.onlineTag[data-online="true"] {
+  background: rgb(70 209 126 / 12%);
+  color: var(--rd-ok);
+}
+.onlineTag[data-online="false"] {
+  background: rgb(255 255 255 / 6%);
+  color: var(--rd-text-faint);
+}
+
+/* 主按钮右侧的「连接」CTA（hover 显现引导） */
+.connectCta {
+  flex: none;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.connecting {
+  flex: none;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 6%);
+  color: var(--rd-text-dim);
+  font-size: 12px;
+}
+
+/* 删除二次确认（红底白字，原位替换） */
+.confirmDelete {
+  background: var(--rd-err);
+  border-color: var(--rd-err);
+  color: #fff;
+}
+.confirmDelete:hover:not(:disabled) {
+  background: #e35b5b;
+  border-color: #e35b5b;
+  color: #fff;
+}
+
+/* ⋯ 更多菜单 */
+.menuWrap {
+  position: relative;
+  display: inline-flex;
+}
+.moreBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rd-text-faint);
+  cursor: pointer;
+}
+.moreBtn:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--rd-text);
+}
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  box-shadow: var(--rd-shadow-pop);
+  z-index: 15;
+}
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.menuItem:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--rd-text);
+}
+.menuItemDanger {
+  color: var(--rd-err);
+}
+.menuItemDanger:hover {
+  background: rgb(239 111 111 / 10%);
+  color: var(--rd-err);
+}
+
+/* footer：折叠式连接指南 + 高级工具（方案实验室降级入口，R11 D12） */
+.footerRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.helpToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--rd-accent-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.helpToggle:hover {
+  color: var(--rd-text);
+}
+.helpList {
+  margin: 10px 0 4px;
+  padding: 12px 16px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--rd-text-dim);
+  list-style: none;
+}
+.helpList b {
+  color: var(--rd-text);
+  font-weight: 600;
+}
+.version {
+  display: block;
+  margin-top: 6px;
+  color: var(--rd-text-faint);
+  /* 不叠 opacity（R11 D19——faint 叠 0.7 合成对比度 4.08:1 < 4.5） */
+}
+
+/* 弱网纠错开关（双行文案 + 开关示能） */
 .fecToggle {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 0 14px;
+  gap: 10px;
+  margin: 0;
   padding: 8px 12px;
-  border: 1px solid var(--border, #2c3038);
-  border-radius: 8px;
-  background: var(--bg-surface, #181b1f);
-  color: var(--text-primary, #d8d9da);
+  width: fit-content;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
   font-size: 13px;
   cursor: pointer;
   user-select: none;
 }
 .fecToggle input {
-  accent-color: var(--accent, #6c9ef8);
+  accent-color: var(--rd-accent);
   width: 15px;
   height: 15px;
   cursor: pointer;
+}
+.fecText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.fecTitle {
+  color: var(--rd-text);
+  font-weight: 500;
+}
+.fecSub {
+  color: var(--rd-text-faint);
+  font-size: 11px;
+}
+
+/* header 按钮图标化 */
+.actionBtn,
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 「继续上次」快达卡（Cooper：高频目标一等公民入口） */
+.resumeCard {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid rgb(61 126 255 / 45%);
+  border-radius: var(--rd-radius);
+  background:
+    linear-gradient(135deg, rgb(61 126 255 / 12%), rgb(61 126 255 / 4%));
+  color: var(--rd-text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.12s ease,
+    background-color 0.12s ease,
+    transform 0.08s ease;
+}
+.resumeCard:hover:not(:disabled) {
+  border-color: var(--rd-accent);
+  background:
+    linear-gradient(135deg, rgb(61 126 255 / 20%), rgb(61 126 255 / 6%));
+}
+.resumeCard:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.resumeCard:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.resumeLabel {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.resumeName {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resumeGo {
+  margin-left: auto;
+  flex: none;
+  color: var(--rd-accent-text);
+  font-size: 13px;
+}
+
+/* 地址用途标注（Tailscale / 局域网） */
+.addrKind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: var(--rd-radius-sm);
+  font-family: var(--rd-font-mono);
+  font-size: 10px;
+  background: rgb(255 255 255 / 7%);
+  color: var(--rd-text-faint);
+  vertical-align: 1px;
+}
+.addrKind[data-tailscale="true"] {
+  background: rgb(61 126 255 / 16%);
+  color: var(--rd-accent-text);
+}
+
+/* 设备页空态（居中、有插画感、带行动） */
+.emptyState {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--rd-text-faint);
+}
+
+.emptyIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 20px;
+  background: rgb(61 126 255 / 8%);
+  color: var(--rd-accent-text);
+  margin-bottom: 4px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--rd-text);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.8;
+  max-width: 380px;
+}
+
+.emptyActions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* 紧急切断按钮（安全评委 R3：知情必须有行动权） */
+.cutBtn {
+  margin-left: 4px;
+  padding: 3px 12px;
+  border: 1px solid rgb(239 111 111 / 45%);
+  border-radius: 999px;
+  background: rgb(239 111 111 / 8%);
+  color: var(--rd-err);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+}
+.cutBtn:hover {
+  background: var(--rd-err);
+  color: #fff;
+  border-color: var(--rd-err);
+}
+
+/* 配对码过期态 */
+.pairBlock[data-expired="true"] {
+  opacity: 0.65;
+}
+.pairCode[data-expired="true"] {
+  text-decoration: line-through;
+  border-color: var(--rd-border);
+  background: rgb(255 255 255 / 4%);
+  color: var(--rd-text-faint);
+}
+
+/* 标题统计（信息密度 R3） */
+.titleMeta {
+  margin-left: 12px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--rd-text-faint);
+  letter-spacing: 0;
+}
+
+/* 局域网发现独立分组（未配对信任边界可视化） */
+.scanSection {
+  margin-top: 6px;
+  padding: 14px;
+  border: 1px dashed var(--rd-border-strong);
+  border-radius: var(--rd-radius);
+  background: rgb(255 255 255 / 2%);
+}
+
+.scanHeading {
+  margin: 0 0 10px;
+  padding: 8px 2px 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--rd-text-faint);
+}
+
+.scanCard {
+  background: transparent;
+  border-style: dashed;
+}
+
+.scanCard:hover {
+  background: rgb(255 255 255 / 3%);
+}
+
+.unpairedTag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgb(229 181 103 / 12%);
+  color: var(--rd-warn);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/* 设备搜索框（IT 管理员 R4） */
+.deviceSearch {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: 13px;
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.deviceSearch:focus {
+  outline: none;
+  border-color: var(--rd-accent);
+  box-shadow: 0 0 0 3px var(--rd-accent-soft);
+}
+
+/* 本机被控副标题 */
+.hostSub {
+  color: var(--rd-text-faint);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 生成配对码提级（信任动作不能最不显眼） */
+.hostCard .actionBtn {
+  border-color: rgb(61 126 255 / 50%);
+  color: var(--rd-accent-text);
+}
+.hostCard .actionBtn:hover {
+  border-color: var(--rd-accent);
+  background: var(--rd-accent-soft);
+}
+
+/* 自绘 switch（原生 checkbox 深色下是「无字形灰方块」——R8 图标评委） */
+.switchInput {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.switchTrack {
+  flex: none;
+  width: 38px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 12%);
+  position: relative;
+  transition: background-color var(--rd-dur-fast, 120ms) ease;
+}
+
+.switchTrack[data-on="true"] {
+  background: var(--rd-accent);
+}
+
+.switchThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform var(--rd-dur-fast, 120ms) ease;
+}
+
+.switchTrack[data-on="true"] .switchThumb {
+  transform: translateX(18px);
+}
+
+.switchInput:focus-visible + .switchTrack {
+  outline: 2px solid var(--rd-accent);
+  outline-offset: 2px;
 }

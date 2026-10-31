@@ -15,6 +15,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+// api 层经 bridge.call 转发：桩成直接走 invokeMock（Tauri 运行时同路径）
+vi.mock("../api/bridge", () => ({
+  call: invokeMock,
+  isTauriRuntime: () => true,
+  listenStub: vi.fn().mockResolvedValue(() => undefined),
+}));
+
 import {
   hitTest,
   hitWindow,
@@ -269,9 +276,9 @@ describe("InputMapper 键盘与 IME", () => {
   it("modifiers 位图随事件状态透传", () => {
     const c = collector();
     const m = new InputMapper(c.sink);
-    m.handleKeyDown(key("KeyC", { ctrlKey: true }));
+    m.handleKeyDown(key("KeyP", { ctrlKey: true }));
     expect(c.keys[0]?.modifiers).toBe(2); // MOD_CTRL
-    m.handleKeyDown(key("KeyC", { ctrlKey: true, shiftKey: true }));
+    m.handleKeyDown(key("KeyP", { ctrlKey: true, shiftKey: true }));
     expect(c.keys[1]?.modifiers).toBe(3); // CTRL | SHIFT
   });
 
@@ -348,9 +355,30 @@ describe("InputMapper 键盘与 IME", () => {
     expect(c.keys).toHaveLength(0);
   });
 
-  it("Ctrl+Shift+H/S 为保留组合", () => {
+  it("保留组合（V/L/C/X 与 Ctrl+Alt+digit）不下发远端（R11 泄露回归锁定）", () => {
+    const c = collector();
+    const m = new InputMapper(c.sink);
+    expect(m.handleKeyDown(key("KeyV", { ctrlKey: true, shiftKey: true }))).toBe("reserved");
+    expect(m.handleKeyDown(key("KeyL", { ctrlKey: true, shiftKey: true }))).toBe("reserved");
+    expect(m.handleKeyDown(key("KeyC", { ctrlKey: true, shiftKey: true }))).toBe("reserved");
+    expect(m.handleKeyDown(key("KeyX", { ctrlKey: true, shiftKey: true }))).toBe("reserved");
+    expect(m.handleKeyDown(key("Digit1", { ctrlKey: true, altKey: true }))).toBe("reserved");
+    expect(m.handleKeyDown(key("Digit9", { ctrlKey: true, altKey: true }))).toBe("reserved");
+    // 非保留形态必须照常下发：Ctrl+1（无 Alt）是远端应用快捷键，不抢
+    expect(m.handleKeyDown(key("Digit1", { ctrlKey: true }))).toBe("forwarded");
+    expect(m.handleKeyDown(key("KeyC", { ctrlKey: true }))).toBe("forwarded");
+    // 只看保留组合（前面 reserved 的 6 次）未产生任何下发
+    expect(c.keys).toHaveLength(2);
+  });
+
+  it("Ctrl+Shift+H/S/L/V 为保留组合（不下发远端——R11 双入口回归锁定）", () => {
     expect(isReservedCombo(key("KeyH", { ctrlKey: true, shiftKey: true }))).toBe(true);
     expect(isReservedCombo(key("KeyS", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isReservedCombo(key("KeyL", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isReservedCombo(key("KeyV", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    // 不带修饰键的 V/L 是普通按键，必须照常下发远端
+    expect(isReservedCombo(key("KeyV", {}))).toBe(false);
+    expect(isReservedCombo(key("KeyL", {}))).toBe(false);
     expect(isReservedCombo(key("KeyH", { shiftKey: true }))).toBe(false);
     expect(isReservedCombo(key("KeyH", { ctrlKey: true }))).toBe(false);
   });

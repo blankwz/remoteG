@@ -181,12 +181,33 @@ export type KeyAction =
   /** 忽略（未收录的键 / IME 组合中），不转发也不 preventDefault。 */
   | "ignored";
 
-/** 控制端保留快捷键：Ctrl+Shift+H（HUD）与 Ctrl+Shift+S（导出 PNG）。 */
+/**
+ * 控制端保留快捷键（唯一出口，页面层与本层共用同一份判定）：
+ * - Ctrl+Shift+H（HUD）/ S（导出 PNG）/ L（锁屏）/ V（只看切换）
+ *   / C（取回剪贴板）/ X（发送剪贴板）
+ * - Ctrl+Alt+1..9（切会话标签；用 Ctrl+Alt 而非 Ctrl+digit——后者是远端
+ *   应用常用快捷键，不抢）
+ * 保留组合不下发远端——否则页面层热键与远端注入各走一次（R11 双入口回归）。
+ */
 export function isReservedCombo(k: KeyInput): boolean {
+  if (k.metaKey || k.altKey) {
+    // Ctrl+Shift+* 组合不含 Alt；Ctrl+Alt+digit 见下（Shift 必须未按）
+    return k.ctrlKey && k.altKey && !k.shiftKey && RESERVED_CTRL_ALT_DIGIT.test(k.code);
+  }
   return (
-    k.ctrlKey && k.shiftKey && (k.code === "KeyH" || k.code === "KeyS")
+    k.ctrlKey &&
+    k.shiftKey &&
+    (k.code === "KeyH" ||
+      k.code === "KeyS" ||
+      k.code === "KeyL" ||
+      k.code === "KeyV" ||
+      k.code === "KeyC" ||
+      k.code === "KeyX")
   );
 }
+
+/** Ctrl+Alt+1..9（切标签保留组合）。 */
+const RESERVED_CTRL_ALT_DIGIT = /^Digit[1-9]$/;
 
 /** 键盘 / IME 映射器：跟踪按下集合，失焦时全部抬起防远端卡键。 */
 export class InputMapper {

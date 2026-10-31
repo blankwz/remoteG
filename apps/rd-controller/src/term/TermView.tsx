@@ -166,7 +166,7 @@ export function isResumeGoneError(message: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** 视图状态：连接中 / 已打开 / 进程已退出 / 打开失败。 */
-type TermStatus =
+export type TermStatus =
   | { readonly kind: "connecting" }
   | { readonly kind: "open" }
   | { readonly kind: "exited" }
@@ -180,6 +180,8 @@ export interface TermViewProps {
   readonly shell: string;
   /** xterm onTitleChange 透传（Session 用作标签标题）。 */
   readonly onTitle?: (title: string) => void;
+  /** 状态变化上报（Session 标签 pill 反映真实状态，R11 D04——曾恒显已连接）。 */
+  readonly onStatus?: (status: TermStatus) => void;
 }
 
 /** 把 Error/unknown 统一成消息文本。 */
@@ -187,7 +189,7 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
+export function TermView({ deviceId, tabId, shell, onTitle, onStatus }: TermViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const streamIdRef = useRef<number | null>(null);
@@ -195,6 +197,8 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
   const statusRef = useRef<TermStatus>({ kind: "connecting" });
   const onTitleRef = useRef(onTitle);
   onTitleRef.current = onTitle;
+  const onStatusRef = useRef(onStatus);
+  onStatusRef.current = onStatus;
   const [status, setStatus] = useState<TermStatus>({ kind: "connecting" });
   /** 重试代数：递增触发整只视图重建（term 重新打开）。 */
   const [attempt, setAttempt] = useState(0);
@@ -202,6 +206,7 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
   const setStatusBoth = (next: TermStatus): void => {
     statusRef.current = next;
     setStatus(next);
+    onStatusRef.current?.(next);
   };
 
   useEffect(() => {
@@ -214,11 +219,12 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
 
     // ---- xterm 初始化（任务卡步骤 2）----
     const term = new Terminal({
-      fontFamily: '"Cascadia Mono", "JetBrains Mono", Menlo, monospace',
+      fontFamily:
+        '"Cascadia Mono", "JetBrains Mono", Consolas, "Microsoft YaHei", monospace',
       fontSize: loadFontSize(),
       allowProposedApi: true,
       scrollback: 5000,
-      theme: { background: "#0a0a0a" },
+      theme: { background: "#0a0c0f", foreground: "#e8ebf0" },
     });
     termRef.current = term;
     const fit = new FitAddon();
@@ -424,12 +430,12 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
     <div className={styles.wrap}>
       <div ref={containerRef} className={styles.term} />
       {status.kind === "connecting" && (
-        <div className={styles.overlay}>
+        <div className={styles.overlay} aria-live="polite">
           <p className={styles.overlayText}>正在打开终端…</p>
         </div>
       )}
       {status.kind === "exited" && (
-        <div className={styles.overlay}>
+        <div className={styles.overlay} aria-live="polite">
           <p className={styles.overlayText}>[进程已退出]</p>
           <button type="button" className={styles.retryBtn} onClick={reopen}>
             重新打开
@@ -437,7 +443,7 @@ export function TermView({ deviceId, tabId, shell, onTitle }: TermViewProps) {
         </div>
       )}
       {status.kind === "error" && (
-        <div className={styles.overlay}>
+        <div className={styles.overlay} aria-live="assertive">
           <p className={styles.overlayText}>{status.message}</p>
           <button type="button" className={styles.retryBtn} onClick={retry}>
             重试
