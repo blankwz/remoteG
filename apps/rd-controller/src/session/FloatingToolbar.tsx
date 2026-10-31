@@ -17,6 +17,7 @@ import {
   IconEye,
   IconEyeOff,
   IconExpand,
+  IconFolder,
   IconGauge,
   IconInfo,
   IconKeyboard,
@@ -62,6 +63,8 @@ interface Props {
   onCopyToRemote: () => void;
   /** 远端剪贴板 → 控制端。 */
   onCopyFromRemote: () => void;
+  /** 打开文件传输面板（T-031）。 */
+  onFiles: () => void;
   /** HUD 信息显隐切换。 */
   onToggleHud: () => void;
   /** 当前 HUD 显隐（高亮 = 常显）。 */
@@ -292,6 +295,13 @@ function MorePanel(
           },
         ]
       : []),
+    {
+      key: "files",
+      icon: <IconFolder size={15} />,
+      label: "文件传输",
+      hint: "发送到远端 / 浏览远端文件",
+      on: props.onFiles,
+    },
     {
       key: "privacy",
       icon: props.privacyOn ? <IconEye size={15} /> : <IconEyeOff size={15} />,

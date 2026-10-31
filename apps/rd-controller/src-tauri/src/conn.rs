@@ -23,14 +23,14 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use rd_proto::v0::{Codec, Envelope, Hello, HelloAck, PairResult, envelope};
 use rd_security::{ControllerPairing, PairError, PairStep};
-use switchboard_core::channel::Channel as SbChannel;
-use switchboard_core::stages::MediaAdapt;
 use rd_transport::framing::{
     TILE_HEADER_LEN, VIDEO_HEADER_LEN, encode_tile_header, encode_video_header,
 };
 use rd_transport::{
     Conn, ControlRx, ControlTx, DataRx, DataTx, Fingerprint, Identity, StreamKind, connect,
 };
+use switchboard_core::channel::Channel as SbChannel;
+use switchboard_core::stages::MediaAdapt;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Emitter, Manager};
 use tokio::sync::{broadcast, oneshot, watch};
@@ -524,6 +524,9 @@ struct Inner {
     events_tx: broadcast::Sender<Envelope>,
     windows: Mutex<WindowRoutes<FrameChannel>>,
     terms: Mutex<TermRoutes<FrameChannel, TermTx>>,
+    /// T-031：文件传输事件路由（xfer_id → 传输任务收件箱；req_id=0 的
+    /// FileXferChunk/Ack/Cancel 按 id 投递，命令层阻塞消费）。
+    xfers: Mutex<HashMap<u64, tokio::sync::mpsc::Sender<Envelope>>>,
     closed_tx: watch::Sender<bool>,
 }
 
@@ -547,15 +550,25 @@ impl DeviceConn {
     ) -> anyhow::Result<Arc<Self>> {
         // M2 #4 切入点（默认关闭）：设置 RD_PLAN 环境变量时走 Switchboard Plan
         // 执行器选路（LAN 发现/回退语义，spec/02），传输仍是 rd 原生 QUIC。
-        if std::env::var("RD_PLAN").map_or(false, |p| !p.is_empty()) {
+        if std::env::var("RD_PLAN").is_ok_and(|p| !p.is_empty()) {
             let plan = std::env::var("RD_PLAN").unwrap_or_default();
-            let sock = resolve_addr(addr, DEFAULT_AGENT_PORT).await.context("地址解析失败")?;
+            let sock = resolve_addr(addr, DEFAULT_AGENT_PORT)
+                .await
+                .context("地址解析失败")?;
             match rd_switch::plan_dial(&plan, Arc::new(identity.clone()), expected, sock).await {
                 Ok((path_name, conn)) => {
                     tracing::info!(path = %path_name, "RD_PLAN 生效：Switchboard 选路连接");
                     let peer_fp = conn.peer_fingerprint();
                     let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
-                    return Ok(Self::build(device_id, sock, Arc::new(conn), ctrl_tx, ctrl_rx, peer_fp, false));
+                    return Ok(Self::build(
+                        device_id,
+                        sock,
+                        Arc::new(conn),
+                        ctrl_tx,
+                        ctrl_rx,
+                        peer_fp,
+                        false,
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!(err = %e, "RD_PLAN 选路失败，回退默认直连");
@@ -614,6 +627,7 @@ impl DeviceConn {
             events_tx,
             windows: Mutex::new(WindowRoutes::default()),
             terms: Mutex::new(TermRoutes::default()),
+            xfers: Mutex::new(HashMap::new()),
             closed_tx,
         });
         // 读循环 + 数据流 accept 循环；连接断开时整体退出并置 closed
@@ -739,6 +753,24 @@ impl DeviceConn {
         tx.lock().await.send_raw(data).await
     }
 
+    /// 登记文件传输事件通道（T-031：传输命令建立后，分片/回执按 id 到此）。
+    pub fn register_xfer(&self, xfer_id: u64, tx: tokio::sync::mpsc::Sender<Envelope>) {
+        self.inner
+            .xfers
+            .lock()
+            .expect("xfer routes")
+            .insert(xfer_id, tx);
+    }
+
+    /// 注销文件传输事件通道。
+    pub fn unregister_xfer(&self, xfer_id: u64) {
+        self.inner
+            .xfers
+            .lock()
+            .expect("xfer routes")
+            .remove(&xfer_id);
+    }
+
     pub fn device_id(&self) -> &str {
         &self.inner.device_id
     }
@@ -772,6 +804,38 @@ async fn read_loop(inner: Arc<Inner>, mut rx: ControlRx) {
                     table.complete(env.req_id, env.clone())
                 };
                 if delivered {
+                    continue;
+                }
+                // 文件传输（T-031）：req_id=0 的 File* 消息按 xfer_id 路由；
+                // 无登记的迟到分片静默丢弃（取消后的残留）。
+                let xfer_msg_id = if env.req_id == 0 {
+                    match env.msg.as_ref() {
+                        Some(envelope::Msg::FileXferChunk(m)) => Some(m.xfer_id),
+                        Some(envelope::Msg::FileXferAck(m)) => Some(m.xfer_id),
+                        Some(envelope::Msg::FileCancel(m)) => Some(m.xfer_id),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(xfer_id) = xfer_msg_id {
+                    // 锁内只取 Sender 克隆（守卫不跨 await，保 Send）
+                    let tx = inner
+                        .xfers
+                        .lock()
+                        .expect("xfer routes")
+                        .get(&xfer_id)
+                        .cloned();
+                    if let Some(tx) = tx {
+                        // 阻塞投递（背压）：丢分片=文件损坏，宁可拖慢读循环
+                        if tx.send(env).await.is_err() {
+                            inner.xfers.lock().expect("xfer routes").remove(&xfer_id);
+                        }
+                        continue;
+                    }
+                    // 无路由的迟到分片/回执（取消后残留）：丢弃，不进广播
+                    // （前端会话订阅方对 File* 信封无消费者，L2）
+                    tracing::debug!(device = %inner.device_id, xfer = xfer_id, "丢弃无路由的文件传输消息");
                     continue;
                 }
                 let _ = inner.events_tx.send(env);
@@ -857,9 +921,10 @@ async fn video_pump(inner: Arc<Inner>, mut rx: DataRx) {
 /// T-027：fec-shards 视频泵——datagram 收流 → RS 重组 → 前端投递。
 /// 与 agent 侧 FecRs 发送端配对；帧格式仍为 `[VideoHeader][AU]`。
 async fn fec_video_pump(conn: Arc<Conn>, inner: Arc<Inner>) {
-    let ch: Arc<dyn SbChannel> = Arc::new(
-        rd_switch::RdChannel::from_conn(conn, switchboard_core::types::PathKind::Direct),
-    );
+    let ch: Arc<dyn SbChannel> = Arc::new(rd_switch::RdChannel::from_conn(
+        conn,
+        switchboard_core::types::PathKind::Direct,
+    ));
     let fec = switchboard_mod_fec_rs::FecRs::new(Default::default());
     let (_sink, mut src) = fec
         .bind(

@@ -101,10 +101,7 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     // 虚拟按键 2s 窗口期内全被吞（实测）。debug 构建再豁免 busy：e2e 与
     // 开发者共用一台机器，人在用电脑时物理输入会让注入用例随机挂掉
     // （实测 t05 套件内间歇失败）——无头 e2e 不代表双机语义，release 不受影响。
-    if crate::host_activity::busy()
-        && !ctx.loopback
-        && !cfg!(debug_assertions)
-    {
+    if crate::host_activity::busy() && !ctx.loopback && !cfg!(debug_assertions) {
         return Ok(());
     }
     match msg {

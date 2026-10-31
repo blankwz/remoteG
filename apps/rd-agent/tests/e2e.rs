@@ -777,7 +777,11 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
     let mut fid_hist: std::collections::HashMap<u32, usize> = Default::default();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        let present = data_slots.iter().chain(parity_slots.iter()).filter(|s| s.is_some()).count();
+        let present = data_slots
+            .iter()
+            .chain(parity_slots.iter())
+            .filter(|s| s.is_some())
+            .count();
         anyhow::ensure!(
             !left.is_zero(),
             "60s 内未攒齐/未恢复 fec 帧 0（有效片 {present}，datagram 共 {total_pkts} 个，fid 分布 {:?}）",
@@ -793,7 +797,9 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
             Err(_) => continue, // 单次读超时 → 回到外层打印统计并退出
         };
         total_pkts += 1;
-        let Some(s) = parse_fec_shard(&pkt) else { continue };
+        let Some(s) = parse_fec_shard(&pkt) else {
+            continue;
+        };
         *fid_hist.entry(s.frame_id).or_insert(0) += 1;
         if s.frame_id != 0 {
             continue; // 只恢复首帧（IDR）
@@ -823,7 +829,11 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
             anyhow::ensure!(p < m_total as usize, "校验片 pidx {p} 越界（m={m_total}）");
             parity_slots[p] = Some(s.data);
         }
-        let present = data_slots.iter().chain(parity_slots.iter()).filter(|s| s.is_some()).count();
+        let present = data_slots
+            .iter()
+            .chain(parity_slots.iter())
+            .filter(|s| s.is_some())
+            .count();
         if present >= k_total as usize {
             if data_slots.iter().all(|s| s.is_some()) {
                 break; // 数据片齐，无需重建
@@ -834,12 +844,15 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
                 m_total as usize,
             )
             .map_err(|e| anyhow::anyhow!("RS 编码器创建失败: {e:?}"))?;
-            let mut shards: Vec<Option<Vec<u8>>> =
-                data_slots.iter().cloned().chain(parity_slots.iter().cloned()).collect();
+            let mut shards: Vec<Option<Vec<u8>>> = data_slots
+                .iter()
+                .cloned()
+                .chain(parity_slots.iter().cloned())
+                .collect();
             rs.reconstruct(&mut shards)
                 .map_err(|e| anyhow::anyhow!("RS 重建失败: {e:?}"))?;
             data_slots = shards[..k_total as usize].to_vec();
-            parity_slots = shards[k_total as usize..].to_vec();
+            drop(shards[k_total as usize..].to_vec());
             recovered = data_slots.iter().filter(|s| s.is_none()).count();
             anyhow::ensure!(
                 data_slots.iter().all(|s| s.is_some()),
@@ -867,5 +880,122 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
         orig_len,
         if recovered > 0 { recovered } else { 0 }
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// t10 文件传输（T-031）：推送落盘 + 拉取回读
+// ---------------------------------------------------------------------------
+
+/// 推送 200KiB 数据到被控端接收目录（FileXferAck 回执路径与内容逐字节一致），
+/// 再对同一文件发起拉取，收分片重组后与原数据比对。
+#[tokio::test(flavor = "multi_thread")]
+async fn t10_file_push_and_pull() -> Result<()> {
+    let _guard = common::serial_lock().await;
+    use rd_proto::v0::{FileXferAck, FileXferChunk, FileXferOffer};
+
+    const XFER_PUSH: u64 = 9101;
+    const XFER_PULL: u64 = 9102;
+    const CHUNK: usize = 64 * 1024;
+
+    // 接收目录重定向到临时目录（file_handler 支持 RD_RECV_DIR；L4：测试
+    // 产物不落真实用户 Downloads）。串行锁内设置，进程内共享不影响其他用例。
+    let recv_dir = std::env::temp_dir().join(format!("rd-e2e-recv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&recv_dir);
+    std::env::set_var("RD_RECV_DIR", &recv_dir);
+
+    // 200KiB 确定性数据（3 片：满 + 满 + 余量），可重复运行
+    let mut payload = vec![0u8; 200 * 1024];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+
+    let mut c = common::Client::connect().await?;
+
+    // ── 推送：offer → 分片（eof 收尾）→ Ack ──
+    // T-031 分片/握手全部 req_id=0（proto §文件传输）
+    c.tx.send(&rd_proto::v0::Envelope {
+        req_id: 0,
+        msg: Some(rd_proto::v0::envelope::Msg::FileXferOffer(FileXferOffer {
+            xfer_id: XFER_PUSH,
+            name: "t10-push.bin".into(),
+            size: payload.len() as u64,
+            pull: false,
+            remote_path: String::new(),
+        })),
+    })
+    .await?;
+    for (seq, chunk) in payload.chunks(CHUNK).enumerate() {
+        let eof = (seq + 1) * CHUNK >= payload.len();
+        c.tx.send(&rd_proto::v0::Envelope {
+            req_id: 0,
+            msg: Some(rd_proto::v0::envelope::Msg::FileXferChunk(FileXferChunk {
+                xfer_id: XFER_PUSH,
+                seq: seq as u32,
+                data: chunk.to_vec(),
+                eof,
+            })),
+        })
+        .await?;
+    }
+    let ack = c
+        .recv_until(Duration::from_secs(10), |env: &rd_proto::v0::Envelope| {
+            matches!(env.msg, Some(rd_proto::v0::envelope::Msg::FileXferAck(ref a)) if a.xfer_id == XFER_PUSH)
+        })
+        .await?;
+    let rd_proto::v0::envelope::Msg::FileXferAck(FileXferAck { ok, message, .. }) =
+        ack.msg.clone().context("Ack 信封无消息体")?
+    else {
+        anyhow::bail!("期望 FileXferAck，实际 {:?}", ack.msg);
+    };
+    anyhow::ensure!(ok, "推送被拒：{message}");
+    let saved = std::path::PathBuf::from(&message);
+    anyhow::ensure!(
+        saved
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("t10-push")),
+        "落盘名未保留原文件名：{message}"
+    );
+    let round_trip = std::fs::read(&saved).context("读取落盘文件失败")?;
+    anyhow::ensure!(round_trip == payload, "落盘内容与推送不一致");
+    println!("t10 ok: 推送落盘 {}", saved.display());
+
+    // ── 拉取：对刚落盘的文件发 pull，收分片重组 ──
+    c.tx.send(&rd_proto::v0::Envelope {
+        req_id: 0,
+        msg: Some(rd_proto::v0::envelope::Msg::FileXferOffer(FileXferOffer {
+            xfer_id: XFER_PULL,
+            name: String::new(),
+            size: 0,
+            pull: true,
+            remote_path: saved.display().to_string(),
+        })),
+    })
+    .await?;
+    let mut pulled: Vec<u8> = Vec::with_capacity(payload.len());
+    loop {
+        let env = c
+            .recv_until(Duration::from_secs(10), |env: &rd_proto::v0::Envelope| {
+                matches!(env.msg, Some(rd_proto::v0::envelope::Msg::FileXferChunk(ref m)) if m.xfer_id == XFER_PULL)
+            })
+            .await?;
+        let rd_proto::v0::envelope::Msg::FileXferChunk(FileXferChunk { data, eof, .. }) =
+            env.msg.context("Chunk 信封无消息体")?
+        else {
+            unreachable!("recv_until 已保证 FileXferChunk");
+        };
+        pulled.extend_from_slice(&data);
+        if eof {
+            break;
+        }
+    }
+    anyhow::ensure!(pulled == payload, "拉取内容与原数据不一致");
+    println!("t10 ok: 拉取回读 {} 字节一致", pulled.len());
+
+    // ── 清理：删除测试产物（不留给用户下载目录）──
+    let _ = std::fs::remove_file(&saved);
+    let _ = std::fs::remove_dir_all(&recv_dir);
+    std::env::remove_var("RD_RECV_DIR");
+    c.close().await;
     Ok(())
 }

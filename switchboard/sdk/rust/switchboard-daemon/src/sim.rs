@@ -31,7 +31,14 @@ pub struct SimParams {
 
 impl Default for SimParams {
     fn default() -> Self {
-        Self { rtt_ms: 40.0, loss: 0.01, mbps: 20.0, burst_len: 0, fec_rs: true, duration_s: 30.0 }
+        Self {
+            rtt_ms: 40.0,
+            loss: 0.01,
+            mbps: 20.0,
+            burst_len: 0,
+            fec_rs: true,
+            duration_s: 30.0,
+        }
     }
 }
 
@@ -51,8 +58,15 @@ pub enum Telem {
         path_kind: String,
         media: String,
     },
-    Event { ts_ms: f64, event: String, detail: serde_json::Value },
-    Ended { reason: String, score: Option<Score> },
+    Event {
+        ts_ms: f64,
+        event: String,
+        detail: serde_json::Value,
+    },
+    Ended {
+        reason: String,
+        score: Option<Score>,
+    },
 }
 
 /// 会话结束的自动评分（0-100，口径：流畅 40 / 送达 30 / 延迟 20 / 抗丢包 10）。
@@ -103,8 +117,12 @@ pub fn start(params: SimParams) -> SessionHandle {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (stop_tx, stop_rx) = watch::channel(false);
     let (telem_tx, telem_rx) = broadcast::channel(512);
-    let media_name =
-        if params.fec_rs { "sb.moonlight.fec-rs" } else { "sb.core.fec-xor" }.to_string();
+    let media_name = if params.fec_rs {
+        "sb.moonlight.fec-rs"
+    } else {
+        "sb.core.fec-xor"
+    }
+    .to_string();
 
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
@@ -122,7 +140,13 @@ pub fn start(params: SimParams) -> SessionHandle {
         });
     }
 
-    SessionHandle { id, params, stop_tx, telemetry_rx: telem_rx, done }
+    SessionHandle {
+        id,
+        params,
+        stop_tx,
+        telemetry_rx: telem_rx,
+        done,
+    }
 }
 
 async fn run_session(
@@ -148,7 +172,10 @@ async fn run_session(
         loss_override: Arc::clone(&loss_override),
         seed: 42,
     };
-    let est = transport.establish(Vec::new(), Arc::clone(&bus)).await.expect("建立");
+    let est = transport
+        .establish(Vec::new(), Arc::clone(&bus))
+        .await
+        .expect("建立");
     let raw_remote = lb.take_remote().await.expect("对端");
     let remote = shape(Box::new(raw_remote), lp, Arc::clone(&loss_override), 43);
     let a: Arc<dyn Channel> = Arc::from(est);
@@ -159,7 +186,10 @@ async fn run_session(
     } else {
         Arc::new(FecShards::new(FecConfig::default()))
     };
-    let (mut tx, mut rx) = media.bind(Arc::clone(&a), Arc::clone(&b), Arc::clone(&bus)).await.unwrap();
+    let (mut tx, mut rx) = media
+        .bind(Arc::clone(&a), Arc::clone(&b), Arc::clone(&bus))
+        .await
+        .unwrap();
 
     let live = Arc::new(Live::default());
     let t0 = Instant::now();
@@ -204,7 +234,8 @@ async fn run_session(
                 match rx.next().await {
                     Some(FrameIn::Complete { data, .. }) => {
                         live.recv_frames.fetch_add(1, Ordering::Relaxed);
-                        live.recv_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        live.recv_bytes
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
                     }
                     Some(FrameIn::Lost { .. }) => {}
                     None => break,
@@ -226,11 +257,19 @@ async fn run_session(
                 // QA #3：负载随 mbps 缩放（目标线率 ~75%），单帧上限 120KB
                 let frame_bytes = ((p.mbps * 1e6 / 8.0 / 60.0) as usize).clamp(2_000, 120_000);
                 let data: Vec<u8> = (0..frame_bytes).map(|x| (x as u8) ^ fid as u8).collect();
-                if tx.submit(EncodedFrame { frame_id: fid, data: Bytes::from(data) }).await.is_err() {
+                if tx
+                    .submit(EncodedFrame {
+                        frame_id: fid,
+                        data: Bytes::from(data),
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 live.sent_frames.fetch_add(1, Ordering::Relaxed);
-                live.sent_bytes.fetch_add(frame_bytes as u64, Ordering::Relaxed);
+                live.sent_bytes
+                    .fetch_add(frame_bytes as u64, Ordering::Relaxed);
                 fid += 1;
                 tokio::time::sleep(Duration::from_millis(1000 / 60)).await;
             }
@@ -289,19 +328,17 @@ async fn run_session(
     }
 
     // 时长/停止控制
-    let deadline =
-        (p.duration_s > 0.0).then(|| tokio::time::Instant::now() + Duration::from_secs_f32(p.duration_s));
-    loop {
-        tokio::select! {
-            _ = stop_rx.changed() => break,
-            _ = async {
-                if let Some(dl) = deadline {
-                    tokio::time::sleep_until(dl).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => break,
-        }
+    let deadline = (p.duration_s > 0.0)
+        .then(|| tokio::time::Instant::now() + Duration::from_secs_f32(p.duration_s));
+    tokio::select! {
+        _ = stop_rx.changed() => {}
+        _ = async {
+            if let Some(dl) = deadline {
+                tokio::time::sleep_until(dl).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {}
     }
     // 出分：按 04 篇口径的简化版（流畅 40 / 送达 30 / 延迟 20 / 抗丢包 10）
     let a_acc = accum.lock().unwrap();

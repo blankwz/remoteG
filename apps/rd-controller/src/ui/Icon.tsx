@@ -267,6 +267,15 @@ export function IconGauge({ size, className }: IconProps) {
   ));
 }
 
+/** 文件夹（文件传输）。 */
+export function IconFolder({ size, className }: IconProps) {
+  return base(size, className, (
+    <>
+      <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4l2 2.5h7A2.5 2.5 0 0 1 21 10v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17V7.5Z" />
+    </>
+  ));
+}
+
 /** 左箭头（返回）。 */
 export function IconArrowLeft({ size, className }: IconProps) {
   return base(size, className, (

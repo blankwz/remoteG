@@ -57,7 +57,11 @@ fn uuid_lite() -> String {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("lb-{:x}-{:x}", t.as_millis() as u64, std::process::id() as u64)
+    format!(
+        "lb-{:x}-{:x}",
+        t.as_millis() as u64,
+        std::process::id() as u64
+    )
 }
 
 fn next_sid() -> u64 {
@@ -87,8 +91,15 @@ pub struct LoopbackChannel {
 impl LoopbackChannel {
     fn make_caps(mtu: u16) -> ChannelCaps {
         ChannelCaps {
-            datagram: Some(DatagramCaps { max_size: mtu.saturating_sub(16), lossy_ok: true }),
-            streams: Some(StreamCaps { reliable_ordered: true, bidi: true, max_concurrent: 64 }),
+            datagram: Some(DatagramCaps {
+                max_size: mtu.saturating_sub(16),
+                lossy_ok: true,
+            }),
+            streams: Some(StreamCaps {
+                reliable_ordered: true,
+                bidi: true,
+                max_concurrent: 64,
+            }),
             congestion: vec![crate::caps::CongestionKind::Cubic],
             mtu,
             multipath: false,
@@ -140,7 +151,10 @@ fn spawn_pump(
             match msg {
                 Wire::Dgram(b) => {
                     inner.stats.dgrams_recv.fetch_add(1, Ordering::Relaxed);
-                    inner.stats.bytes_recv.fetch_add(b.len() as u64, Ordering::Relaxed);
+                    inner
+                        .stats
+                        .bytes_recv
+                        .fetch_add(b.len() as u64, Ordering::Relaxed);
                     // 接收侧溢出丢弃（lossy_ok 语义），计入 lost
                     if dgram_tx.try_send(b).is_err() {
                         inner.stats.lost.fetch_add(1, Ordering::Relaxed);
@@ -183,10 +197,19 @@ impl Channel for LoopbackChannel {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SendError::Closed);
         }
-        let max = self.inner.caps.datagram.as_ref().map(|d| d.max_size).unwrap_or(0) as usize;
+        let max = self
+            .inner
+            .caps
+            .datagram
+            .as_ref()
+            .map(|d| d.max_size)
+            .unwrap_or(0) as usize;
         if b.len() > max {
             // 01 §6 MUST 2：超限 = 丢新包，绝不阻塞
-            self.inner.stats.dropped_queue.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .stats
+                .dropped_queue
+                .fetch_add(1, Ordering::Relaxed);
             return Err(SendError::WouldBlock);
         }
         match self.inner.wire_tx.try_send(Wire::Dgram(b)) {
@@ -196,7 +219,10 @@ impl Channel for LoopbackChannel {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.inner.stats.dropped_queue.fetch_add(1, Ordering::Relaxed);
+                self.inner
+                    .stats
+                    .dropped_queue
+                    .fetch_add(1, Ordering::Relaxed);
                 Err(SendError::WouldBlock)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(SendError::Closed),
@@ -256,7 +282,11 @@ impl Channel for LoopbackChannel {
             stage: Stage::Transport.as_str().into(),
             module: "sb.core.loopback".into(),
             conn: s.conn.clone(),
-            path: PathTag { kind: PathKind::Loopback, local: None, remote: None },
+            path: PathTag {
+                kind: PathKind::Loopback,
+                local: None,
+                remote: None,
+            },
             rtt_ewma_ms: 0.05,
             loss_ratio: s.lost.load(Ordering::Relaxed) as f32
                 / (s.dgrams_sent.load(Ordering::Relaxed) + 1) as f32,
@@ -290,9 +320,14 @@ struct LoopbackStream {
 #[async_trait]
 impl Stream for LoopbackStream {
     async fn send(&mut self, b: &[u8]) -> Result<(), ChannelError> {
-        self.stats.bytes_sent.fetch_add(b.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_sent
+            .fetch_add(b.len() as u64, Ordering::Relaxed);
         self.out
-            .send(Wire::Data { sid: self.sid, b: Bytes::copy_from_slice(b) })
+            .send(Wire::Data {
+                sid: self.sid,
+                b: Bytes::copy_from_slice(b),
+            })
             .await
             .map_err(|_| ChannelError::Closed)
     }
@@ -358,7 +393,10 @@ mod tests {
 
     async fn setup() -> (Box<dyn Channel>, Box<dyn Channel>) {
         let t = LoopbackPairTransport::new(1200);
-        let a: Box<dyn Channel> = t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap();
+        let a: Box<dyn Channel> = t
+            .establish(Vec::new(), Arc::new(EventBus::new()))
+            .await
+            .unwrap();
         let b: Box<dyn Channel> = Box::new(t.take_remote().await.unwrap());
         (a, b)
     }
@@ -375,7 +413,10 @@ mod tests {
         for _ in 0..4096 {
             let _ = a.send_dgram(big.clone()).await;
         }
-        assert!(matches!(a.send_dgram(big).await, Err(SendError::WouldBlock)));
+        assert!(matches!(
+            a.send_dgram(big).await,
+            Err(SendError::WouldBlock)
+        ));
         a.close();
         assert!(a.is_closed());
     }
@@ -397,7 +438,9 @@ mod tests {
         let (a, _b) = setup().await;
         a.send_dgram(Bytes::from_static(b"x")).await.unwrap();
         let s = a.stats();
-        assert!(crate::telemetry::stats_complete(&serde_json::to_string(&s).unwrap()));
+        assert!(crate::telemetry::stats_complete(
+            &serde_json::to_string(&s).unwrap()
+        ));
         assert_eq!(s.path.kind, PathKind::Loopback);
     }
 }

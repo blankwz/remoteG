@@ -31,6 +31,7 @@ import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
 import { disconnectDevice } from "../api/devices";
 import { FloatingToolbar, type Quality } from "../session/FloatingToolbar";
+import { FilesPanel } from "../session/FilesPanel";
 import { useDismiss } from "../ui/useDismiss";
 import { DEFAULT_TERM_SHELL, TERM_SHELLS, parseShell } from "../api/term";
 import type { TermStatus } from "../term/TermView";
@@ -99,6 +100,8 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [hudVisible, setHudVisible] = useState(false);
   /** 隐私屏状态（T-028 F9；Agent echo 确认后翻转）。 */
   const [privacyOn, setPrivacyOn] = useState(false);
+  // 文件传输面板显隐（T-031，工具栏「更多 → 文件传输」打开）
+  const [showFiles, setShowFiles] = useState(false);
   /** 画质档位（受控真实态；localStorage 记忆上次选择）。 */
   const [quality, setQuality] = useState<Quality>(() => {
     const saved = window.localStorage.getItem("rd.quality");
@@ -865,11 +868,15 @@ export function Session({ deviceId }: { deviceId: string }) {
             inputLocked={snapshot.viewOnly}
             onCopyToRemote={() => void doCopy("to")}
             onCopyFromRemote={() => void doCopy("from")}
+            onFiles={() => setShowFiles(true)}
             onToggleHud={() => setHudVisible((v) => !v)}
             hudVisible={hudVisible}
             onSendText={(text) => void doSendText(text)}
             onSendCombo={(keys) => void doSendCombo(keys)}
           />
+          {showFiles && (
+            <FilesPanel deviceId={deviceId} onClose={() => setShowFiles(false)} />
+          )}
           {/* chip 簇右置（R11 D11：曾与 bar 同行挤偏工具栏中心 ~80px） */}
           <div className={styles.chipCluster}>
             <button

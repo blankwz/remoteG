@@ -95,7 +95,7 @@ fn recovery_fast_climb_back_to_start_then_steady() {
     rc.update(normal());
     rc.update(congested_queued()); // 防抖 tick（好样本，稳态 streak=1）
     let degraded = rc.update(congested_queued()).kbps; // ×0.7
-    // 好样本：低于起始码率 → 爬坡 ×1.3 快速恢复，封顶 start_kbps。
+                                                       // 好样本：低于起始码率 → 爬坡 ×1.3 快速恢复，封顶 start_kbps。
     let g1 = rc.update(normal()).kbps;
     assert!(g1 > degraded, "爬坡: {degraded} → {g1}");
     let g2 = rc.update(normal()).kbps;

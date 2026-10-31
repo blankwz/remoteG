@@ -68,14 +68,14 @@ use rd_proto::v0::{
     QualityPreset, RenderLevel, SessionState, SetQuality, StatsReport, ViewportInfo, WindowEvent,
     WindowInfo, WindowList,
 };
-use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
 use rd_transport::framing::encode_video_header;
+use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
-use switchboard_core::stages::{FrameSink, MediaAdapt};
 use rd_window_win::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
 use rd_window_win::resize::{fit_window, restore_placement, save_placement, target_client_size};
 use rd_window_win::resize::{FitResult, SavedPlacement};
 use rd_window_win::{list_windows, window_group, window_icon_png, GroupMember, WindowAttrs};
+use switchboard_core::stages::{FrameSink, MediaAdapt};
 use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -951,17 +951,13 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         Ok(t) => t,
         Err(err) => {
             drop(capture);
-            match &mut video_out {
-                VideoOut::Stream(t) => {
-                    let _ = t.finish();
-                }
-                _ => {}
+            if let VideoOut::Stream(t) = &mut video_out {
+                let _ = t.finish();
             }
             restore_on_fail(&spec);
             anyhow::bail!("打开瓦片流失败: {err:#}");
         }
     };
-    let video_stream_id = video_stream_id;
     let tile_stream_id = u32::try_from(tile_tx.id()).unwrap_or(u32::MAX);
 
     let cancel = CancellationToken::new();
@@ -1012,11 +1008,8 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             Ok(t) => t,
             Err(err) => {
                 drop(capture);
-                match &mut video_out {
-                    VideoOut::Stream(t) => {
-                        let _ = t.finish();
-                    }
-                    _ => {}
+                if let VideoOut::Stream(t) = &mut video_out {
+                    let _ = t.finish();
                 }
                 let _ = tile_tx.finish();
                 restore_on_fail(&spec);
@@ -1131,7 +1124,13 @@ async fn send_error(
 ///   接管（EWMA 基线重新收敛，无需复位）。
 pub async fn set_quality(ctx: &SessionCtx, req_id: u32, m: SetQuality) -> anyhow::Result<()> {
     let Ok(preset) = QualityPreset::try_from(m.preset) else {
-        return send_error(ctx, req_id, ERR_QUALITY, format!("画质档位无效: {}", m.preset)).await;
+        return send_error(
+            ctx,
+            req_id,
+            ERR_QUALITY,
+            format!("画质档位无效: {}", m.preset),
+        )
+        .await;
     };
     let key = ctx_key(ctx);
     // window_id 限定：窗口须已由本会话打开（防跨会话误伤其他连接的管线）
@@ -1156,7 +1155,10 @@ pub async fn set_quality(ctx: &SessionCtx, req_id: u32, m: SetQuality) -> anyhow
     apply_quality(ctx, preset, m.window_id);
     tracing::info!(preset = ?preset, window = format!("{:#x}", m.window_id), "画质档位已生效");
     ctx.send(
-        Msg::SetQuality(SetQuality { window_id: m.window_id, preset: m.preset }),
+        Msg::SetQuality(SetQuality {
+            window_id: m.window_id,
+            preset: m.preset,
+        }),
         req_id,
     )
     .await
@@ -1173,9 +1175,7 @@ fn apply_quality(ctx: &SessionCtx, preset: QualityPreset, window_id: u64) {
     }
     let key = ctx_key(ctx);
     let idx = preset as usize;
-    let fps = PRESET_FPS[idx]
-        .min(ctx.state.config.max_fps.max(1))
-        .max(1);
+    let fps = PRESET_FPS[idx].min(ctx.state.config.max_fps.max(1)).max(1);
     let mut slots: Vec<(u64, Arc<AtomicU32>, Arc<AtomicU32>)> = pipes()
         .lock()
         .unwrap_or_else(lock_poisoned)
@@ -1189,7 +1189,8 @@ fn apply_quality(ctx: &SessionCtx, preset: QualityPreset, window_id: u64) {
     // 多窗口按面积分摊档位总预算（与 apply_rate 同一策略）
     let areas: Vec<u64> = {
         let map = pipes().lock().unwrap_or_else(lock_poisoned);
-        slots.iter()
+        slots
+            .iter()
             .map(|(id, _, _)| map.get(id).map(|h| h.area).unwrap_or(1))
             .collect()
     };
@@ -1805,14 +1806,14 @@ async fn video_send_task(
                                     data: switchboard_core::Bytes::from(payload),
                                 })
                                 .await
-                                .map(|qd| {
+                                .inspect(|qd| {
                                     tracing::debug!(
                                         window = format!("{window_id:#x}"),
                                         fid,
                                         bytes = n,
                                         "fec 帧已提交(切块发送)"
                                     );
-                                    qd
+                                    let _ = qd;
                                 })
                                 .map(|_| ())
                                 .map_err(|e| anyhow::anyhow!("fec submit: {e}"))
@@ -2415,9 +2416,7 @@ fn apply_rate(
     if let Ok(preset) = QualityPreset::try_from(user as i32) {
         if preset != QualityPreset::Auto {
             let idx = preset as usize;
-            let fps = PRESET_FPS[idx]
-                .min(ctx.state.config.max_fps.max(1))
-                .max(1);
+            let fps = PRESET_FPS[idx].min(ctx.state.config.max_fps.max(1)).max(1);
             let areas: Vec<u64> = slots.iter().map(|s| s.area).collect();
             let shares = allocate_kbps(PRESET_KBPS[idx], &areas);
             for (s, kbps) in slots.iter().zip(shares) {
@@ -2944,7 +2943,10 @@ mod tests {
             let p = QualityPreset::try_from(raw).expect("0..=3 都是合法档位");
             assert_eq!(p as i32, raw, "枚举值即表下标");
         }
-        assert!(QualityPreset::try_from(4).is_err(), "越界档位必须报 Error{{60}}");
+        assert!(
+            QualityPreset::try_from(4).is_err(),
+            "越界档位必须报 Error{{60}}"
+        );
         // AUTO 不查表（apply_quality/apply_rate 对 AUTO 直接放行自适应）
         assert_eq!(QualityPreset::try_from(0), Ok(QualityPreset::Auto));
     }

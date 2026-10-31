@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use rd_proto::v0::{envelope, ClipboardData, Envelope, Error, Hello, HelloAck, PairResult, SetPrivacy};
+use rd_proto::v0::{
+    envelope, ClipboardData, Envelope, Error, Hello, HelloAck, PairResult, SetPrivacy,
+};
 use rd_security::{AgentPairing, PairError, PairStep};
 use rd_term::TermManager;
 use rd_transport::{Conn, ControlRx, ControlTx, Fingerprint, Identity};
@@ -203,6 +205,8 @@ pub struct SessionCtx {
     /// 终端挂接(T-017 实现;桩阶段无读者)。
     #[allow(dead_code)]
     pub terms: TermAttachments,
+    /// 文件传输状态(T-031):推送接收槽 + 拉取任务取消令牌。
+    pub files: crate::file_handler::FileState,
 }
 
 impl SessionCtx {
@@ -247,7 +251,9 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
             }
         }
         // 沿用 Hello 的 req_id:控制端以 RPC(等响应)方式握手
-        ctl_tx.send(&hello_ack(hello_req_id, hello.media_fec)).await?;
+        ctl_tx
+            .send(&hello_ack(hello_req_id, hello.media_fec))
+            .await?;
         true
     } else {
         // 未信任:先对 Hello 回 Error{1}(05_api §1 未鉴权;控制端以此触发配对流程),
@@ -270,7 +276,12 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     // debug 构建默认关(e2e),生产默认开。
     if state.config.confirm_connection && !confirm_connection(&hello.device_name, &peer_fp).await {
         tracing::info!(peer = peer_fp.short_hex(), "对方未确认控制请求,断开");
-        crate::audit::log("confirm_denied", &hello.device_name, &peer_fp.short_hex(), serde_json::json!({}));
+        crate::audit::log(
+            "confirm_denied",
+            &hello.device_name,
+            &peer_fp.short_hex(),
+            serde_json::json!({}),
+        );
         return Ok(());
     }
 
@@ -292,7 +303,9 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         .license
         .as_ref()
         .is_some_and(|l| l.plan == rd_security::Plan::Pro);
-    if !is_pro && state.peers.lock().expect("peers 锁中毒").len() >= rd_security::license::FREE_CONN_MAX {
+    if !is_pro
+        && state.peers.lock().expect("peers 锁中毒").len() >= rd_security::license::FREE_CONN_MAX
+    {
         tracing::info!(peer = peer_fp.short_hex(), "免费版并发连接已达上限,拒绝");
         crate::audit::log(
             "license_reject_conn",
@@ -330,6 +343,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         privacy_on: AtomicBool::new(false),
         windows: WindowSessions,
         terms: TermAttachments,
+        files: crate::file_handler::FileState::default(),
     });
 
     {
@@ -364,6 +378,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     window_session::on_disconnect(&ctx);
     input_handler::on_disconnect(&ctx);
     term_handler::on_disconnect(&ctx);
+    crate::file_handler::on_disconnect(&ctx).await;
     if let Some(peer) = state.peers.lock().expect("peers 锁中毒").remove(&conn_id) {
         peer.cancel.cancel();
     }
@@ -522,7 +537,11 @@ async fn finish_pairing(
     if !is_pro {
         let count = lock_trust(state).list().len();
         if count >= rd_security::license::FREE_DEVICE_MAX as usize {
-            tracing::info!(peer = peer_fp.short_hex(), count, "免费版信任设备已达上限,拒绝配对");
+            tracing::info!(
+                peer = peer_fp.short_hex(),
+                count,
+                "免费版信任设备已达上限,拒绝配对"
+            );
             crate::audit::log(
                 "license_reject_pair",
                 &hello.device_name,
@@ -551,7 +570,12 @@ async fn finish_pairing(
             .context("配对成功但写入信任列表失败")?;
     }
     tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已加入信任列表");
-    crate::audit::log("pair_success", &hello.device_name, &peer_fp.short_hex(), serde_json::json!({}));
+    crate::audit::log(
+        "pair_success",
+        &hello.device_name,
+        &peer_fp.short_hex(),
+        serde_json::json!({}),
+    );
     // HelloAck 尽力发送:对端配对成功后可能立即断开重连
     // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
     // 配对期 ack 同样回带协商位：会话上下文以 hello.media_fec 生效，ack 若
@@ -560,8 +584,9 @@ async fn finish_pairing(
     Ok(())
 }
 
-/// 已鉴权状态的消息分发循环(任务卡步骤 5)。
-async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<()> {
+/// 已鉴权状态的消息分发循环(任务卡步骤 5)。取 `&Arc<SessionCtx>`:
+/// 文件拉取(T-031)需要把 Arc clone 进后台任务。
+async fn dispatch_loop(ctx: &Arc<SessionCtx>, rx: &mut ControlRx) -> anyhow::Result<()> {
     while let Some(env) = rx.recv().await? {
         let Some(msg) = env.msg else { continue };
         match msg {
@@ -588,10 +613,9 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
                 window_session::set_quality(ctx, env.req_id, m).await,
             ),
             // 隐私屏（T-028 F9，Pro）：机器级黑罩；断开自动解除
-            envelope::Msg::SetPrivacy(m) => handle_soft(
-                &ctx.peer_name,
-                handle_privacy(ctx, env.req_id, m).await,
-            ),
+            envelope::Msg::SetPrivacy(m) => {
+                handle_soft(&ctx.peer_name, handle_privacy(ctx, env.req_id, m).await)
+            }
             // 输入 → T-017;UIPI 拦截(管理员窗口)按 30s 去抖回一次性 Error
             envelope::Msg::Key(m) => {
                 if let Some((code, message)) =
@@ -642,6 +666,23 @@ async fn dispatch_loop(ctx: &SessionCtx, rx: &mut ControlRx) -> anyhow::Result<(
             ),
             // 剪贴板同步(v0.1/D-013 包4)
             envelope::Msg::Clipboard(m) => handle_clipboard(ctx, env.req_id, m).await?,
+            // 文件传输(v0.2/T-031):列目录走 RPC;分片/取消 req_id=0 顺序处理
+            envelope::Msg::FileListReq(m) => handle_soft(
+                &ctx.peer_name,
+                crate::file_handler::list(ctx, env.req_id, m).await,
+            ),
+            envelope::Msg::FileXferOffer(m) => {
+                handle_soft(&ctx.peer_name, crate::file_handler::on_offer(ctx, m).await)
+            }
+            envelope::Msg::FileXferChunk(m) => {
+                handle_soft(&ctx.peer_name, crate::file_handler::on_chunk(ctx, m).await)
+            }
+            envelope::Msg::FileCancel(m) => {
+                handle_soft(&ctx.peer_name, crate::file_handler::on_cancel(ctx, m).await)
+            }
+            envelope::Msg::FileXferAck(m) => {
+                tracing::debug!(name = %ctx.peer_name, xfer = m.xfer_id, ok = m.ok, "忽略反向 FileXferAck");
+            }
             // 其余消息:静默/记录,不打断会话
             envelope::Msg::Stats(m) => {
                 tracing::debug!(name = %ctx.peer_name, fps = m.fps, rtt_ms = m.rtt_ms, kbps = m.kbps, "控制端统计(码率自适应 T-016 接入)");
@@ -706,15 +747,28 @@ async fn handle_privacy(ctx: &SessionCtx, req_id: u32, m: SetPrivacy) -> anyhow:
                 .await;
         }
         ctx.privacy_on.store(true, Ordering::SeqCst);
-        crate::audit::log("privacy_on", &ctx.peer_name, &ctx.peer_fp, serde_json::json!({}));
+        crate::audit::log(
+            "privacy_on",
+            &ctx.peer_name,
+            &ctx.peer_fp,
+            serde_json::json!({}),
+        );
     } else {
         let _ = crate::privacy::set(false);
         ctx.privacy_on.store(false, Ordering::SeqCst);
-        crate::audit::log("privacy_off", &ctx.peer_name, &ctx.peer_fp, serde_json::json!({}));
+        crate::audit::log(
+            "privacy_off",
+            &ctx.peer_name,
+            &ctx.peer_fp,
+            serde_json::json!({}),
+        );
     }
     tracing::info!(on = m.on, name = %ctx.peer_name, "隐私屏已切换");
     ctx.send(
-        envelope::Msg::SetPrivacy(SetPrivacy { window_id: m.window_id, on: m.on }),
+        envelope::Msg::SetPrivacy(SetPrivacy {
+            window_id: m.window_id,
+            on: m.on,
+        }),
         req_id,
     )
     .await
@@ -786,6 +840,8 @@ fn hello_ack(req_id: u32, media_fec: bool) -> Envelope {
             host_version: env!("CARGO_PKG_VERSION").to_string(),
             // T-027：fec-shards 协商确认（默认关，RD_MEDIA_FEC=1 才声明支持）
             media_fec,
+            // T-031：物理网卡 MAC（WOL 远程开机用；非 Windows 为空）
+            mac_addrs: crate::netinfo::mac_addrs().join(","),
         })),
     }
 }
@@ -797,8 +853,8 @@ fn host_name() -> String {
         .unwrap_or_else(|_| "unknown-host".to_string())
 }
 
-/// 协议 `Error` 消息体。
-fn error_msg(code: u32, message: &str) -> Error {
+/// 协议 `Error` 消息体（pub(crate)：file_handler T-031 复用同一构造）。
+pub(crate) fn error_msg(code: u32, message: &str) -> Error {
     Error {
         code,
         message: message.to_string(),

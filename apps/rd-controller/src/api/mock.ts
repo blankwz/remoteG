@@ -25,6 +25,7 @@ const DEVICES = [
     fingerprintHex: "a3f1c90b7e22d4f8c05a6b1d3e7f9a2b4c6d8e0f2a4b6c8d0e2f4a6",
     addedAt: 1761500000,
     online: true,
+    macAddrs: ["AA:BB:CC:DD:EE:01"],
   },
   {
     id: "dev-htpc",
@@ -33,6 +34,7 @@ const DEVICES = [
     fingerprintHex: "b2e0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6",
     addedAt: 1761200000,
     online: true,
+    macAddrs: ["AA:BB:CC:DD:EE:02"],
   },
   {
     id: "dev-office",
@@ -41,6 +43,7 @@ const DEVICES = [
     fingerprintHex: "c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3c5e7f9b1d3f5a7c9e1b3d5f7",
     addedAt: 1760900000,
     online: false,
+    macAddrs: ["AA:BB:CC:DD:EE:03"],
   },
 ];
 
@@ -96,6 +99,17 @@ export async function mockInvoke<T>(
     // 曾恒返空串，把「demo 无通道」错报成「你的剪贴板是空的」甩锅用户）
     local_clipboard_read: "（demo 演示文本：桌面端可粘贴真实剪贴板）",
     local_clipboard_write: true,
+    // T-031：文件传输列目录演示（推送/拉取在 api 层模拟，不经此表）
+    file_list: {
+      path: "C:\\Users\\demo",
+      entries: [
+        { name: "Desktop", dir: true, size: 0 },
+        { name: "Documents", dir: true, size: 0 },
+        { name: "Downloads", dir: true, size: 0 },
+        { name: "report.pdf", dir: false, size: 1024 * 1024 },
+        { name: "setup.exe", dir: false, size: 48 * 1024 * 1024 },
+      ],
+    },
   };
   await new Promise((r) => setTimeout(r, 80));
   if (!(cmd in TABLE)) {

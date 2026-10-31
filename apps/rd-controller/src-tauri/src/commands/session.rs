@@ -369,7 +369,10 @@ pub async fn set_quality(
         window_id: root,
         preset: proto_preset as i32,
     });
-    let reply = conn.rpc(msg).await.map_err(|e| format!("设置画质失败：{e:#}"))?;
+    let reply = conn
+        .rpc(msg)
+        .await
+        .map_err(|e| format!("设置画质失败：{e:#}"))?;
     match reply.msg {
         // Agent 原样 echo = 已生效
         Some(envelope::Msg::SetQuality(echo)) => {
@@ -392,7 +395,10 @@ pub async fn set_privacy(
 ) -> Result<(), String> {
     let conn = get_conn(&state, &device_id)?;
     let msg = envelope::Msg::SetPrivacy(SetPrivacy { window_id: 0, on });
-    let reply = conn.rpc(msg).await.map_err(|e| format!("设置隐私屏失败：{e:#}"))?;
+    let reply = conn
+        .rpc(msg)
+        .await
+        .map_err(|e| format!("设置隐私屏失败：{e:#}"))?;
     match reply.msg {
         Some(envelope::Msg::SetPrivacy(echo)) => {
             tracing::info!(device = %device_id, on = echo.on, "隐私屏已切换");

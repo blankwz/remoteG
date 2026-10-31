@@ -62,6 +62,13 @@ export interface DeviceDto {
   /** 加入时间（Unix 秒）。 */
   addedAt: number;
   online: boolean;
+  /** 物理网卡 MAC（WOL 远程开机用；空 = 未采集过）。 */
+  macAddrs: string[];
+}
+
+/** 远程开机（T-031 WOL）：向本网段广播魔术包（需同网段）。 */
+export function wakeDevice(id: string): Promise<void> {
+  return call("wake_device", { id });
 }
 
 /** connect_device 返回的对端能力。 */

@@ -56,7 +56,7 @@ impl ChannelCaps {
             match &self.datagram {
                 None => return false,
                 Some(od) => {
-                    if od.max_size < rd.max_size || od.lossy_ok < rd.lossy_ok {
+                    if od.max_size < rd.max_size || !od.lossy_ok & rd.lossy_ok {
                         return false;
                     }
                 }
@@ -66,8 +66,8 @@ impl ChannelCaps {
             match &self.streams {
                 None => return false,
                 Some(os) => {
-                    if os.reliable_ordered < rs.reliable_ordered
-                        || os.bidi < rs.bidi
+                    if !os.reliable_ordered & rs.reliable_ordered
+                        || !os.bidi & rs.bidi
                         || os.max_concurrent < rs.max_concurrent
                     {
                         return false;
@@ -94,8 +94,15 @@ mod tests {
 
     fn quic_like() -> ChannelCaps {
         ChannelCaps {
-            datagram: Some(DatagramCaps { max_size: 1200, lossy_ok: true }),
-            streams: Some(StreamCaps { reliable_ordered: true, bidi: true, max_concurrent: 100 }),
+            datagram: Some(DatagramCaps {
+                max_size: 1200,
+                lossy_ok: true,
+            }),
+            streams: Some(StreamCaps {
+                reliable_ordered: true,
+                bidi: true,
+                max_concurrent: 100,
+            }),
             congestion: vec![CongestionKind::Cubic],
             mtu: 1200,
             multipath: false,
@@ -106,7 +113,10 @@ mod tests {
     fn 可靠流媒体档_要求_datagram_满足() {
         // fec-shards profile：需要 datagram（lossy_ok）+ mtu≥1200
         let req = ChannelCaps {
-            datagram: Some(DatagramCaps { max_size: 1024, lossy_ok: true }),
+            datagram: Some(DatagramCaps {
+                max_size: 1024,
+                lossy_ok: true,
+            }),
             mtu: 1200,
             ..Default::default()
         };
@@ -115,13 +125,19 @@ mod tests {
 
     #[test]
     fn 要求_bb_而只有_cubic_失败() {
-        let req = ChannelCaps { congestion: vec![CongestionKind::Bbr], ..Default::default() };
+        let req = ChannelCaps {
+            congestion: vec![CongestionKind::Bbr],
+            ..Default::default()
+        };
         assert!(!quic_like().satisfies(&req));
     }
 
     #[test]
     fn mtu_不足_失败() {
-        let req = ChannelCaps { mtu: 1400, ..Default::default() };
+        let req = ChannelCaps {
+            mtu: 1400,
+            ..Default::default()
+        };
         assert!(!quic_like().satisfies(&req));
     }
 

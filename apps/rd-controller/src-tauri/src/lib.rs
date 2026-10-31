@@ -108,7 +108,9 @@ pub fn run() {
                     // 用户的 主诉是控制别人，被控不可用只降级提示。
                     // 被控类命令（State<AgentRuntime> 提取）会返回错误，
                     // 前端按「被控服务未启动」展示。
-                    tracing::warn!("被控核心未启动(已有实例或端口/目录冲突)，本窗口仅作为控制端: {err:#}");
+                    tracing::warn!(
+                        "被控核心未启动(已有实例或端口/目录冲突)，本窗口仅作为控制端: {err:#}"
+                    );
                 }
             }
             Ok(())
@@ -137,6 +139,12 @@ pub fn run() {
             commands::devices::set_host_paused,
             commands::devices::edit_device,
             commands::devices::tailscale_ping,
+            commands::devices::wake_device,
+            // T-031：文件传输
+            commands::files::file_list,
+            commands::files::file_send,
+            commands::files::file_pull,
+            commands::files::file_cancel,
             // T-020：窗口
             commands::windows::list_windows,
             commands::windows::subscribe_window_events,

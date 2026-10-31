@@ -75,7 +75,10 @@ fn setup_env() -> Result<Env> {
     kill_orphans();
     ensure_testwin_built()?;
     let config_dir = tempfile::tempdir().context("创建 Agent 临时配置目录失败")?;
-    println!("[e2e] agent 日志目录: {}", config_dir.path().join("logs").display());
+    println!(
+        "[e2e] agent 日志目录: {}",
+        config_dir.path().join("logs").display()
+    );
     let testwin = spawn_testwin()?;
     let testwin_pid = testwin.child.id();
     // 按子进程 PID 锁定自己的 testwin——桌面上可能有历史遗留的同名窗口。
@@ -272,7 +275,10 @@ fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .env("RUST_LOG", std::env::var("RD_AGENT_RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .env(
+            "RUST_LOG",
+            std::env::var("RD_AGENT_RUST_LOG").unwrap_or_else(|_| "info".into()),
+        )
         .spawn()
         .context("启动 rd-agent 子进程失败")?;
     let stdout = child.stdout.take().context("未捕获 rd-agent stdout")?;

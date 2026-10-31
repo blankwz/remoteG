@@ -170,6 +170,8 @@ pub struct DeviceDto {
     pub fingerprint_hex: String,
     pub added_at: u64,
     pub online: bool,
+    /// 物理网卡 MAC（WOL 远程开机用；空 = 未采集过，前端置灰按钮）。
+    pub mac_addrs: Vec<String>,
 }
 
 /// connect_device 返回的 Agent 能力。
@@ -180,6 +182,8 @@ pub struct HelloAckDto {
     pub host_name: String,
     pub encode_caps: Vec<String>,
     pub host_version: String,
+    /// 物理网卡 MAC（v0.2 T-031，WOL 用）。
+    pub mac_addrs: Vec<String>,
 }
 
 /// 前端启动探测出的解码能力。
@@ -213,7 +217,8 @@ fn codec_label(v: i32) -> String {
 // devices.json
 // ---------------------------------------------------------------------------
 
-/// 设备列表条目（任务卡结构：`[{id, name, addr, fingerprint_hex, added_at}]`）。
+/// 设备列表条目（任务卡结构：`[{id, name, addr, fingerprint_hex, added_at}]`；
+/// v0.2 T-031 增 `mac_addrs`——旧文件缺字段按空反序列化）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceEntry {
     pub id: String,
@@ -221,6 +226,8 @@ pub struct DeviceEntry {
     pub addr: String,
     pub fingerprint_hex: String,
     pub added_at: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mac_addrs: Vec<String>,
 }
 
 /// 设备列表存储（与 TrustStore 同款原子写：tmp + fsync + rename）。
@@ -274,6 +281,28 @@ impl DeviceStore {
         let removed = self.devices.remove(pos);
         self.save()?;
         Ok(Some(removed))
+    }
+
+    /// 记录设备 MAC（握手后采集，T-031 WOL 用）。无变化不写盘。
+    /// 返回是否有变化。
+    pub fn set_mac_addrs(
+        &mut self,
+        fingerprint_hex: &str,
+        macs: Vec<String>,
+    ) -> anyhow::Result<bool> {
+        let Some(existing) = self
+            .devices
+            .iter_mut()
+            .find(|d| d.fingerprint_hex == fingerprint_hex)
+        else {
+            return Ok(false);
+        };
+        if existing.mac_addrs == macs {
+            return Ok(false);
+        }
+        existing.mac_addrs = macs;
+        self.save()?;
+        Ok(true)
     }
 
     fn save(&self) -> anyhow::Result<()> {
@@ -338,6 +367,7 @@ fn to_dto(entry: &DeviceEntry, online: bool) -> DeviceDto {
         fingerprint_hex: entry.fingerprint_hex.clone(),
         added_at: entry.added_at,
         online,
+        mac_addrs: entry.mac_addrs.clone(),
     }
 }
 
@@ -382,6 +412,7 @@ fn save_device(
         name: name.to_string(),
         addr: addr.to_string(),
         fingerprint_hex: fp_hex,
+        mac_addrs: Vec::new(),
         added_at: unix_now(),
     };
     store.upsert(entry.clone()).map_err(|e| format!("{e:#}"))?;
@@ -496,9 +527,15 @@ pub async fn pair_device(
     };
 
     // 首连不校验指纹（对端尚未进信任列表），配对成功后按实测指纹保存
-    let conn = DeviceConn::connect("pairing", &addr, state.identity(), None, crate::commands::devices::media_fec_setting(state.data_dir()))
-        .await
-        .map_err(|e| describe_connect_error(&e))?;
+    let conn = DeviceConn::connect(
+        "pairing",
+        &addr,
+        state.identity(),
+        None,
+        crate::commands::devices::media_fec_setting(state.data_dir()),
+    )
+    .await
+    .map_err(|e| describe_connect_error(&e))?;
     let result = run_pairing(&conn, &code, &addr, &name, &state).await;
     conn.close(0, "pairing done");
     let entry = result?;
@@ -543,7 +580,13 @@ pub async fn connect_device(
     // 自动重连循环会被单次慢失败拖住——快速失败让退避节奏生效。
     let conn = tokio::time::timeout(
         Duration::from_secs(3),
-        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp), crate::commands::devices::media_fec_setting(state.data_dir())),
+        DeviceConn::connect(
+            &id,
+            &entry.addr,
+            state.identity(),
+            Some(fp),
+            crate::commands::devices::media_fec_setting(state.data_dir()),
+        ),
     )
     .await
     .map_err(|_| format!("连接 {} 超时（3s）", entry.addr))?
@@ -559,12 +602,91 @@ pub async fn connect_device(
     if let Ok(mut trust) = open_trust(&state) {
         let _ = trust.touch(&fp); // 失败不影响连接
     }
+    // MAC 采集（T-031 WOL）：握手时被控端上报物理网卡 MAC，存入 devices.json，
+    // 供设备关机后「远程开机」。失败不影响连接。
+    let mac_addrs = split_macs(&ack.mac_addrs);
+    if !mac_addrs.is_empty()
+        && let Ok(mut store) = open_store(&state)
+    {
+        let _ = store.set_mac_addrs(&entry.fingerprint_hex, mac_addrs.clone());
+    }
     Ok(HelloAckDto {
         proto_ver: ack.proto_ver,
         host_name: ack.host_name,
         encode_caps: ack.encode_caps.iter().map(|c| codec_label(*c)).collect(),
         host_version: ack.host_version,
+        mac_addrs,
     })
+}
+
+/// 解析 `HelloAck.mac_addrs`（逗号分隔）→ 去空白的 MAC 列表。
+fn split_macs(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 构造 WOL 魔术包：6×0xFF + 16×目标 MAC（T-031）。
+fn magic_packet(mac: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = [0u8; 6];
+    for (i, part) in mac.split(':').enumerate() {
+        if i >= 6 {
+            return Err(format!("MAC 格式异常（段数多于 6）：{mac}"));
+        }
+        if part.len() != 2 {
+            return Err(format!("MAC 格式异常（段应为两位 hex）：{mac}"));
+        }
+        bytes[i] = u8::from_str_radix(part, 16).map_err(|_| format!("MAC 格式异常：{mac}"))?;
+    }
+    if mac.split(':').count() != 6 {
+        return Err(format!("MAC 格式异常：{mac}"));
+    }
+    let mut packet = Vec::with_capacity(102);
+    packet.extend_from_slice(&[0xFF; 6]);
+    for _ in 0..16 {
+        packet.extend_from_slice(&bytes);
+    }
+    Ok(packet)
+}
+
+/// 远程开机（T-031 WOL）：向本网段广播该设备的魔术包。
+///
+/// 局限（诚实边界）：仅限控制端与目标设备**同网段**时有效——跨网段/跨
+/// Tailscale 的唤醒需要路由器辅助转发，不在本命令能力内（设备卡片按钮
+/// 仅在采集过 MAC 时可用）。
+#[tauri::command]
+pub async fn wake_device(id: String, state: State<'_, ConnManager>) -> Result<(), String> {
+    let macs = {
+        let store = open_store(&state)?;
+        let entry = store.by_id(&id).ok_or_else(|| "设备不存在".to_string())?;
+        if entry.mac_addrs.is_empty() {
+            return Err("未采集到该设备的网卡 MAC（需至少成功连接过一次）".to_string());
+        }
+        entry.mac_addrs.clone()
+    };
+    let packets: Vec<Vec<u8>> = macs
+        .iter()
+        .map(|m| magic_packet(m))
+        .collect::<Result<_, _>>()?;
+    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+        .await
+        .map_err(|e| format!("打开唤醒 socket 失败：{e}"))?;
+    sock.set_broadcast(true)
+        .map_err(|e| format!("开启广播失败：{e}"))?;
+    // 每网卡 5 包 × 双端口（9/7），间隔留出网卡处理时间——厂商建议冗余发送
+    for packet in &packets {
+        for port in [9u16, 7u16] {
+            for _ in 0..5 {
+                sock.send_to(packet, ("255.255.255.255", port))
+                    .await
+                    .map_err(|e| format!("发送唤醒包失败：{e}"))?;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    tracing::info!(device = %id, macs = ?macs, "WOL 魔术包已发送");
+    Ok(())
 }
 
 /// 取在线连接（本模块私有，同 session.rs/term.rs 的同名辅助）。
@@ -638,7 +760,13 @@ pub async fn probe_device(id: String, state: State<'_, ConnManager>) -> Result<b
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
     match tokio::time::timeout(
         PROBE_TIMEOUT,
-        DeviceConn::connect(&id, &entry.addr, state.identity(), Some(fp), crate::commands::devices::media_fec_setting(state.data_dir())),
+        DeviceConn::connect(
+            &id,
+            &entry.addr,
+            state.identity(),
+            Some(fp),
+            crate::commands::devices::media_fec_setting(state.data_dir()),
+        ),
     )
     .await
     {
@@ -830,6 +958,45 @@ mod addr_tests {
     }
 }
 
+#[cfg(test)]
+mod wol_tests {
+    use super::{DeviceEntry, magic_packet, split_macs};
+
+    #[test]
+    fn 魔术包结构_6xff加16次mac() {
+        let p = magic_packet("AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(p.len(), 102);
+        assert!(p[..6].iter().all(|b| *b == 0xFF));
+        for chunk in p[6..].as_chunks::<6>().0 {
+            assert_eq!(chunk, &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        }
+    }
+
+    #[test]
+    fn 魔术包拒绝非法mac() {
+        assert!(magic_packet("ZZ:BB:CC:DD:EE:FF").is_err());
+        assert!(magic_packet("AA:BB:CC").is_err());
+        assert!(magic_packet("AA:BB:CC:DD:EE:FF:00").is_err());
+    }
+
+    #[test]
+    fn mac列表解析_去空白转大写() {
+        assert_eq!(
+            split_macs(" aa:bb:cc:dd:ee:ff , 11:22:33:44:55:66,"),
+            vec!["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"]
+        );
+        assert!(split_macs("").is_empty());
+    }
+
+    #[test]
+    fn 旧版devices_json缺mac字段可反序列化() {
+        let raw =
+            r#"{"id":"a","name":"n","addr":"1.2.3.4:21118","fingerprint_hex":"f","added_at":1}"#;
+        let entry: DeviceEntry = serde_json::from_str(raw).unwrap();
+        assert!(entry.mac_addrs.is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 控制端本机剪贴板（2026-10-27 手测修复）：WebView 的 navigator.clipboard
 // 在 Tauri v2/WebView2 下默认无权限（readText/writeText 全部 reject），
@@ -889,10 +1056,7 @@ pub async fn open_studio(app: tauri::AppHandle) -> Result<(), String> {
 /// `settings.json`，连接设备时生效（RS 纠错分片通道，弱网更稳、开销 +20%）。
 /// 原子写（临时文件 + rename，与信任列表同一纪律）——写一半崩溃不损坏配置。
 #[tauri::command]
-pub async fn set_media_fec(
-    enabled: bool,
-    state: State<'_, ConnManager>,
-) -> Result<(), String> {
+pub async fn set_media_fec(enabled: bool, state: State<'_, ConnManager>) -> Result<(), String> {
     let dir = state.data_dir();
     let path = dir.join("settings.json");
     let tmp = dir.join("settings.json.tmp");

@@ -53,7 +53,10 @@ pub async fn execute(
     for path in &plan.paths {
         match execute_path(path, prov, &req, &bus).await {
             Ok(est) => return Ok(est),
-            Err(reason) => failures.push(PathFailure { path: path.name.clone(), reason }),
+            Err(reason) => failures.push(PathFailure {
+                path: path.name.clone(),
+                reason,
+            }),
         }
     }
     Err(PlanError::NoPath(failures))
@@ -104,9 +107,12 @@ async fn execute_path(
             match puncher.punch(Vec::new(), budget, Arc::clone(bus)).await {
                 PunchOutcome::Connected(h) => paths.push(h),
                 PunchOutcome::Unsupported => {
-                    bus.emit_event("stage_transition", serde_json::json!({
-                        "from": "punch", "to": "relay", "outcome": "unsupported", "module": id
-                    }));
+                    bus.emit_event(
+                        "stage_transition",
+                        serde_json::json!({
+                            "from": "punch", "to": "relay", "outcome": "unsupported", "module": id
+                        }),
+                    );
                 }
                 PunchOutcome::Failed(e) => bus.emit_event(
                     "stage_transition",
@@ -131,7 +137,11 @@ async fn execute_path(
     }
 
     // S4 传输（02 §5 预算：中继路径放宽）
-    let t_budget = if via_relay { budgets::TRANSPORT_RELAY_MS } else { budgets::TRANSPORT_MS };
+    let t_budget = if via_relay {
+        budgets::TRANSPORT_RELAY_MS
+    } else {
+        budgets::TRANSPORT_MS
+    };
     let _ = t_budget; // v0.1 参考模块瞬时完成；真实模块由自身实现预算
 
     let channel = transport
@@ -139,7 +149,11 @@ async fn execute_path(
         .await
         .map_err(|e| format!("transport {} 建立失败: {e}", path.transport))?;
 
-    Ok(Established { path_name: path.name.clone(), via_relay, channel })
+    Ok(Established {
+        path_name: path.name.clone(),
+        via_relay,
+        channel,
+    })
 }
 
 #[cfg(test)]
@@ -185,7 +199,9 @@ transport = "sb.core.loopback"
         )
         .unwrap();
         let bus = Arc::new(EventBus::new());
-        let prov = ProvOnly { loopback: Arc::new(LoopbackPairTransport::new(1200)) };
+        let prov = ProvOnly {
+            loopback: Arc::new(LoopbackPairTransport::new(1200)),
+        };
         let est = execute(&plan, &prov, bus).await.unwrap();
         assert_eq!(est.path_name, "loop");
         assert!(!est.via_relay);
@@ -205,7 +221,9 @@ transport = "sb.nope.missing"
         )
         .unwrap();
         let bus = Arc::new(EventBus::new());
-        let prov = ProvOnly { loopback: Arc::new(LoopbackPairTransport::new(1200)) };
+        let prov = ProvOnly {
+            loopback: Arc::new(LoopbackPairTransport::new(1200)),
+        };
         match execute(&plan, &prov, bus).await {
             Err(PlanError::NoPath(fs)) => {
                 assert_eq!(fs.len(), 1);
@@ -218,9 +236,15 @@ transport = "sb.nope.missing"
     #[tokio::test]
     async fn caps_门控剔除_不满足mtu的transport() {
         // caps 逻辑复测：mtu 1200 的 offering 不满足 1400 的要求（02 §2.3 门控语义）
-        let req = ChannelCaps { mtu: 1400, ..Default::default() };
+        let req = ChannelCaps {
+            mtu: 1400,
+            ..Default::default()
+        };
         let offer = ChannelCaps {
-            datagram: Some(DatagramCaps { max_size: 1200, lossy_ok: true }),
+            datagram: Some(DatagramCaps {
+                max_size: 1200,
+                lossy_ok: true,
+            }),
             mtu: 1200,
             ..Default::default()
         };

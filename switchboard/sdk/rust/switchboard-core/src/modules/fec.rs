@@ -18,11 +18,13 @@
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use crate::channel::{Channel, SendError};
-use crate::stages::{EncodedFrame, FrameIn, FrameSink, FrameSource, MediaAdapt, MediaError, QueueDepth};
+use crate::stages::{
+    EncodedFrame, FrameIn, FrameSink, FrameSource, MediaAdapt, MediaError, QueueDepth,
+};
 use crate::telemetry::EventBus;
 
 pub const SHARD_SIZE: usize = 1024;
@@ -42,7 +44,10 @@ pub struct FecConfig {
 
 impl Default for FecConfig {
     fn default() -> Self {
-        Self { shard_size: SHARD_SIZE, group_size: GROUP_SIZE }
+        Self {
+            shard_size: SHARD_SIZE,
+            group_size: GROUP_SIZE,
+        }
     }
 }
 
@@ -93,7 +98,11 @@ impl MediaAdapt for FecShards {
             .as_ref()
             .map(|d| d.max_size as usize)
             .unwrap_or(SHARD_SIZE);
-        let shard = self.cfg.shard_size.min(max_payload.saturating_sub(overhead)).max(256);
+        let shard = self
+            .cfg
+            .shard_size
+            .min(max_payload.saturating_sub(overhead))
+            .max(256);
         if shard != self.cfg.shard_size {
             bus.emit_event(
                 "shard_size_clamped",
@@ -130,7 +139,15 @@ struct FecTx {
     lost: Arc<AtomicU32>,
 }
 
-fn put_hdr(buf: &mut BytesMut, frame_id: u32, orig_len: u32, shard_size: u16, total: u16, idx: u16, ty: u8) {
+fn put_hdr(
+    buf: &mut BytesMut,
+    frame_id: u32,
+    orig_len: u32,
+    shard_size: u16,
+    total: u16,
+    idx: u16,
+    ty: u8,
+) {
     buf.put_u32(frame_id);
     buf.put_u32(orig_len);
     buf.put_u16(shard_size);
@@ -144,7 +161,7 @@ impl FrameSink for FecTx {
     async fn submit(&mut self, frame: EncodedFrame) -> Result<QueueDepth, MediaError> {
         self.frames.fetch_add(1, Ordering::Relaxed);
         let s = self.shard;
-        let total = (((frame.data.len() + s - 1) / s).max(1)) as u16;
+        let total = (frame.data.len().div_ceil(s).max(1)) as u16;
         // 发送一个分片；队满（WouldBlock）≠ 关闭：按规范放弃整帧并置 loss 标记
         macro_rules! send {
             ($pkt:expr) => {
@@ -173,18 +190,35 @@ impl FrameSink for FecTx {
             for idx in start..end {
                 let base = idx * s;
                 let mut shard_buf = vec![0u8; s];
-                let src = &frame.data[base.min(frame.data.len())..((base + s).min(frame.data.len()))];
+                let src =
+                    &frame.data[base.min(frame.data.len())..((base + s).min(frame.data.len()))];
                 shard_buf[..src.len()].copy_from_slice(src);
                 for (p, v) in parity.iter_mut().zip(shard_buf.iter()) {
                     *p ^= v;
                 }
                 let mut pkt = BytesMut::with_capacity(HEADER + s);
-                put_hdr(&mut pkt, frame.frame_id, frame.data.len() as u32, s as u16, total, idx as u16, TYPE_DATA);
+                put_hdr(
+                    &mut pkt,
+                    frame.frame_id,
+                    frame.data.len() as u32,
+                    s as u16,
+                    total,
+                    idx as u16,
+                    TYPE_DATA,
+                );
                 pkt.extend_from_slice(&shard_buf);
                 send!(pkt.freeze());
             }
             let mut pkt = BytesMut::with_capacity(HEADER + s);
-            put_hdr(&mut pkt, frame.frame_id, frame.data.len() as u32, s as u16, total, g, TYPE_PARITY);
+            put_hdr(
+                &mut pkt,
+                frame.frame_id,
+                frame.data.len() as u32,
+                s as u16,
+                total,
+                g,
+                TYPE_PARITY,
+            );
             pkt.extend_from_slice(&parity);
             send!(pkt.freeze());
         }
@@ -231,20 +265,31 @@ impl FecRx {
             out[base..base + n].copy_from_slice(&sh[..n]);
         }
         self.counters.frames_rx.fetch_add(1, Ordering::Relaxed);
-        if self.last_completed.map_or(true, |lc| fid > lc) {
+        if self.last_completed.is_none_or(|lc| fid > lc) {
             self.last_completed = Some(fid);
         }
-        Some(FrameIn::Complete { frame_id: fid, data: Bytes::from(out) })
+        Some(FrameIn::Complete {
+            frame_id: fid,
+            data: Bytes::from(out),
+        })
     }
 }
 
 /// 尝试组内恢复：缺恰好 1 个数据片且有 parity → XOR 重建（自由函数，避免 self 双重借用）。
-fn try_recover(group_size: usize, counters: &Arc<Counters>, bus: &Arc<EventBus>, fid: u32, r: &mut Reasm) {
+fn try_recover(
+    group_size: usize,
+    counters: &Arc<Counters>,
+    bus: &Arc<EventBus>,
+    fid: u32,
+    r: &mut Reasm,
+) {
     for g in 0..r.total_data.div_ceil(group_size as u16) {
         let start = g as usize * group_size;
         let end = ((g as usize + 1) * group_size).min(r.total_data as usize);
-        let missing: Vec<u16> =
-            (start..end).map(|i| i as u16).filter(|i| !r.data.contains_key(i)).collect();
+        let missing: Vec<u16> = (start..end)
+            .map(|i| i as u16)
+            .filter(|i| !r.data.contains_key(i))
+            .collect();
         if missing.len() == 1 && r.parity.contains_key(&g) {
             let mut rec = r.parity[&g].clone();
             for i in start..end {
@@ -259,7 +304,10 @@ fn try_recover(group_size: usize, counters: &Arc<Counters>, bus: &Arc<EventBus>,
             }
             r.data.insert(missing[0], rec);
             counters.frames_recovered.fetch_add(1, Ordering::Relaxed);
-            bus.emit_event("fec_recovered", serde_json::json!({ "frame_id": fid, "shard": missing[0] }));
+            bus.emit_event(
+                "fec_recovered",
+                serde_json::json!({ "frame_id": fid, "shard": missing[0] }),
+            );
         }
     }
 }
@@ -308,7 +356,12 @@ impl FrameSource for FecRx {
             // 乱序窗外的旧帧先报 Lost（评审修订：不得因 assemble 提前返回而漏报）；
             // 同包触发的 Complete 进 outbox，保证两个产出都不丢（评审修订后修复）
             let stale_bound = fid.saturating_sub(REORDER_WINDOW);
-            let stale = self.pending.keys().copied().filter(|k| *k < stale_bound).min();
+            let stale = self
+                .pending
+                .keys()
+                .copied()
+                .filter(|k| *k < stale_bound)
+                .min();
             if let Some(stale) = stale {
                 let r = self.pending.remove(&stale).unwrap();
                 self.counters.frames_lost.fetch_add(1, Ordering::Relaxed);
@@ -339,7 +392,11 @@ mod tests {
 
     async fn bind() -> (Box<dyn FrameSink>, Box<dyn FrameSource>, Arc<EventBus>) {
         let t = LoopbackPairTransport::new(1200);
-        let a: Arc<dyn Channel> = Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
         let fec = FecShards::new(FecConfig::default());
         let bus = Arc::new(EventBus::new());
@@ -352,9 +409,17 @@ mod tests {
         let (mut tx, mut rx, _bus) = bind().await;
         for i in 0..5u32 {
             let data: Vec<u8> = (0..(1024 * 3 + 123)).map(|x| (x as u8) ^ i as u8).collect();
-            tx.submit(EncodedFrame { frame_id: i, data: Bytes::from(data.clone()) }).await.unwrap();
+            tx.submit(EncodedFrame {
+                frame_id: i,
+                data: Bytes::from(data.clone()),
+            })
+            .await
+            .unwrap();
             match rx.next().await.unwrap() {
-                FrameIn::Complete { frame_id, data: got } => {
+                FrameIn::Complete {
+                    frame_id,
+                    data: got,
+                } => {
                     assert_eq!(frame_id, i);
                     assert_eq!(&got[..], &data[..]);
                 }
@@ -407,9 +472,17 @@ mod tests {
 
     async fn bind_with_tx_drop(n: usize) -> (Box<dyn FrameSink>, Box<dyn FrameSource>) {
         let t = LoopbackPairTransport::new(1200);
-        let a_raw: Arc<dyn Channel> = Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a_raw: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
-        let a: Arc<dyn Channel> = Arc::new(DropNth { inner: a_raw, n, seen: Default::default() });
+        let a: Arc<dyn Channel> = Arc::new(DropNth {
+            inner: a_raw,
+            n,
+            seen: Default::default(),
+        });
         let fec = FecShards::new(FecConfig::default());
         fec.bind(a, b, Arc::new(EventBus::new())).await.unwrap()
     }
@@ -419,9 +492,17 @@ mod tests {
         // 帧 5 片 + 1 parity：丢 idx=2（第 3 个数据报）→ parity 重建
         let (mut tx, mut rx) = bind_with_tx_drop(2).await;
         let data: Vec<u8> = (0..(1024 * 5)).map(|x| x as u8).collect();
-        tx.submit(EncodedFrame { frame_id: 7, data: Bytes::from(data.clone()) }).await.unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 7,
+            data: Bytes::from(data.clone()),
+        })
+        .await
+        .unwrap();
         match rx.next().await.unwrap() {
-            FrameIn::Complete { frame_id, data: got } => {
+            FrameIn::Complete {
+                frame_id,
+                data: got,
+            } => {
                 assert_eq!(frame_id, 7);
                 assert_eq!(&got[..], &data[..], "XOR 恢复后内容必须一致");
             }
@@ -434,16 +515,43 @@ mod tests {
         // 帧1 丢 2 片不可恢复；乱序窗=1：帧2 先完成（Complete），帧3 首片到达时
         // 才宣布 Lost(1)；随后帧3 完成——验证"报丢失不吞新帧"
         let t = LoopbackPairTransport::new(1200);
-        let a_raw: Arc<dyn Channel> = Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a_raw: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
-        let a: Arc<dyn Channel> = Arc::new(DropNth { inner: a_raw, n: 0, seen: Default::default() });
-        let a2: Arc<dyn Channel> = Arc::new(DropNth { inner: a, n: 0, seen: Default::default() });
+        let a: Arc<dyn Channel> = Arc::new(DropNth {
+            inner: a_raw,
+            n: 0,
+            seen: Default::default(),
+        });
+        let a2: Arc<dyn Channel> = Arc::new(DropNth {
+            inner: a,
+            n: 0,
+            seen: Default::default(),
+        });
         let fec = FecShards::new(FecConfig::default());
         let (mut tx, mut rx) = fec.bind(a2, b, Arc::new(EventBus::new())).await.unwrap();
 
-        tx.submit(EncodedFrame { frame_id: 1, data: Bytes::from(vec![7u8; 1024 * 3]) }).await.unwrap();
-        tx.submit(EncodedFrame { frame_id: 2, data: Bytes::from(vec![9u8; 100]) }).await.unwrap();
-        tx.submit(EncodedFrame { frame_id: 3, data: Bytes::from(vec![5u8; 200]) }).await.unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 1,
+            data: Bytes::from(vec![7u8; 1024 * 3]),
+        })
+        .await
+        .unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 2,
+            data: Bytes::from(vec![9u8; 100]),
+        })
+        .await
+        .unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 3,
+            data: Bytes::from(vec![5u8; 200]),
+        })
+        .await
+        .unwrap();
         match rx.next().await.unwrap() {
             FrameIn::Complete { frame_id, .. } => assert_eq!(frame_id, 2, "帧2 应先完成"),
             other => panic!("期望 Complete(2)，得到 {other:?}"),
@@ -463,7 +571,11 @@ mod tests {
         // 300KB 帧 → 293 片（u8 会溢出，验证 u16 正确）；
         // 大容量队列 + 接收侧并发排空，避免触发队满弃帧
         let t = LoopbackPairTransport::with_capacity(1200, 1024);
-        let a: Arc<dyn Channel> = Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
         let fec = FecShards::new(FecConfig::default());
         let bus = Arc::new(EventBus::new());
@@ -472,9 +584,7 @@ mod tests {
         let reader = tokio::spawn(async move {
             let mut rx = rx;
             let deadline = Instant::now() + std::time::Duration::from_secs(10);
-            while let Ok(Some(fin)) =
-                tokio::time::timeout_at(deadline.into(), rx.next()).await
-            {
+            while let Ok(Some(fin)) = tokio::time::timeout_at(deadline.into(), rx.next()).await {
                 if let FrameIn::Complete { frame_id, data } = fin {
                     if frame_id == 100 {
                         return Some((frame_id, data));
@@ -484,7 +594,12 @@ mod tests {
             None
         });
         let data: Vec<u8> = (0..(1024 * 293)).map(|x| (x % 251) as u8).collect();
-        tx.submit(EncodedFrame { frame_id: 100, data: Bytes::from(data.clone()) }).await.unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 100,
+            data: Bytes::from(data.clone()),
+        })
+        .await
+        .unwrap();
         let got = reader.await.unwrap().expect("应收到完整大帧");
         assert_eq!(got.0, 100);
         assert_eq!(&got.1[..], &data[..]);

@@ -206,6 +206,7 @@ function ToolbarHarness() {
       onToggleViewOnly={() => undefined}
       onCopyToRemote={() => undefined}
       onCopyFromRemote={() => undefined}
+      onFiles={() => undefined}
       onToggleHud={() => undefined}
       onSendText={() => undefined}
       onSendCombo={() => undefined}

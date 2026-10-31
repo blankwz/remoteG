@@ -28,8 +28,15 @@ use rd_transport::{Conn, Fingerprint, Identity};
 /// MTU 钳 1200 = tailscale 1280 经验）。
 fn rd_caps() -> ChannelCaps {
     ChannelCaps {
-        datagram: Some(DatagramCaps { max_size: 1152, lossy_ok: true }),
-        streams: Some(StreamCaps { reliable_ordered: true, bidi: true, max_concurrent: 256 }),
+        datagram: Some(DatagramCaps {
+            max_size: 1152,
+            lossy_ok: true,
+        }),
+        streams: Some(StreamCaps {
+            reliable_ordered: true,
+            bidi: true,
+            max_concurrent: 256,
+        }),
         congestion: vec![CongestionKind::Cubic],
         mtu: 1200,
         multipath: false,
@@ -83,7 +90,9 @@ impl Transport for RdQuicTransport {
             .iter()
             .find_map(|p| p.addr)
             .or_else(|| *self.default_addr.lock().unwrap())
-            .ok_or_else(|| anyhow::anyhow!("无可用地址（discovery 无候选且未指定 default_addr）"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("无可用地址（discovery 无候选且未指定 default_addr）")
+            })?;
         let conn = Arc::new(rd_transport::connect(addr, &self.identity, self.expected).await?);
         *self.last_conn.lock().unwrap() = Some(Arc::clone(&conn));
         bus.emit_event(
@@ -121,7 +130,11 @@ pub struct RdChannel {
 
 impl RdChannel {
     fn new(conn: Arc<Conn>, addr: SocketAddr) -> Self {
-        Self { conn, addr_string: addr.to_string(), caps: rd_caps() }
+        Self {
+            conn,
+            addr_string: addr.to_string(),
+            caps: rd_caps(),
+        }
     }
 
     /// 从 rd Conn 直接构造 Channel 视图（T-027 fec-shards 视频路径：
@@ -161,20 +174,40 @@ impl Channel for RdChannel {
     }
 
     async fn recv_dgram(&self) -> Result<Bytes, RecvError> {
-        self.conn.read_datagram().await.map_err(|_| RecvError::Closed)
+        self.conn
+            .read_datagram()
+            .await
+            .map_err(|_| RecvError::Closed)
     }
 
     async fn open_stream(&self, kind: StreamKind) -> Result<Box<dyn Stream>, ChannelError> {
         let rd_kind = to_rd_kind(kind).ok_or(ChannelError::Unsupported(
             "Control 走 rd RPC 通道，不经 Switchboard 流视图",
         ))?;
-        let tx = self.conn.open_data(rd_kind).await.map_err(|_| ChannelError::Closed)?;
-        Ok(Box::new(RdStreamEnd { tx: Some(tx), rx: None }))
+        let tx = self
+            .conn
+            .open_data(rd_kind)
+            .await
+            .map_err(|_| ChannelError::Closed)?;
+        Ok(Box::new(RdStreamEnd {
+            tx: Some(tx),
+            rx: None,
+        }))
     }
 
     async fn accept_stream(&self) -> Result<(StreamKind, Box<dyn Stream>), ChannelError> {
-        let (kind, _sid, rx) = self.conn.accept_data().await.map_err(|_| ChannelError::Closed)?;
-        Ok((from_rd_kind(kind), Box::new(RdStreamEnd { tx: None, rx: Some(rx) })))
+        let (kind, _sid, rx) = self
+            .conn
+            .accept_data()
+            .await
+            .map_err(|_| ChannelError::Closed)?;
+        Ok((
+            from_rd_kind(kind),
+            Box::new(RdStreamEnd {
+                tx: None,
+                rx: Some(rx),
+            }),
+        ))
     }
 
     fn stats(&self) -> StageStats {
@@ -284,10 +317,16 @@ pub async fn plan_dial(
     let plan = Plan::from_toml(plan_toml)?;
     let transport = Arc::new(RdQuicTransport::new(identity, expected));
     transport.set_default_addr(addr_hint);
-    let prov = RdProvider { transport: Arc::clone(&transport) };
+    let prov = RdProvider {
+        transport: Arc::clone(&transport),
+    };
     let est = execute(&plan, &prov, Arc::new(EventBus::new())).await?;
     // 解构：先释放执行器侧的 Channel 视图（它持有 Arc<Conn>），再取回唯一引用
-    let switchboard_core::executor::Established { path_name, via_relay: _, channel } = est;
+    let switchboard_core::executor::Established {
+        path_name,
+        via_relay: _,
+        channel,
+    } = est;
     drop(channel);
     let conn_arc = transport
         .last_conn
@@ -295,8 +334,7 @@ pub async fn plan_dial(
         .unwrap()
         .take()
         .ok_or_else(|| anyhow::anyhow!("执行器未经过 rd 传输（Plan 引用了非 rd transport）"))?;
-    let conn = Arc::try_unwrap(conn_arc)
-        .map_err(|_| anyhow::anyhow!("Conn 仍被引用（计数>1）"))?;
+    let conn = Arc::try_unwrap(conn_arc).map_err(|_| anyhow::anyhow!("Conn 仍被引用（计数>1）"))?;
     Ok((path_name, conn))
 }
 
@@ -313,13 +351,18 @@ mod tests {
     async fn plan拨号_命中rd直连路径() {
         // 服务端：rd Server 监听（独立身份）
         let server_id = Arc::new(Identity::generate("agent-test").unwrap());
-        let server = rd_transport::Server::bind("127.0.0.1:0".parse().unwrap(), &server_id).unwrap();
+        let server =
+            rd_transport::Server::bind("127.0.0.1:0".parse().unwrap(), &server_id).unwrap();
         let addr = server.local_addr();
-        tokio::spawn(async move { let _ = server.accept().await; });
+        tokio::spawn(async move {
+            let _ = server.accept().await;
+        });
 
         // 客户端：Plan 执行器选路 → rd 原生 connect
         let client_id = Arc::new(Identity::generate("ctrl-test").unwrap());
-        let (path, conn) = plan_dial(&default_plan_toml(), client_id, None, addr).await.unwrap();
+        let (path, conn) = plan_dial(&default_plan_toml(), client_id, None, addr)
+            .await
+            .unwrap();
         assert_eq!(path, "lan-direct");
 
         // Conn 可用：控制流打开 + 数据报发送（服务端已 accept，握手完成）

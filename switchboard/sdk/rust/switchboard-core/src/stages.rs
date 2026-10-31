@@ -53,7 +53,12 @@ pub trait Puncher: Send + Sync {
 /// S3 Relay（01 §5）。
 #[async_trait]
 pub trait Relay: Send + Sync {
-    async fn alloc(&self, peer: &str, budget: Duration, bus: Arc<EventBus>) -> anyhow::Result<PathHandle>;
+    async fn alloc(
+        &self,
+        peer: &str,
+        budget: Duration,
+        bus: Arc<EventBus>,
+    ) -> anyhow::Result<PathHandle>;
 }
 
 /// S4 Transport（01 §6）。实现 MUST NOT 在内部做媒体语义（分帧/FEC/码控）。
@@ -95,9 +100,14 @@ pub enum RecoveryKind {
 /// 接收侧产出。
 #[derive(Debug)]
 pub enum FrameIn {
-    Complete { frame_id: u32, data: Bytes },
+    Complete {
+        frame_id: u32,
+        data: Bytes,
+    },
     /// FEC/重组不可恢复。
-    Lost { frame_id: u32 },
+    Lost {
+        frame_id: u32,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,7 +156,10 @@ impl MediaProfile {
     pub fn transport_requirement(&self, mtu: u16) -> ChannelCaps {
         match self {
             MediaProfile::FecShards | MediaProfile::Hybrid => ChannelCaps {
-                datagram: Some(crate::caps::DatagramCaps { max_size: 1024, lossy_ok: true }),
+                datagram: Some(crate::caps::DatagramCaps {
+                    max_size: 1024,
+                    lossy_ok: true,
+                }),
                 mtu,
                 ..Default::default()
             },

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::caps::ChannelCaps;
-use crate::channel::{Channel, RecvError, SendError, Stream, StreamKind, ChannelError};
+use crate::channel::{Channel, ChannelError, RecvError, SendError, Stream, StreamKind};
 use crate::stages::Transport;
 use crate::telemetry::{EventBus, StageStats};
 use crate::types::PathHandle;
@@ -29,7 +29,14 @@ pub struct LossyParams {
 
 impl Default for LossyParams {
     fn default() -> Self {
-        Self { rtt_ms: 80.0, jitter_ms: 5.0, loss_ratio: 0.02, mbps: 10.0, mtu: 1200, burst_len: 0 }
+        Self {
+            rtt_ms: 80.0,
+            jitter_ms: 5.0,
+            loss_ratio: 0.02,
+            mbps: 10.0,
+            mtu: 1200,
+            burst_len: 0,
+        }
     }
 }
 
@@ -102,12 +109,17 @@ impl Channel for LossyChannel {
     async fn send_dgram(&self, b: Bytes) -> Result<(), SendError> {
         let mut rng = self.shaper.rng.lock().await;
         let bw_ms = b.len() as f32 * 8.0 / (self.shaper.params.mbps * 1e6) * 1000.0;
-        let delay = bw_ms + self.shaper.params.rtt_ms + rng.0.next_f32() * self.shaper.params.jitter_ms;
+        let delay =
+            bw_ms + self.shaper.params.rtt_ms + rng.0.next_f32() * self.shaper.params.jitter_ms;
         let roll = rng.0.next_f32();
         let (dropped, burst_left) = if rng.1 > 0 {
             (true, rng.1 - 1)
         } else {
-            let loss = self.shaper.loss_override.get().max(self.shaper.params.loss_ratio);
+            let loss = self
+                .shaper
+                .loss_override
+                .get()
+                .max(self.shaper.params.loss_ratio);
             if roll < loss && self.shaper.params.burst_len > 0 {
                 (true, self.shaper.params.burst_len - 1)
             } else {
@@ -209,7 +221,12 @@ impl Transport for LossySimTransport {
         bus: Arc<EventBus>,
     ) -> anyhow::Result<Box<dyn Channel>> {
         let ch = self.inner.establish(paths, bus).await?;
-        Ok(shape(ch, self.params, Arc::clone(&self.loss_override), self.seed))
+        Ok(shape(
+            ch,
+            self.params,
+            Arc::clone(&self.loss_override),
+            self.seed,
+        ))
     }
 }
 
@@ -224,13 +241,35 @@ mod tests {
         let ov = Arc::new(LossOverride::default());
         let t = LossySimTransport {
             inner: Arc::clone(&lb) as Arc<dyn crate::stages::Transport>,
-            params: LossyParams { rtt_ms: 1.0, jitter_ms: 0.0, loss_ratio: 0.0, mbps: 100.0, mtu: 1200, burst_len: 0 },
+            params: LossyParams {
+                rtt_ms: 1.0,
+                jitter_ms: 0.0,
+                loss_ratio: 0.0,
+                mbps: 100.0,
+                mtu: 1200,
+                burst_len: 0,
+            },
             loss_override: Arc::clone(&ov),
             seed: 42,
         };
-        let a: Box<dyn Channel> = t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap();
+        let a: Box<dyn Channel> = t
+            .establish(Vec::new(), Arc::new(EventBus::new()))
+            .await
+            .unwrap();
         let raw_b = lb.take_remote().await.unwrap();
-        let b = shape(Box::new(raw_b), LossyParams { rtt_ms: 1.0, jitter_ms: 0.0, loss_ratio: 0.0, mbps: 100.0, mtu: 1200, burst_len: 0 }, Arc::clone(&ov), 43);
+        let b = shape(
+            Box::new(raw_b),
+            LossyParams {
+                rtt_ms: 1.0,
+                jitter_ms: 0.0,
+                loss_ratio: 0.0,
+                mbps: 100.0,
+                mtu: 1200,
+                burst_len: 0,
+            },
+            Arc::clone(&ov),
+            43,
+        );
 
         a.send_dgram(Bytes::from_static(b"x")).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await; // 等整形任务落地
@@ -244,7 +283,11 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
         let s = a.stats();
-        assert!(s.loss_ratio > 0.5, "注入丢失应体现在遥测 loss_ratio，实际 {}", s.loss_ratio);
+        assert!(
+            s.loss_ratio > 0.5,
+            "注入丢失应体现在遥测 loss_ratio，实际 {}",
+            s.loss_ratio
+        );
         assert_eq!(s.module, "sb.core.lossy-sim");
     }
 
@@ -258,7 +301,10 @@ mod tests {
             loss_override: ov,
             seed: 7,
         };
-        let a: Box<dyn Channel> = t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap();
+        let a: Box<dyn Channel> = t
+            .establish(Vec::new(), Arc::new(EventBus::new()))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         // path.kind 透传内层（loopback），模块名标注为 lossy-sim
         let s = a.stats();

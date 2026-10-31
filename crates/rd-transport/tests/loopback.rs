@@ -37,6 +37,7 @@ fn ack_envelope(req_id: u32, host: &str) -> Envelope {
             encode_caps: vec![],
             media_fec: false,
             host_version: "0.0.0-test".to_owned(),
+            mac_addrs: String::new(),
         })),
     }
 }

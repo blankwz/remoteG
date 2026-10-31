@@ -11,18 +11,18 @@
 
 use anyhow::Context as _;
 use axum::extract::ws::{Message, WebSocket};
-use futures_util::SinkExt;
-use tower_http::services::{ServeDir, ServeFile};
-use axum::routing::get_service;
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::routing::get_service;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use futures_util::SinkExt;
 use sim::{SessionHandle, SimParams, Telem};
-use tokio::sync::broadcast;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
+use tower_http::services::{ServeDir, ServeFile};
 
 pub mod sim;
 
@@ -79,7 +79,10 @@ pub async fn serve(
         None => default_static_dir(),
     };
     let bench_dir = Arc::new(bench_dir);
-    let state = AppState { sessions: Arc::new(Mutex::new(HashMap::new())), bench_dir };
+    let state = AppState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        bench_dir,
+    };
     let mut app = build_router(state);
 
     // 静态托管 Studio 界面（存在 dist 时）：一个端口 = 界面 + 数据
@@ -150,10 +153,7 @@ async fn start_session(
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
-async fn stop_session(
-    State(state): State<AppState>,
-    Path(id): Path<u64>,
-) -> impl IntoResponse {
+async fn stop_session(State(state): State<AppState>, Path(id): Path<u64>) -> impl IntoResponse {
     let removed = state.sessions.lock().unwrap().remove(&id);
     if let Some(h) = removed {
         h.stop();
@@ -215,8 +215,8 @@ async fn get_bench(
     }
     let raw = std::fs::read_to_string(std::path::Path::new(dir).join(&name))
         .map_err(|_| (StatusCode::NOT_FOUND, "报告不存在".to_string()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v))
 }
 
@@ -295,7 +295,10 @@ mod security_tests {
     }
 
     async fn get(uri: &str) -> axum::response::Response {
-        app().oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap()
+        app()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
     }
 
     /// 4.7 目录穿越：`..`、路径分隔、盘符相对路径一律 400，绝不落盘读取。
@@ -339,7 +342,11 @@ mod security_tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "越界参数必须 400: {body}");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "越界参数必须 400: {body}"
+            );
         }
         // 非法 JSON（NaN 字面量）：axum Json 提取 422，进程不崩
         let resp = app()
@@ -351,23 +358,38 @@ mod security_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "非法 JSON 必须优雅拒绝");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "非法 JSON 必须优雅拒绝"
+        );
         // 会话表保持为空（拒绝路径不得留下半成品会话）
         let resp = get("/api/sessions").await;
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
-        assert!(bytes.windows(3).any(|w| w == b"[]") || serde_json::from_slice::<serde_json::Value>(&bytes)
-            .map(|v| v["sessions"].as_array().map(|a| a.is_empty()).unwrap_or(true))
-            .unwrap_or(true), "拒绝后不得残留会话: {bytes:?}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(
+            bytes.windows(3).any(|w| w == b"[]")
+                || serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map(|v| v["sessions"]
+                        .as_array()
+                        .map(|a| a.is_empty())
+                        .unwrap_or(true))
+                    .unwrap_or(true),
+            "拒绝后不得残留会话: {bytes:?}"
+        );
     }
 
     /// 4.8 未知资源：stop/live 打不存在的 id → 404/错误消息，不 panic。
     #[tokio::test]
     async fn unknown_session_handled() {
-        let resp = get("/api/session/999").await;
+        let _resp = get("/api/session/999").await;
         // DELETE /api/session/{id}：不存在 → 404
         let resp = app()
             .oneshot(
-                Request::delete("/api/session/999").body(Body::empty()).unwrap(),
+                Request::delete("/api/session/999")
+                    .body(Body::empty())
+                    .unwrap(),
             )
             .await
             .unwrap();

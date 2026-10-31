@@ -164,7 +164,10 @@ impl RateController {
             }
         }
 
-        RateDecision { kbps: self.kbps, fps: self.current_fps() }
+        RateDecision {
+            kbps: self.kbps,
+            fps: self.current_fps(),
+        }
     }
 
     /// 当前生效帧率档：帧率已降档或码率过低 → 30；否则上限。
@@ -187,7 +190,11 @@ mod tests {
     use super::*;
 
     fn normal() -> RateInput {
-        RateInput { rtt_ms: 20, queued_bytes: 0, lost_ratio: 0.0 }
+        RateInput {
+            rtt_ms: 20,
+            queued_bytes: 0,
+            lost_ratio: 0.0,
+        }
     }
 
     #[test]
@@ -201,30 +208,60 @@ mod tests {
         let mut rc = RateController::new(4000, 60);
         rc.update(normal());
         // 31 > 20×1.5=30 → ×0.7
-        assert_eq!(rc.update(RateInput { rtt_ms: 31, ..normal() }).kbps, 2800);
+        assert_eq!(
+            rc.update(RateInput {
+                rtt_ms: 31,
+                ..normal()
+            })
+            .kbps,
+            2800
+        );
     }
 
     #[test]
     fn rtt_超基线2倍_严重降半() {
         let mut rc = RateController::new(4000, 60);
         rc.update(normal());
-        assert_eq!(rc.update(RateInput { rtt_ms: 41, ..normal() }).kbps, 2000);
+        assert_eq!(
+            rc.update(RateInput {
+                rtt_ms: 41,
+                ..normal()
+            })
+            .kbps,
+            2000
+        );
     }
 
     #[test]
     fn 丢包阈值化_2以内不降() {
         let mut rc = RateController::new(4000, 60);
         rc.update(normal()); // 基线
-        let before = rc.update(RateInput { rtt_ms: 20, lost_ratio: 0.02, queued_bytes: 0 }).kbps;
+        let before = rc
+            .update(RateInput {
+                rtt_ms: 20,
+                lost_ratio: 0.02,
+                queued_bytes: 0,
+            })
+            .kbps;
         assert!(before >= 4000, "≤2% 不降（健康链路稳态爬升允许）: {before}");
-        let after = rc.update(RateInput { rtt_ms: 20, lost_ratio: 0.05, queued_bytes: 0 }).kbps;
+        let after = rc
+            .update(RateInput {
+                rtt_ms: 20,
+                lost_ratio: 0.05,
+                queued_bytes: 0,
+            })
+            .kbps;
         assert!(after < before, ">2% 真实拥塞 → 降码率: {before} → {after}");
     }
 
     #[test]
     fn 积压连续2tick才降_防hover误伤() {
         let mut rc = RateController::new(4000, 60);
-        let cong = RateInput { rtt_ms: 20, queued_bytes: 1 << 20, lost_ratio: 0.0 };
+        let cong = RateInput {
+            rtt_ms: 20,
+            queued_bytes: 1 << 20,
+            lost_ratio: 0.0,
+        };
         assert_eq!(rc.update(cong).kbps, 4000, "单 tick 积压由 QUIC 吸收");
         assert_eq!(rc.update(cong).kbps, 2800);
     }
@@ -233,7 +270,11 @@ mod tests {
     fn 高码率连续坏_只降码率不动帧率() {
         // 高码率下连续坏：先降码率；帧率暂不受影响（尚未到底）
         let mut rc = RateController::new(4000, 60);
-        let cong = RateInput { rtt_ms: 20, queued_bytes: 1 << 20, lost_ratio: 0.0 };
+        let cong = RateInput {
+            rtt_ms: 20,
+            queued_bytes: 1 << 20,
+            lost_ratio: 0.0,
+        };
         rc.update(cong); // 防抖（好样本）
         assert_eq!(rc.update(cong).kbps, 2800); // ×0.7
         let d = rc.update(cong); // ×0.7 → 1960（bad_streak=2，未到 3）
@@ -251,8 +292,11 @@ mod tests {
     fn 恢复_爬坡回起始码率后转稳态() {
         let mut rc = RateController::new(4000, 60);
         rc.update(normal()); // 基线
-        rc.update(RateInput { rtt_ms: 31, ..normal() }); // ×0.7 → 2800
-        // 好样本 1：低于起始码率 → 爬坡 ×1.3 = 3640
+        rc.update(RateInput {
+            rtt_ms: 31,
+            ..normal()
+        }); // ×0.7 → 2800
+            // 好样本 1：低于起始码率 → 爬坡 ×1.3 = 3640
         assert_eq!(rc.update(normal()).kbps, 3640);
         // 好样本 2：爬坡封顶 start_kbps = 4000
         assert_eq!(rc.update(normal()).kbps, 4000);
@@ -276,7 +320,11 @@ mod tests {
     #[test]
     fn 低码率降帧_长干净期后恢复() {
         let mut rc = RateController::new(600, 60);
-        let cong = RateInput { rtt_ms: 20, queued_bytes: 1 << 20, lost_ratio: 0.0 };
+        let cong = RateInput {
+            rtt_ms: 20,
+            queued_bytes: 1 << 20,
+            lost_ratio: 0.0,
+        };
         rc.update(cong); // 防抖
         assert_eq!(rc.update(cong).kbps, 500, "×0.7 → 420 → clamp 500");
         assert_eq!(rc.update(cong).fps, 30, "码率到底 + 3 连坏 → 降帧");

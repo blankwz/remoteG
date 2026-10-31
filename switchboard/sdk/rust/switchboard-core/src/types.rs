@@ -80,10 +80,22 @@ pub struct PathHandle {
 
 impl PathHandle {
     pub fn memory(kind: PathKind, via: &str, measured: Measured) -> Self {
-        Self { socket: None, kind, via: via.to_string(), measured, addr: None }
+        Self {
+            socket: None,
+            kind,
+            via: via.to_string(),
+            measured,
+            addr: None,
+        }
     }
 
     pub fn to_addr(kind: PathKind, via: &str, measured: Measured, addr: SocketAddr) -> Self {
-        Self { socket: None, kind, via: via.to_string(), measured, addr: Some(addr) }
+        Self {
+            socket: None,
+            kind,
+            via: via.to_string(),
+            measured,
+            addr: Some(addr),
+        }
     }
 }

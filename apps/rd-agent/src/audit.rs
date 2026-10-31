@@ -70,7 +70,9 @@ pub fn log(event: &str, peer: &str, fp: &str, extra: Value) {
             dst.insert(k, v);
         }
     }
-    let Some(file) = audit.file.as_mut() else { return };
+    let Some(file) = audit.file.as_mut() else {
+        return;
+    };
     if let Err(err) = writeln!(file, "{line}") {
         tracing::warn!("审计日志写入失败: {err}");
         audit.file = None;
@@ -96,8 +98,7 @@ mod tests {
     /// 互串目录（init 全局覆盖）。
     #[test]
     fn audit_lifecycle() {
-        let dir =
-            std::env::temp_dir().join(format!("rd-audit-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rd-audit-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         struct Cleanup(PathBuf);
         impl Drop for Cleanup {
@@ -110,7 +111,12 @@ mod tests {
         init(&dir);
 
         // 1) 基本落盘 + 字段合并
-        log("session_start", "妈妈的老电脑", "aabbccdd", serde_json::json!({ "proto": 0 }));
+        log(
+            "session_start",
+            "妈妈的老电脑",
+            "aabbccdd",
+            serde_json::json!({ "proto": 0 }),
+        );
         let path = dir.join("audit.jsonl");
         let text = fs::read_to_string(&path).expect("审计文件应存在");
         let v: Value = serde_json::from_str(text.trim_end()).expect("每行都是合法 JSON");

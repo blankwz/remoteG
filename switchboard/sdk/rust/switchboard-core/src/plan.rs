@@ -100,14 +100,21 @@ impl Plan {
     }
 
     /// 02 §2.3：构造 transport requirement（media profile 的隐含要求 + 全局要求）。
-    pub fn transport_requirement(&self, media: Option<crate::stages::MediaProfile>) -> crate::caps::ChannelCaps {
-        let mut req = media.map(|m| m.transport_requirement(self.requirements.min_mtu))
+    pub fn transport_requirement(
+        &self,
+        media: Option<crate::stages::MediaProfile>,
+    ) -> crate::caps::ChannelCaps {
+        let mut req = media
+            .map(|m| m.transport_requirement(self.requirements.min_mtu))
             .unwrap_or_default();
         if self.requirements.min_mtu > req.mtu {
             req.mtu = self.requirements.min_mtu;
         }
         if self.requirements.datagram && req.datagram.is_none() {
-            req.datagram = Some(crate::caps::DatagramCaps { max_size: 1024, lossy_ok: true });
+            req.datagram = Some(crate::caps::DatagramCaps {
+                max_size: 1024,
+                lossy_ok: true,
+            });
         }
         req
     }
@@ -141,7 +148,10 @@ min_mtu = 1200
         let p = Plan::from_toml(DEMO).unwrap();
         assert_eq!(p.name, "demo");
         assert_eq!(p.paths.len(), 2);
-        assert_eq!(p.paths[1].fallback_relay.as_deref(), Some("sb.derp.self-hk"));
+        assert_eq!(
+            p.paths[1].fallback_relay.as_deref(),
+            Some("sb.derp.self-hk")
+        );
         assert_eq!(p.requirements.min_mtu, 1200);
     }
 

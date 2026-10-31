@@ -58,7 +58,8 @@ pub enum LicenseError {
 }
 
 /// 内嵌公钥（开发默认对；上线前替换，见模块注释）。
-pub const LICENSE_PUBKEY_HEX: &str = "2ec01a082e84d43fb5dad1e4b8d45a1ba1c2ff37f3bcaeb1073daf6f85bf7796";
+pub const LICENSE_PUBKEY_HEX: &str =
+    "2ec01a082e84d43fb5dad1e4b8d45a1ba1c2ff37f3bcaeb1073daf6f85bf7796";
 
 /// base64url 无填充（授权码文本编码；URL/文件名安全）。
 fn b64() -> base64::engine::GeneralPurpose {
@@ -99,9 +100,7 @@ pub fn verify_license(text: &str, now_unix: u64) -> Result<License, LicenseError
     if parts.len() != 3 || parts[0] != "RD1" {
         return Err(LicenseError::Format);
     }
-    let payload = b64()
-        .decode(parts[1])
-        .map_err(|_| LicenseError::Format)?;
+    let payload = b64().decode(parts[1]).map_err(|_| LicenseError::Format)?;
     let sig_bytes = b64().decode(parts[2]).map_err(|_| LicenseError::Format)?;
     let sig = Signature::from_slice(&sig_bytes).map_err(|_| LicenseError::Format)?;
     pubkey()
@@ -111,9 +110,7 @@ pub fn verify_license(text: &str, now_unix: u64) -> Result<License, LicenseError
         serde_json::from_slice(&payload).map_err(|e| LicenseError::Malformed(e.to_string()))?;
     if let Some(exp) = license.expires {
         if now_unix >= exp {
-            return Err(LicenseError::Expired(
-                humantime_seconds(exp, now_unix),
-            ));
+            return Err(LicenseError::Expired(humantime_seconds(exp, now_unix)));
         }
     }
     Ok(license)
@@ -226,7 +223,10 @@ mod tests {
         let other_seed = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
         let forged = sign_payload(&payload, other_seed).expect("签名成功");
         assert!(
-            matches!(verify_license(&forged, 1_730_000_100), Err(LicenseError::BadSignature)),
+            matches!(
+                verify_license(&forged, 1_730_000_100),
+                Err(LicenseError::BadSignature)
+            ),
             "随机种子签的码必须被拒"
         );
 

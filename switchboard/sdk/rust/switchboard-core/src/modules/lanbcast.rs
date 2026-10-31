@@ -81,7 +81,10 @@ pub struct LanBroadcast {
 
 impl Default for LanBroadcast {
     fn default() -> Self {
-        Self { port: SB_DISCOVER_PORT, window_ms: 300 }
+        Self {
+            port: SB_DISCOVER_PORT,
+            window_ms: 300,
+        }
     }
 }
 

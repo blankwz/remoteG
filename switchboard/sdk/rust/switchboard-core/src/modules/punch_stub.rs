@@ -61,13 +61,21 @@ mod tests {
 
     #[tokio::test]
     async fn 打洞桩_诚实报unsupported() {
-        let out = RustDeskPunchStub.punch(Vec::new(), Duration::from_secs(1), Arc::new(EventBus::new())).await;
+        let out = RustDeskPunchStub
+            .punch(
+                Vec::new(),
+                Duration::from_secs(1),
+                Arc::new(EventBus::new()),
+            )
+            .await;
         assert!(matches!(out, PunchOutcome::Unsupported));
     }
 
     #[tokio::test]
     async fn 中继桩_显式报错不静默() {
-        let r = DerpRelayStub.alloc("peer", Duration::from_secs(1), Arc::new(EventBus::new())).await;
+        let r = DerpRelayStub
+            .alloc("peer", Duration::from_secs(1), Arc::new(EventBus::new()))
+            .await;
         assert!(r.is_err());
     }
 }

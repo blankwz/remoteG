@@ -26,6 +26,7 @@ import {
   rememberLastDeviceId,
   rememberHostVersion,
   removeDevice,
+  wakeDevice,
   type DeviceDto,
   type DiscoveredDeviceDto,
 } from "../api/devices";
@@ -398,15 +399,31 @@ export function Devices() {
     }
   }, []);
 
+  /** 远程开机（T-031 WOL）：向本网段广播魔术包；数秒后可再点连通测试确认。 */
+  const onWake = useCallback(async (d: DeviceDto) => {
+    setBusyId(d.id);
+    try {
+      await wakeDevice(d.id);
+      setNotice(`已向「${d.name}」发唤醒包：同网段时数秒内开机，稍后可用「连通测试」确认`);
+    } catch (e) {
+      setNotice(`唤醒失败：${errText(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
+
   /** ⋯ 菜单动作分发（R12：菜单本体抽 DeviceRowMenu，协议收编 useDismiss）。 */
   const onMenuAction = useCallback(
     (
       d: DeviceDto,
-      a: "disconnect" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+      a: "disconnect" | "wake" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
     ) => {
       switch (a) {
         case "disconnect":
           void onDisconnect(d);
+          break;
+        case "wake":
+          void onWake(d);
           break;
         case "copyAddr":
           void navigator.clipboard
@@ -955,7 +972,7 @@ function DeviceRowMenu({
 }: {
   d: DeviceDto;
   onAction: (
-    a: "disconnect" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+    a: "disconnect" | "wake" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
   ) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -983,6 +1000,17 @@ function DeviceRowMenu({
           {d.online && (
             <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("disconnect")}>
               断开连接
+            </button>
+          )}
+          {!d.online && (d.macAddrs?.length ?? 0) > 0 && (
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => act("wake")}
+              title="向本网段广播开机魔术包（设备需与这台电脑在同一局域网；需至少成功连接过一次）"
+            >
+              远程开机
             </button>
           )}
           <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("copyAddr")}>

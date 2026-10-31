@@ -79,13 +79,21 @@ pub enum RegistryError {
 /// id 规范：`sb.<域>.<名>`（06 §2）。
 pub fn valid_id(id: &str) -> bool {
     let parts: Vec<&str> = id.split('.').collect();
-    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+    parts.len() == 3
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
 }
 
 /// L-A 校验（06 §1）：id/telemetry/阶段齐全。
 pub fn validate(m: &ModuleManifest) -> Result<(), RegistryError> {
     if !valid_id(&m.id) {
-        return Err(RegistryError::Invalid(format!("id 不符合 sb.<域>.<名>: {}", m.id)));
+        return Err(RegistryError::Invalid(format!(
+            "id 不符合 sb.<域>.<名>: {}",
+            m.id
+        )));
     }
     if m.telemetry.is_empty() {
         return Err(RegistryError::Invalid(format!("{}: telemetry 缺失", m.id)));
@@ -98,7 +106,10 @@ pub fn load_index(path: &Path) -> Result<RegistryIndex, RegistryError> {
     let raw = std::fs::read_to_string(path)?;
     let idx: RegistryIndex = serde_json::from_str(&raw)?;
     if idx.spec != "switchboard/registry/1" {
-        return Err(RegistryError::Invalid(format!("registry spec: {}", idx.spec)));
+        return Err(RegistryError::Invalid(format!(
+            "registry spec: {}",
+            idx.spec
+        )));
     }
     for m in &idx.modules {
         validate(m)?;

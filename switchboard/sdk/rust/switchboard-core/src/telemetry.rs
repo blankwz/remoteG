@@ -96,7 +96,10 @@ impl Default for EventBus {
 impl EventBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(1024);
-        Self { tx, start: std::time::Instant::now() }
+        Self {
+            tx,
+            start: std::time::Instant::now(),
+        }
     }
 
     pub fn now_ms(&self) -> u64 {
@@ -125,7 +128,17 @@ impl EventBus {
 pub fn stats_complete(json: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(json) {
         Ok(v) => {
-            let need = ["v", "ts_ms", "stage", "module", "conn", "path", "rtt_ewma_ms", "loss_ratio", "queue_depth_bytes"];
+            let need = [
+                "v",
+                "ts_ms",
+                "stage",
+                "module",
+                "conn",
+                "path",
+                "rtt_ewma_ms",
+                "loss_ratio",
+                "queue_depth_bytes",
+            ];
             need.iter().all(|k| v.get(k).is_some_and(|x| !x.is_null()))
                 && v.get("path").and_then(|p| p.get("kind")).is_some()
         }

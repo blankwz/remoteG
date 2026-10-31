@@ -16,8 +16,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use switchboard_core::channel::{Channel, SendError};
 use switchboard_core::stages::{
@@ -91,7 +91,6 @@ impl FecRs {
             }),
         }
     }
-
 }
 
 #[async_trait]
@@ -114,7 +113,11 @@ impl MediaAdapt for FecRs {
             .as_ref()
             .map(|d| d.max_size as usize)
             .unwrap_or(SHARD_SIZE);
-        let shard = self.cfg.shard_size.min(max_payload.saturating_sub(overhead)).max(256);
+        let shard = self
+            .cfg
+            .shard_size
+            .min(max_payload.saturating_sub(overhead))
+            .max(256);
         if shard != self.cfg.shard_size {
             bus.emit_event(
                 "shard_size_clamped",
@@ -173,6 +176,7 @@ impl FecRsTx {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 线格式头一次性写入，拆参反而更难核对
 fn put_hdr(
     buf: &mut BytesMut,
     frame_id: u32,
@@ -199,7 +203,7 @@ impl FrameSink for FecRsTx {
     async fn submit(&mut self, frame: EncodedFrame) -> Result<QueueDepth, MediaError> {
         self.frames.fetch_add(1, Ordering::Relaxed);
         let s = self.shard;
-        let total = (((frame.data.len() + s - 1) / s).max(1)) as usize;
+        let total = frame.data.len().div_ceil(s).max(1);
 
         // 切块（每块 ≤ MAX_BLOCK_DATA 数据片），逐块 RS 编码
         let block_data = total.min(MAX_BLOCK_DATA);
@@ -303,7 +307,12 @@ impl Reasm {
         let have: usize = self
             .blocks
             .values()
-            .map(|b| b.shards[..b.k as usize].iter().filter(|s| s.is_some()).count())
+            .map(|b| {
+                b.shards[..b.k as usize]
+                    .iter()
+                    .filter(|s| s.is_some())
+                    .count()
+            })
             .sum();
         have >= self.data_expected
     }
@@ -368,10 +377,13 @@ impl FecRsRx {
             }
         }
         self.counters.frames_rx.fetch_add(1, Ordering::Relaxed);
-        if self.last_completed.map_or(true, |lc| fid > lc) {
+        if self.last_completed.is_none_or(|lc| fid > lc) {
             self.last_completed = Some(fid);
         }
-        Some(FrameIn::Complete { frame_id: fid, data: Bytes::from(out) })
+        Some(FrameIn::Complete {
+            frame_id: fid,
+            data: Bytes::from(out),
+        })
     }
 }
 
@@ -421,7 +433,7 @@ impl FrameSource for FecRsRx {
                 // 审查 #3 修复：max_k 从包头字段确定性推导（tx 的 block_data =
                 // min(total, MAX_BLOCK_DATA)），不再依赖到达顺序学习——彻底消除
                 // 「块 1 先于块 0 到达 → 槽位错位 → RS 伪恢复」的静默腐蚀路径
-                max_k: (orig_len as usize).div_ceil(ss).max(1).min(MAX_BLOCK_DATA),
+                max_k: (orig_len as usize).div_ceil(ss).clamp(1, MAX_BLOCK_DATA),
             });
             // 块号：数据片取 pidx，校验片取 idx（均为显式字段，无推断）
             let block_id = if parity { idx } else { pidx as u16 };
@@ -447,7 +459,12 @@ impl FrameSource for FecRsRx {
 
             // 乱序窗外旧帧先报 Lost（不吞新帧；同包触发的 Complete 进 outbox）
             let stale_bound = fid.saturating_sub(self.cfg.reorder_window);
-            let stale = self.pending.keys().copied().filter(|kk| *kk < stale_bound).min();
+            let stale = self
+                .pending
+                .keys()
+                .copied()
+                .filter(|kk| *kk < stale_bound)
+                .min();
             if let Some(stale) = stale {
                 let rr = self.pending.remove(&stale).unwrap();
                 self.counters.frames_lost.fetch_add(1, Ordering::Relaxed);
@@ -475,8 +492,11 @@ mod tests {
 
     async fn bind() -> (Box<dyn FrameSink>, Box<dyn FrameSource>, Arc<EventBus>) {
         let t = LoopbackPairTransport::new(1200);
-        let a: Arc<dyn Channel> =
-            Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
         let fec = FecRs::new(FecRsConfig::default());
         let bus = Arc::new(EventBus::new());
@@ -489,9 +509,17 @@ mod tests {
         let (mut tx, mut rx, _bus) = bind().await;
         for i in 0..5u32 {
             let data: Vec<u8> = (0..(1024 * 3 + 123)).map(|x| (x as u8) ^ i as u8).collect();
-            tx.submit(EncodedFrame { frame_id: i, data: Bytes::from(data.clone()) }).await.unwrap();
+            tx.submit(EncodedFrame {
+                frame_id: i,
+                data: Bytes::from(data.clone()),
+            })
+            .await
+            .unwrap();
             match rx.next().await.unwrap() {
-                FrameIn::Complete { frame_id, data: got } => {
+                FrameIn::Complete {
+                    frame_id,
+                    data: got,
+                } => {
                     assert_eq!(frame_id, i);
                     assert_eq!(&got[..], &data[..]);
                 }
@@ -528,14 +556,19 @@ mod tests {
         async fn open_stream(
             &self,
             _k: switchboard_core::channel::StreamKind,
-        ) -> Result<Box<dyn switchboard_core::channel::Stream>, switchboard_core::channel::ChannelError>
-        {
+        ) -> Result<
+            Box<dyn switchboard_core::channel::Stream>,
+            switchboard_core::channel::ChannelError,
+        > {
             unimplemented!()
         }
         async fn accept_stream(
             &self,
         ) -> Result<
-            (switchboard_core::channel::StreamKind, Box<dyn switchboard_core::channel::Stream>),
+            (
+                switchboard_core::channel::StreamKind,
+                Box<dyn switchboard_core::channel::Stream>,
+            ),
             switchboard_core::channel::ChannelError,
         > {
             unimplemented!()
@@ -555,17 +588,33 @@ mod tests {
     async fn 单片帧_默认200pct_丢2片仍可恢复() {
         // 100B 帧 → k=1, m=2（Moonlight 200% 规则）：丢任意 2 片中的 1 片数据片仍可恢复
         let t = LoopbackPairTransport::new(1200);
-        let a_raw: Arc<dyn Channel> =
-            Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a_raw: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
-        let a: Arc<dyn Channel> = Arc::new(DropNth { inner: a_raw, n: 0, seen: Default::default() });
+        let a: Arc<dyn Channel> = Arc::new(DropNth {
+            inner: a_raw,
+            n: 0,
+            seen: Default::default(),
+        });
         let fec = FecRs::new(FecRsConfig::default());
         let (mut tx, mut rx) = fec.bind(a, b, Arc::new(EventBus::new())).await.unwrap();
-        tx.submit(EncodedFrame { frame_id: 9, data: Bytes::from(vec![3u8; 100]) }).await.unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 9,
+            data: Bytes::from(vec![3u8; 100]),
+        })
+        .await
+        .unwrap();
         match rx.next().await.unwrap() {
             FrameIn::Complete { frame_id, data } => {
                 assert_eq!(frame_id, 9);
-                assert_eq!(data, Bytes::from(vec![3u8; 100]), "k=1,m=2 丢 1 数据片应 RS 重建");
+                assert_eq!(
+                    data,
+                    Bytes::from(vec![3u8; 100]),
+                    "k=1,m=2 丢 1 数据片应 RS 重建"
+                );
             }
             other => panic!("期望 RS 恢复后 Complete，得到 {other:?}"),
         }
@@ -575,16 +624,34 @@ mod tests {
     async fn 突发丢2片_20pct比例可恢复() {
         // 5 片帧 k=5, m=1：丢 1 片可恢复（20% 比例的基线能力）
         let t = LoopbackPairTransport::new(1200);
-        let a_raw: Arc<dyn Channel> =
-            Arc::from(t.establish(Vec::new(), Arc::new(EventBus::new())).await.unwrap());
+        let a_raw: Arc<dyn Channel> = Arc::from(
+            t.establish(Vec::new(), Arc::new(EventBus::new()))
+                .await
+                .unwrap(),
+        );
         let b: Arc<dyn Channel> = Arc::from(t.take_remote().await.unwrap());
-        let a: Arc<dyn Channel> = Arc::new(DropNth { inner: a_raw, n: 2, seen: Default::default() });
-        let fec = FecRs::new(FecRsConfig { overhead_ratio: 0.2, ..Default::default() });
+        let a: Arc<dyn Channel> = Arc::new(DropNth {
+            inner: a_raw,
+            n: 2,
+            seen: Default::default(),
+        });
+        let fec = FecRs::new(FecRsConfig {
+            overhead_ratio: 0.2,
+            ..Default::default()
+        });
         let (mut tx, mut rx) = fec.bind(a, b, Arc::new(EventBus::new())).await.unwrap();
         let data: Vec<u8> = (0..(1024 * 5)).map(|x| x as u8).collect();
-        tx.submit(EncodedFrame { frame_id: 7, data: Bytes::from(data.clone()) }).await.unwrap();
+        tx.submit(EncodedFrame {
+            frame_id: 7,
+            data: Bytes::from(data.clone()),
+        })
+        .await
+        .unwrap();
         match rx.next().await.unwrap() {
-            FrameIn::Complete { frame_id, data: got } => {
+            FrameIn::Complete {
+                frame_id,
+                data: got,
+            } => {
                 assert_eq!(frame_id, 7);
                 assert_eq!(&got[..], &data[..], "RS 恢复后内容必须一致");
             }

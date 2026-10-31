@@ -26,7 +26,9 @@ static SHIELD_TX: OnceLock<Sender<Req>> = OnceLock::new();
 /// （`false` = 线程未起或已退出，调用方据此回 Error）。
 #[cfg(windows)]
 pub fn set(on: bool) -> bool {
-    let Some(tx) = SHIELD_TX.get() else { return false };
+    let Some(tx) = SHIELD_TX.get() else {
+        return false;
+    };
     tx.send(if on { Req::On } else { Req::Off }).is_ok()
 }
 
@@ -66,16 +68,16 @@ enum Req {
 /// 常驻黑罩线程：注册类 → 创建全屏纯黑窗（初始隐藏）→ 请求 + 消息双泵。
 #[cfg(windows)]
 fn shield_thread(rx: std::sync::mpsc::Receiver<Req>) {
+    use windows::core::w;
     use windows::Win32::Graphics::Gdi::CreateSolidBrush;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetSystemMetrics, PeekMessageW, RegisterClassW,
-        SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU,
-        HWND_TOPMOST, MSG, PM_REMOVE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_TOPMOST,
+        MSG, PM_REMOVE, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SYSTEM_METRICS_INDEX, WINDOW_EX_STYLE, WNDCLASSW,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
-    use windows::core::w;
 
     let hinstance = unsafe { GetModuleHandleW(None).unwrap_or_default() };
     let class_name = w!("rd-privacy-shield");
@@ -143,7 +145,8 @@ fn shield_thread(rx: std::sync::mpsc::Receiver<Req>) {
             Some(Req::On) if !shown => {
                 unsafe {
                     // 重新置顶并覆盖（期间可能有人动过窗口）
-                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), vx, vy, vw, vh, Default::default());
+                    let _ =
+                        SetWindowPos(hwnd, Some(HWND_TOPMOST), vx, vy, vw, vh, Default::default());
                     let _ = ShowWindow(hwnd, SW_SHOW);
                 }
                 shown = true;
@@ -189,8 +192,10 @@ pub fn notify_user(peer_name: &str) {
             "设备「{peer_name}」已开启隐私保护：\n本机屏幕即将黑屏，远程操作继续。\n\n(点「确定」继续；结束远控后屏幕自动恢复)"
         );
         std::thread::spawn(move || {
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_SETFOREGROUND, MB_TOPMOST};
             use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                MessageBoxW, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+            };
             let text = HSTRING::from(text);
             let title = HSTRING::from("rd 远程控制 · 隐私保护");
             unsafe {
