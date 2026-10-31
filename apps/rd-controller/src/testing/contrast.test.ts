@@ -59,6 +59,33 @@ describe("对比度门禁（令牌对 WCAG）", () => {
     expect(bad, `对比度不足：${bad.join("；")}`).toEqual([]);
   });
 
+  it("白字 × 彩底按钮对 ≥ 4.5:1（R14 a11y 认证残项：曾 3.73/3.03/2.93 逃逸门禁）", () => {
+    const whiteOn: ReadonlyArray<readonly [string, string]> = [
+      ["--rd-accent", "添加设备/连接 CTA"],
+      ["--rd-accent-strong", "CTA hover"],
+      ["--rd-err-solid", "删除确认实心钮"],
+    ];
+    const bad: string[] = [];
+    for (const [token, usage] of whiteOn) {
+      const bg = tokens[token];
+      if (bg === undefined) {
+        bad.push(`令牌缺失: ${token}`);
+        continue;
+      }
+      const ratio = contrast("#ffffff", bg);
+      if (ratio < 4.5) {
+        bad.push(`#fff on ${token}（${usage}）= ${ratio.toFixed(2)}:1`);
+      }
+    }
+    // 渐变单独算两端 stop（parseTokens 只抓 --rd-*: #hex 单值，渐变人工锚定）
+    for (const stop of ["#3269e6", "#2b5fd0"]) {
+      if (contrast("#ffffff", stop) < 4.5) {
+        bad.push(`#fff on accent-grad stop ${stop} = ${contrast("#ffffff", stop).toFixed(2)}:1`);
+      }
+    }
+    expect(bad, `白字彩底违规：${bad.join("；")}`).toEqual([]);
+  });
+
   it("活性验证：若把 faint 调到 3:1 档必须红（扫描器防呆）", () => {
     // 用同公式验证一个已知失败对（白底白字），确保计算路径真能报红
     expect(contrast("#ffffff", "#ffffff")).toBe(1);

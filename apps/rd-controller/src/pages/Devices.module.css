@@ -454,13 +454,13 @@
 
 /* 删除二次确认（红底白字，原位替换） */
 .confirmDelete {
-  background: var(--rd-err);
-  border-color: var(--rd-err);
+  background: var(--rd-err-solid);
+  border-color: var(--rd-err-solid);
   color: #fff;
 }
 .confirmDelete:hover:not(:disabled) {
-  background: #e35b5b;
-  border-color: #e35b5b;
+  background: #b53535;
+  border-color: #b53535;
   color: #fff;
 }
 

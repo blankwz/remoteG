@@ -18,8 +18,9 @@
   --rd-text: #e8ebf0;
   --rd-text-dim: #a7b0bd;
   --rd-text-faint: #97a1af;
-  --rd-accent: #3d7eff;
-  --rd-accent-strong: #5a91ff;
+  /* 白字对比度 4.88:1（R14 a11y：曾 3d7eff 仅 3.73）；hover 档再深一阶 */
+  --rd-accent: #3269e6;
+  --rd-accent-strong: #2b5fd0;
   --rd-accent-soft: rgb(61 126 255 / 14%);
   --rd-accent-text: #cfe0ff;
   --rd-hover: rgb(255 255 255 / 5%);
@@ -39,7 +40,9 @@
   --rd-fs-dim: 12px;
   --rd-fs-micro: 11px;
   /* 主色渐变（品牌按钮/标志用） */
-  --rd-accent-grad: linear-gradient(135deg, #3d7eff, #6ba2ff);
+  --rd-accent-grad: linear-gradient(135deg, #3269e6, #2b5fd0);
+  /* 实心按钮红（白字 5.02:1；--rd-err 保持亮档作深底文字用） */
+  --rd-err-solid: #c73e3e;
   /* 动效令牌（R3）：唯一缓动曲线 + 两档时长 */
   --rd-dur-fast: 120ms;
   --rd-dur: 200ms;
