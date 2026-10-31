@@ -19,7 +19,7 @@
 
 .title {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--rd-fs-h1);
   font-weight: 600;
   letter-spacing: 0.2px;
   color: var(--rd-text);
@@ -103,7 +103,7 @@
 .termItem {
   padding: 6px 12px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--rd-radius-sm);
   background: transparent;
   color: var(--rd-text-dim);
   font-size: 13px;
@@ -227,9 +227,9 @@
 }
 
 .iconFallback {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--rd-accent-text);
+  color: var(--rd-text-dim);
 }
 
 .meta {
@@ -256,7 +256,7 @@
 .process {
   font-family: var(--rd-font-mono);
   font-size: 12px;
-  color: var(--rd-text-faint);
+  color: var(--rd-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -270,4 +270,110 @@
   color: var(--rd-warn);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* ---- UX R1 新增 ---- */
+
+/* 标题区（返回 + 设备名上下文） */
+.titleWrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.backBtn:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
+  background: rgb(255 255 255 / 5%);
+}
+
+/* 搜索框带图标 */
+.searchWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 10px;
+  color: var(--rd-text-faint);
+  pointer-events: none;
+}
+
+.search {
+  padding-left: 30px;
+}
+
+/* 刷新按钮图标化 */
+.retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* 最小化徽标（中性色，不再用警示黄） */
+.restoreHint {
+  background: rgb(255 255 255 / 7%);
+  color: var(--rd-text-faint);
+}
+
+/* 加载骨架屏（性能感知：结构先现形） */
+.skeleton {
+  pointer-events: none;
+  animation: skPulse 1.4s ease-in-out infinite;
+}
+
+.skeletonBlock {
+  display: block;
+  border-radius: var(--rd-radius-sm);
+  background: rgb(255 255 255 / 7%);
+}
+
+.skTitle {
+  width: 78%;
+  height: 12px;
+}
+
+.skProc {
+  width: 45%;
+  height: 10px;
+}
+
+@keyframes skPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 窗口计数行 */
+.countLine {
+  margin: 0;
+  color: var(--rd-text-faint);
+  font-size: 12px;
 }

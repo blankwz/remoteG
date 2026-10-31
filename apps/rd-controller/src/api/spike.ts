@@ -4,7 +4,8 @@
  * Rust 侧建立 QUIC 并后台泵数据流；每帧以 InvokeResponseBody::Raw 经 Channel
  * 到达前端，message 为 ArrayBuffer（25B 帧头 + Annex-B AU 原样）。
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
+import { call } from "./bridge";
 
 /**
  * 连接 rd-agent spike 端。
@@ -18,5 +19,5 @@ export function spikeConnect(
 ): Promise<void> {
   const on_frame = new Channel<ArrayBuffer>();
   on_frame.onmessage = onFrame;
-  return invoke("spike_connect", { addr, onFrame: on_frame });
+  return call("spike_connect", { addr, onFrame: on_frame });
 }

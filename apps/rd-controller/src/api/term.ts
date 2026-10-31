@@ -9,7 +9,8 @@
  *   不走 raw IPC）；传 [] 即存活探测（Agent 侧写 0 字节，无副作用）；
  * - `termResize`：单向上报（Agent 不回包），网络瞬断失败由下一次 resize 重试。
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
+import { call, isTauriRuntime } from "./bridge";
 
 /** Agent 侧 shell 白名单（rd-term ALLOWED_SHELLS）。 */
 export const TERM_SHELLS = [
@@ -42,9 +43,19 @@ export function openTerminal(
   resumeId: string | null,
   onData: (data: ArrayBuffer) => void,
 ): Promise<OpenTerminalAckDto> {
+  if (!isTauriRuntime()) {
+    // demo: feed a PowerShell welcome banner so the terminal looks real
+    const enc = new TextEncoder();
+    const banner = enc.encode(
+      'Windows PowerShell\r\nCopyright (C) Microsoft Corporation. All rights reserved.\r\n\r\n'
+      + 'PS C:\\Users\\demo> ',
+    );
+    window.setTimeout(() => onData(banner.buffer as ArrayBuffer), 150);
+    return Promise.resolve({ termId: 'demo-term', streamId: 1 });
+  }
   const on_data = new Channel<ArrayBuffer>();
   on_data.onmessage = onData;
-  return invoke("open_terminal", {
+  return call("open_terminal", {
     deviceId,
     shell,
     cols,
@@ -60,7 +71,7 @@ export function termInput(
   streamId: number,
   data: number[],
 ): Promise<void> {
-  return invoke("term_input", { deviceId, streamId, data });
+  return call("term_input", { deviceId, streamId, data });
 }
 
 /** 上报终端尺寸（单向；失败由下一次 resize 重试，不致命）。 */
@@ -70,7 +81,7 @@ export function termResize(
   cols: number,
   rows: number,
 ): Promise<void> {
-  return invoke("term_resize", { deviceId, termId, cols, rows });
+  return call("term_resize", { deviceId, termId, cols, rows });
 }
 
 /**

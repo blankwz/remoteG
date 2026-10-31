@@ -134,6 +134,7 @@ pub fn run() {
             commands::devices::get_media_fec,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
+            commands::devices::set_host_paused,
             commands::devices::edit_device,
             commands::devices::tailscale_ping,
             // T-020：窗口

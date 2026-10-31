@@ -5,7 +5,8 @@
  * window_id 以十进制字符串传递（u64 可能超出 JS number 安全整数范围，
  * 且路由参数 `#/session/:id?open=<windowId>` 本就是字符串）。
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
+import { call, isTauriRuntime } from "./bridge";
 
 /** 可捕获窗口条目（列表页卡片）。 */
 export interface WindowDto {
@@ -46,7 +47,7 @@ export interface WindowEventDto {
 
 /** 列出被控端可捕获窗口。 */
 export function listWindows(deviceId: string): Promise<WindowDto[]> {
-  return invoke("list_windows", { deviceId });
+  return call("list_windows", { deviceId });
 }
 
 /**
@@ -58,8 +59,11 @@ export function listWindows(deviceId: string): Promise<WindowDto[]> {
 export function subscribeWindowEvents(
   deviceId: string,
   onEvent: (event: WindowEventDto) => void,
-): Promise<void> {
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => undefined);
+  }
   const on_event = new Channel<WindowEventDto>();
   on_event.onmessage = onEvent;
-  return invoke("subscribe_window_events", { deviceId, onEvent: on_event });
+  return call("subscribe_window_events", { deviceId, onEvent: on_event });
 }

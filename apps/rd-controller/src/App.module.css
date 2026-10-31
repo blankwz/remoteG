@@ -17,18 +17,32 @@
   --rd-border-strong: #3a4452;
   --rd-text: #e8ebf0;
   --rd-text-dim: #a7b0bd;
-  --rd-text-faint: #6d7684;
+  --rd-text-faint: #97a1af;
   --rd-accent: #3d7eff;
   --rd-accent-strong: #5a91ff;
   --rd-accent-soft: rgb(61 126 255 / 14%);
   --rd-accent-text: #cfe0ff;
+  --rd-hover: rgb(255 255 255 / 5%);
   --rd-ok: #46d17e;
   --rd-warn: #e5b567;
   --rd-err: #ef6f6f;
-  --rd-radius: 8px;
+  --rd-radius: 10px;
   --rd-radius-sm: 6px;
   --rd-shadow: 0 6px 20px rgb(0 0 0 / 40%);
+  --rd-shadow-pop: 0 12px 40px rgb(0 0 0 / 55%);
   --rd-font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* 字号阶梯（UX R1）：页面标题 / 卡片标题 / 正文 / 辅助 / 标注 */
+  --rd-fs-h1: 20px;
+  --rd-fs-title: 15px;
+  --rd-fs-body: 13px;
+  --rd-fs-dim: 12px;
+  --rd-fs-micro: 11px;
+  /* 主色渐变（品牌按钮/标志用） */
+  --rd-accent-grad: linear-gradient(135deg, #3d7eff, #6ba2ff);
+  /* 动效令牌（R3）：唯一缓动曲线 + 两档时长 */
+  --rd-dur-fast: 120ms;
+  --rd-dur: 200ms;
+  --rd-ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ---- 全局基座（reset 与元素默认值） ---- */
@@ -135,7 +149,6 @@
   height: 10px;
   border-radius: 3px;
   background: linear-gradient(135deg, var(--rd-accent), #7ab0ff);
-  box-shadow: 0 0 8px rgb(61 126 255 / 45%);
 }
 
 .navLinks {
@@ -263,4 +276,30 @@
   border: 1px solid var(--rd-border);
   border-radius: var(--rd-radius);
   overflow: auto;
+}
+
+/* ---- UX R3：页面切换淡入 + 全局动效基线 ---- */
+
+:global(#root > div) {
+  animation: rdPageIn 0.18s ease-out;
+}
+
+@keyframes rdPageIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

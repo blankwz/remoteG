@@ -11,6 +11,7 @@
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { downloadDir } from "@tauri-apps/api/path";
+import { call, isTauriRuntime } from "./bridge";
 
 /** 适配模式（proto FitMode 的字符串形式）。 */
 export type FitMode = "FIT" | "SCALE" | "NATIVE";
@@ -92,9 +93,21 @@ export function openWindow(
   viewOnly: boolean,
   onFrame: (frame: ArrayBuffer) => void,
 ): Promise<OpenWindowAckDto> {
+  if (!isTauriRuntime()) {
+    // demo：假 ack（画面区域保持深色舞台，STATS 由 subscribeGroupEvents 喂）
+    return Promise.resolve({
+      windowId,
+      level: "L0_PIXEL",
+      codec: "L0_H264_420",
+      w: 2560,
+      h: 1392,
+      videoStreamId: 1,
+      tileStreamId: 2,
+    });
+  }
   const on_frame = new Channel<ArrayBuffer>();
   on_frame.onmessage = onFrame;
-  return invoke("open_window", {
+  return call("open_window", {
     deviceId,
     windowId,
     fit,
@@ -138,24 +151,27 @@ export function subscribeSessionState(
   deviceId: string,
   onState: (s: SessionStateDto) => void,
 ): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => undefined);
+  }
   const ch = new Channel<SessionStateDto>();
   ch.onmessage = onState;
-  return invoke("subscribe_session_state", { deviceId, onState: ch });
+  return call("subscribe_session_state", { deviceId, onState: ch });
 }
 
 /** 发送文本到被控端剪贴板（v0.1）。 */
 export function sendClipboard(deviceId: string, text: string): Promise<void> {
-  return invoke("send_clipboard", { deviceId, text });
+  return call("send_clipboard", { deviceId, text });
 }
 
 /** 读取被控端剪贴板文本（v0.1；超时 2s）。 */
 export function requestClipboard(deviceId: string): Promise<string> {
-  return invoke("request_clipboard", { deviceId });
+  return call("request_clipboard", { deviceId });
 }
 
 /** 关闭窗口会话（撤销帧路由 + 单向 CloseWindow；重复关闭安全）。 */
 export function closeWindow(deviceId: string, windowId: string): Promise<void> {
-  return invoke("close_window", { deviceId, windowId });
+  return call("close_window", { deviceId, windowId });
 }
 
 /** 上报视口（Fit 1:1 适配；`dpr` 传 devicePixelRatio / zoom）。 */
@@ -166,7 +182,7 @@ export function setViewport(
   cssH: number,
   dpr: number,
 ): Promise<void> {
-  return invoke("set_viewport", { deviceId, windowId, cssW, cssH, dpr });
+  return call("set_viewport", { deviceId, windowId, cssW, cssH, dpr });
 }
 
 /** 画质档位（T-028 F5；`windowId` 省略 = 会话内全部窗口）。 */
@@ -177,12 +193,12 @@ export function setQuality(
   preset: QualityPreset,
   windowId?: string,
 ): Promise<void> {
-  return invoke("set_quality", { deviceId, preset, windowId: windowId ?? null });
+  return call("set_quality", { deviceId, preset, windowId: windowId ?? null });
 }
 
 /** 隐私屏开关（T-028 F9，Pro 功能；被控端断开自动解除）。 */
 export function setPrivacy(deviceId: string, on: boolean): Promise<void> {
-  return invoke("set_privacy", { deviceId, on });
+  return call("set_privacy", { deviceId, on });
 }
 
 /**
@@ -194,10 +210,28 @@ export function subscribeGroupEvents(
   deviceId: string,
   rootId: string,
   onEvent: (event: GroupEventDto) => void,
-): Promise<void> {
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    // demo：每 1s 推一条 STATS（HUD/码率显示有活数据）
+    const timer = window.setInterval(() => {
+      onEvent({
+        kind: "STATS",
+        info: null,
+        message: null,
+        stats: {
+          fps: 58 + Math.floor(Math.random() * 5),
+          rttMs: 5 + Math.floor(Math.random() * 4),
+          kbps: 7800 + Math.floor(Math.random() * 900),
+          decodeMs: 1.2,
+        },
+        rootId,
+      });
+    }, 1000);
+    return Promise.resolve(() => window.clearInterval(timer));
+  }
   const on_event = new Channel<GroupEventDto>();
   on_event.onmessage = onEvent;
-  return invoke("subscribe_group_events", { deviceId, rootId, onEvent: on_event });
+  return call("subscribe_group_events", { deviceId, rootId, onEvent: on_event });
 }
 
 /**
@@ -208,6 +242,9 @@ export function subscribeGroupEvents(
  * 单帧 PNG 引入 plugin-fs npm 依赖）。
  */
 export async function saveFileToDownloads(fileName: string, bytes: Uint8Array): Promise<string> {
+  if (!isTauriRuntime()) {
+    return `demo-downloads/${fileName}`;
+  }
   const dir = await downloadDir();
   const path = `${dir}/${fileName}`;
   await invoke("plugin:fs|write_file", bytes, {

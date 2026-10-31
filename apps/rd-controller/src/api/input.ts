@@ -9,7 +9,7 @@
  * - 调用方（InputMapper 接线层）自行 `.catch(() => undefined)` 吞错：
  *   输入丢失不弹错误，连接断开由会话层遮罩与重连兜底。
  */
-import { invoke } from "@tauri-apps/api/core";
+import { call } from "./bridge";
 
 /** 鼠标移动（datagram，fire-and-forget）。坐标为远端窗口物理像素。 */
 export function mouseMove(
@@ -18,7 +18,7 @@ export function mouseMove(
   x: number,
   y: number,
 ): Promise<void> {
-  return invoke("mouse_move", { deviceId, windowId, x, y });
+  return call("mouse_move", { deviceId, windowId, x, y });
 }
 
 /** 鼠标按键（控制流可靠）。`button` 为协议编号：0 左 / 1 右 / 2 中 / 3 X1 / 4 X2。 */
@@ -30,7 +30,7 @@ export function mouseButton(
   button: number,
   down: boolean,
 ): Promise<void> {
-  return invoke("mouse_button", { deviceId, windowId, x, y, button, down });
+  return call("mouse_button", { deviceId, windowId, x, y, button, down });
 }
 
 /** 滚轮（控制流可靠）。`dx`/`dy` 为 ±120 的 wheel delta（Windows 约定符号）。 */
@@ -42,7 +42,7 @@ export function mouseWheel(
   dx: number,
   dy: number,
 ): Promise<void> {
-  return invoke("mouse_wheel", { deviceId, windowId, x, y, dx, dy });
+  return call("mouse_wheel", { deviceId, windowId, x, y, dx, dy });
 }
 
 /** 键盘事件（控制流可靠）。扫描码为 PS/2 Set 1 基本码 + extended 标志。 */
@@ -53,10 +53,10 @@ export function keyEvent(
   down: boolean,
   modifiers: number,
 ): Promise<void> {
-  return invoke("key_event", { deviceId, scancode, extended, down, modifiers });
+  return call("key_event", { deviceId, scancode, extended, down, modifiers });
 }
 
 /** 文本输入（控制流可靠）。IME 组合结束的上屏文本。 */
 export function textInput(deviceId: string, text: string): Promise<void> {
-  return invoke("text_input", { deviceId, text });
+  return call("text_input", { deviceId, text });
 }

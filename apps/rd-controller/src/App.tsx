@@ -156,7 +156,6 @@ function Nav({ active }: { active: Route["page"] }) {
   const lastDeviceId = getLastDeviceId();
   const linkClass = (page: Route["page"]): string =>
     active === page ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink;
-  const disabledTitle = "先在设备页连接一台设备";
   return (
     <nav className={styles.nav}>
       <a className={styles.brand} href="#/devices" title="返回设备页">
@@ -167,7 +166,7 @@ function Nav({ active }: { active: Route["page"] }) {
         <a className={linkClass("devices")} href="#/devices">
           设备
         </a>
-        {lastDeviceId !== null ? (
+        {active === "devices" && lastDeviceId !== null && (
           <>
             <a className={linkClass("windows")} href={`#/windows/${lastDeviceId}`}>
               窗口列表
@@ -175,23 +174,6 @@ function Nav({ active }: { active: Route["page"] }) {
             <a className={linkClass("session")} href={`#/session/${lastDeviceId}`}>
               会话
             </a>
-          </>
-        ) : (
-          <>
-            <span
-              className={styles.navLinkDisabled}
-              aria-disabled="true"
-              title={disabledTitle}
-            >
-              窗口列表
-            </span>
-            <span
-              className={styles.navLinkDisabled}
-              aria-disabled="true"
-              title={disabledTitle}
-            >
-              会话
-            </span>
           </>
         )}
       </div>

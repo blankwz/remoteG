@@ -19,6 +19,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
+// api 层经 bridge.call 转发：桩成直接走 invokeMock（Tauri 运行时同路径）
+vi.mock("../api/bridge", () => ({
+  call: invokeMock,
+  isTauriRuntime: () => true,
+  listenStub: vi.fn().mockResolvedValue(() => undefined),
+}));
+
 import { applyWindowEvent, filterWindows, windowEventId } from "./Windows";
 import {
   listWindows,

@@ -1,0 +1,104 @@
+/**
+ * demo 预览数据（仅浏览器环境）：模拟已配对多设备的使用场景，供 UX 评审
+ * 截图使用；Tauri 桌面运行时不经过此文件。
+ */
+
+/** 生成一枚圆角字母图标（SVG data URI）。 */
+function icon(color: string, letter: string): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">` +
+    `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
+    `<stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="${color}" stop-opacity="0.72"/>` +
+    `</linearGradient></defs>` +
+    `<rect width="32" height="32" rx="7" fill="url(#g)"/>` +
+    `<rect x="0.5" y="0.5" width="31" height="31" rx="6.5" fill="none" stroke="#ffffff2e"/>` +
+    `<text x="16" y="22" font-size="15" font-family="Segoe UI, sans-serif" fill="#fff" text-anchor="middle" font-weight="600">${letter}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+/** 已配对设备（DeviceDto）。 */
+const DEVICES = [
+  {
+    id: "dev-studio",
+    name: "工作室工作站",
+    addr: "100.101.43.7:21118",
+    fingerprintHex: "a3f1c90b7e22d4f8c05a6b1d3e7f9a2b4c6d8e0f2a4b6c8d0e2f4a6",
+    addedAt: 1761500000,
+    online: true,
+  },
+  {
+    id: "dev-htpc",
+    name: "客厅 HTPC",
+    addr: "127.0.0.1:21118",
+    fingerprintHex: "b2e0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6a4f2b0d8c6",
+    addedAt: 1761200000,
+    online: true,
+  },
+  {
+    id: "dev-office",
+    name: "办公台式机",
+    addr: "192.168.1.66:21118",
+    fingerprintHex: "c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3c5e7f9b1d3f5a7c9e1b3d5f7",
+    addedAt: 1760900000,
+    online: false,
+  },
+];
+
+/** 可捕获窗口（WindowDto）。 */
+const WINDOWS = [
+  { id: "3301", title: "main.ts - rd-controller - Visual Studio Code", process: "Code.exe", pid: 4021, icon: icon("#2f9e8f", "V"), x: 0, y: 0, w: 2560, h: 1392, dpi: 1.5, resizable: true, minimized: false },
+  { id: "3302", title: "rd - 窗口级远程控制 - 汇报材料.docx - Word", process: "WINWORD.EXE", pid: 8812, icon: icon("#2b579a", "W"), x: 0, y: 0, w: 1728, h: 1092, dpi: 1.5, resizable: true, minimized: false },
+  { id: "3303", title: "Q3 营收报表.xlsx - Excel", process: "EXCEL.EXE", pid: 7310, icon: icon("#217346", "X"), x: 0, y: 0, w: 1728, h: 1092, dpi: 1.5, resizable: true, minimized: false },
+  { id: "3304", title: "产品研发一群 - 企业微信", process: "WXWork.exe", pid: 9912, icon: icon("#3d7eff", "企"), x: 0, y: 0, w: 1160, h: 1392, dpi: 1.5, resizable: true, minimized: false },
+  { id: "3305", title: "rd-final.log - 记事本", process: "Notepad.exe", pid: 6230, icon: icon("#767676", "N"), x: 0, y: 0, w: 980, h: 720, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3306", title: "Windows Terminal", process: "WindowsTerminal.exe", pid: 4402, icon: icon("#4d4d4d", ">"), x: 0, y: 0, w: 1400, h: 900, dpi: 1.5, resizable: true, minimized: false },
+  { id: "3307", title: "New Tab - Chrome", process: "chrome.exe", pid: 2210, icon: icon("#4285f4", "C"), x: 0, y: 0, w: 1600, h: 980, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3308", title: "OBS 31.0 - 直播推流中", process: "obs64.exe", pid: 5511, icon: icon("#1f1f23", "O"), x: 0, y: 0, w: 1920, h: 1080, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3309", title: "Steam", process: "steam.exe", pid: 3310, icon: icon("#171a21", "S"), x: 0, y: 0, w: 1440, h: 900, dpi: 1.0, resizable: true, minimized: true },
+  { id: "3310", title: "Postman", process: "Postman.exe", pid: 8899, icon: icon("#ff6c37", "P"), x: 0, y: 0, w: 1600, h: 980, dpi: 1.0, resizable: true, minimized: true },
+];
+
+const HOST_STATUS = {
+  listenAddrs: ["100.101.43.7:21118", "192.168.1.10:21118"],
+  peers: [{ name: "iPad Pro", sinceSecs: 3720 }],
+  paused: false,
+};
+
+const PAIR_CARD = {
+  code: "482916",
+  addrs: ["100.101.43.7:21118", "192.168.1.10:21118"],
+  paused: false,
+};
+
+/** 命令表：命令名 → 演示数据（80ms 延迟模拟 IPC 手感）。 */
+export async function mockInvoke<T>(
+  cmd: string,
+  _args?: Record<string, unknown>,
+): Promise<T> {
+  const TABLE: Record<string, unknown> = {
+    list_devices: DEVICES,
+    discover_devices: [
+      { name: "书房笔记本", addr: "192.168.1.34:21118", fingerprintShortHex: "9f3a" },
+      { name: "小米电视助手 PC", addr: "192.168.1.77:21118", fingerprintShortHex: "2c81" },
+    ],
+    host_status: HOST_STATUS,
+    generate_pair_code: PAIR_CARD,
+    get_media_fec: false,
+    set_media_fec: true,
+    set_host_paused: true,
+    probe_device: true,
+    connect_device: { protoVer: 3, hostName: "工作室工作站", encodeCaps: ["h264", "tiles"], hostVersion: "0.1.0" },
+    pair_device: DEVICES[0],
+    edit_device: DEVICES[0],
+    list_windows: WINDOWS,
+    // demo 无真实系统剪贴板通道：返回空串 → 页面层如实报「剪贴板是空的」（D03）
+    local_clipboard_read: "",
+    local_clipboard_write: true,
+  };
+  await new Promise((r) => setTimeout(r, 80));
+  if (!(cmd in TABLE)) {
+    // 未收录命令给人话（R11 D06——曾抛 window.__TAURI_INTERNALS__ 黑话）
+    throw new Error(`demo 预览模式暂不支持「${cmd}」，请在桌面版中使用`);
+  }
+  return structuredClone(TABLE[cmd]) as T;
+}

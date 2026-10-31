@@ -715,6 +715,27 @@ pub fn host_status(state: tauri::State<'_, Arc<AgentState>>) -> HostStatusDto {
     }
 }
 
+/// 暂停/恢复本机被控共享（UX 安全出口：设备页「切断」按钮；与托盘 ID_PAUSE 同语义）。
+#[tauri::command]
+pub fn set_host_paused(
+    paused: bool,
+    state: tauri::State<'_, Arc<AgentState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+    state.paused.store(paused, Ordering::SeqCst);
+    if paused {
+        rd_agent::term_handler::pause_all(&state);
+        let _ = app.emit("session-state", 2i32);
+        tracing::info!(origin = "controller-ui", "共享已暂停(设备页切断按钮)");
+    } else {
+        let _ = app.emit("session-state", 3i32);
+        tracing::info!(origin = "controller-ui", "共享已恢复");
+    }
+    Ok(())
+}
+
 /// 生成 6 位配对码并返回建议地址（UI 弹卡展示；5 分钟内有效、一次性）。
 #[tauri::command]
 pub fn generate_pair_code(state: tauri::State<'_, Arc<AgentState>>) -> PairCodeDto {

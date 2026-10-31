@@ -18,6 +18,7 @@ import {
   type WindowDto,
   type WindowEventDto,
 } from "../api/windows";
+import { IconArrowLeft, IconChevronDown, IconRefresh, IconSearch, IconTerminal } from "../ui/Icon";
 import styles from "./Windows.module.css";
 
 /**
@@ -104,6 +105,9 @@ function fallbackIcon(process: string): string {
 
 type LoadStatus = "connecting" | "loading" | "ready" | "error";
 
+/** 骨架屏占位卡片数（约铺满一屏）。 */
+const SKELETONS = [1, 2, 3, 4, 5, 6, 7, 8];
+
 /**
  * 窗口列表页（#/windows/:deviceId）。
  *
@@ -116,6 +120,8 @@ export function Windows({ deviceId }: { deviceId: string }) {
   const [windows, setWindows] = useState<readonly WindowDto[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<LoadStatus>("connecting");
+  /** 当前设备名（标题上下文：我在谁的窗口里）。 */
+  const [deviceName, setDeviceName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 仅最新一期装载（重试 / 切换设备）的事件与列表结果生效
   const seqRef = useRef(0);
@@ -165,6 +171,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
     setStatus("connecting");
     try {
       const devices = await listDevices();
+      setDeviceName(devices.find((d) => d.id === deviceId)?.name ?? null);
       if (seqRef.current !== seq) {
         return;
       }
@@ -215,9 +222,36 @@ export function Windows({ deviceId }: { deviceId: string }) {
     }
   }, [deviceId, loadList]);
 
+  // `/` 快捷键聚焦搜索（效率评委 R8）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target !== null &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        document.querySelector<HTMLInputElement>('input[type="search"]')?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    // 事件推送之外的兜底：窗口是易变数据，15s 轻轮询保证新开程序最终可见
+    const iv = window.setInterval(() => {
+      void listWindows(deviceId)
+        .then((list) => {
+          if (seqRef.current !== 0) {
+            setWindows(list);
+          }
+        })
+        .catch(() => undefined);
+    }, 15_000);
+    return () => window.clearInterval(iv);
+  }, [load, deviceId]);
 
   const openWindow = useCallback(
     (w: WindowDto) => {
@@ -242,26 +276,48 @@ export function Windows({ deviceId }: { deviceId: string }) {
   return (
     <main className={styles.page}>
       <header className={styles.header}>
-        <h1 className={styles.title}>窗口</h1>
+        <div className={styles.titleWrap}>
+          <button
+            type="button"
+            className={styles.backBtn}
+            title="返回设备列表"
+            onClick={() => {
+              window.location.hash = "#/devices";
+            }}
+          >
+            <IconArrowLeft size={15} />
+          </button>
+          <h1 className={styles.title}>
+            {deviceName !== null ? `${deviceName} 的窗口` : "窗口"}
+          </h1>
+        </div>
         <div className={styles.tools}>
+          <div className={styles.searchWrap}>
+            <IconSearch size={14} className={styles.searchIcon} />
+            <input
+              className={styles.search}
+              type="search"
+              placeholder="搜索标题或进程名（按 / 聚焦）…"
+              aria-label="搜索窗口"
+              value={query}
+              onChange={(e) => updateQuery(e.currentTarget.value)}
+            />
+          </div>
           <button
             type="button"
             className={styles.retry}
             title="重新拉取被控端窗口列表（事件推送丢失时使用）"
             onClick={() => void load()}
           >
+            <IconRefresh size={13} />
             刷新
           </button>
-          <input
-            className={styles.search}
-            type="search"
-            placeholder="搜索标题或进程名…"
-            aria-label="搜索窗口"
-            value={query}
-            onChange={(e) => updateQuery(e.currentTarget.value)}
-          />
           <details className={styles.termMenu}>
-            <summary className={styles.termBtn}>新建终端</summary>
+            <summary className={styles.termBtn}>
+              <IconTerminal size={14} />
+              新建终端
+              <IconChevronDown size={12} />
+            </summary>
             <div className={styles.termItems}>
               {SHELLS.map((s) => (
                 <button
@@ -273,6 +329,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
                     openTerminal(s.id);
                   }}
                 >
+                  <IconTerminal size={13} />
                   {s.label}
                 </button>
               ))}
@@ -290,9 +347,37 @@ export function Windows({ deviceId }: { deviceId: string }) {
         </p>
       )}
 
-      {status === "connecting" && <p className={styles.empty}>连接中…</p>}
+      {status === "connecting" && (
+        <ul className={styles.grid} aria-label="连接中">
+          {SKELETONS.map((i) => (
+            <li key={i}>
+              <div className={`${styles.card} ${styles.skeleton}`}>
+                <span className={`${styles.icon} ${styles.skeletonBlock}`} />
+                <span className={styles.meta}>
+                  <span className={`${styles.skeletonBlock} ${styles.skTitle}`} />
+                  <span className={`${styles.skeletonBlock} ${styles.skProc}`} />
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
 
-      {status === "loading" && <p className={styles.empty}>正在获取窗口列表…</p>}
+      {status === "loading" && (
+        <ul className={styles.grid} aria-label="正在获取窗口列表">
+          {SKELETONS.map((i) => (
+            <li key={i}>
+              <div className={`${styles.card} ${styles.skeleton}`}>
+                <span className={`${styles.icon} ${styles.skeletonBlock}`} />
+                <span className={styles.meta}>
+                  <span className={`${styles.skeletonBlock} ${styles.skTitle}`} />
+                  <span className={`${styles.skeletonBlock} ${styles.skProc}`} />
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {status === "ready" && windows.length === 0 && (
         <p className={styles.empty}>未发现可捕获窗口（远端窗口列表为空）。</p>
@@ -300,6 +385,14 @@ export function Windows({ deviceId }: { deviceId: string }) {
 
       {status === "ready" && windows.length > 0 && filtered.length === 0 && (
         <p className={styles.empty}>没有匹配「{query}」的窗口。</p>
+      )}
+
+      {status === "ready" && windows.length > 0 && (
+        <p className={styles.countLine}>
+          {windows.length} 个窗口
+          {windows.some((w) => w.minimized) &&
+            ` · ${windows.filter((w) => w.minimized).length} 个已最小化`}
+        </p>
       )}
 
       <ul className={styles.grid}>
@@ -328,7 +421,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
                 <span className={styles.process}>{w.process}</span>
               </span>
               {w.minimized && (
-                <span className={styles.restoreHint}>将被还原</span>
+                <span className={styles.restoreHint}>最小化</span>
               )}
             </button>
           </li>

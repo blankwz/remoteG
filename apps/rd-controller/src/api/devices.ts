@@ -3,7 +3,7 @@
  *
  * DTO 字段为 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`）。
  */
-import { invoke } from "@tauri-apps/api/core";
+import { call } from "./bridge";
 
 /** Agent 默认监听端口（地址省略端口时由 Rust 侧补全）。 */
 export const AGENT_DEFAULT_PORT = 21118;
@@ -31,11 +31,11 @@ export interface PairCodeDto {
 }
 
 export function hostStatus(): Promise<HostStatusDto> {
-  return invoke("host_status");
+  return call("host_status");
 }
 
 export function generatePairCode(): Promise<PairCodeDto> {
-  return invoke("generate_pair_code");
+  return call("generate_pair_code");
 }
 
 /** 编辑已配对设备（名称/地址）。 */
@@ -44,12 +44,12 @@ export function editDevice(
   name: string,
   addr: string,
 ): Promise<DeviceDto> {
-  return invoke("edit_device", { id, name, addr });
+  return call("edit_device", { id, name, addr });
 }
 
 /** Tailscale 链路测试（直达 or DERP 中继 + 逐跳延迟）。 */
 export function tailscalePing(ip: string): Promise<string> {
-  return invoke("tailscale_ping", { ip });
+  return call("tailscale_ping", { ip });
 }
 
 /** 已配对设备（含在线状态）。 */
@@ -145,36 +145,36 @@ export function clearLastDeviceId(): void {
 }
 
 export function listDevices(): Promise<DeviceDto[]> {
-  return invoke("list_devices");
+  return call("list_devices");
 }
 
 /** 广播扫描局域网内的 rd-agent（约 1.5s，发现≠信任）。 */
 export function discoverDevices(): Promise<DiscoveredDeviceDto[]> {
-  return invoke("discover_devices");
+  return call("discover_devices");
 }
 
 export function pairDevice(addr: string, code: string, name: string): Promise<DeviceDto> {
-  return invoke("pair_device", { addr, code, name });
+  return call("pair_device", { addr, code, name });
 }
 
 export function removeDevice(id: string): Promise<void> {
-  return invoke("remove_device", { id });
+  return call("remove_device", { id });
 }
 
 export function connectDevice(id: string): Promise<HelloAckDto> {
-  return invoke("connect_device", { id });
+  return call("connect_device", { id });
 }
 
 export function disconnectDevice(id: string): Promise<void> {
-  return invoke("disconnect_device", { id });
+  return call("disconnect_device", { id });
 }
 
 export function probeDevice(id: string): Promise<boolean> {
-  return invoke("probe_device", { id });
+  return call("probe_device", { id });
 }
 
 export function setDecodeCaps(caps: DecodeCapsDto): Promise<void> {
-  return invoke("set_decode_caps", { caps });
+  return call("set_decode_caps", { caps });
 }
 
 /**
