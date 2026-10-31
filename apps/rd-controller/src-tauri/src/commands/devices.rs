@@ -657,6 +657,20 @@ fn magic_packet(mac: &str) -> Result<Vec<u8>, String> {
 /// 仅在采集过 MAC 时可用）。
 #[tauri::command]
 pub async fn wake_device(id: String, state: State<'_, ConnManager>) -> Result<(), String> {
+    // 去抖（review L6）：3s 内对同一设备重复点击直接拦下——魔术包冗余发送
+    // 无害但刷网，前端连点不再产生 40+ 包风暴
+    static LAST_WAKE: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        let mut last = LAST_WAKE.lock().expect("wake 去抖锁中毒");
+        if let Some(t) = last.get(&id)
+            && t.elapsed() < std::time::Duration::from_secs(3)
+        {
+            return Err("刚发送过唤醒包，请等几秒再看设备是否上线".to_string());
+        }
+        last.insert(id.clone(), std::time::Instant::now());
+    }
     let macs = {
         let store = open_store(&state)?;
         let entry = store.by_id(&id).ok_or_else(|| "设备不存在".to_string())?;
