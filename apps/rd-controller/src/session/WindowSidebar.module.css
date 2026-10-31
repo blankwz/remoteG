@@ -20,7 +20,7 @@
 }
 
 .title {
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-dim);
 }
 
@@ -29,7 +29,7 @@
   border: none;
   color: var(--rd-text-dim);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   padding: 2px 6px;
   border-radius: var(--rd-radius-sm);
 }
@@ -45,7 +45,7 @@
   color: var(--rd-text);
   border: 1px solid var(--rd-border);
   border-radius: 6px;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 .search:focus {
   outline: none;
@@ -54,7 +54,7 @@
 
 .error {
   padding: 4px 12px;
-  font-size: 11px;
+  font-size: var(--rd-fs-micro);
   color: var(--rd-warn);
 }
 
@@ -66,7 +66,7 @@
 
 .empty {
   padding: 16px 12px;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-dim);
   text-align: center;
 }
@@ -116,7 +116,7 @@
   align-items: center;
   justify-content: center;
   color: var(--rd-text-dim);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 
 .meta {
@@ -127,7 +127,7 @@
 }
 
 .name {
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text);
   white-space: nowrap;
   overflow: hidden;
@@ -135,7 +135,7 @@
 }
 
 .proc {
-  font-size: 10px;
+  font-size: var(--rd-fs-micro);
   color: var(--rd-text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -147,7 +147,7 @@
   border: none;
   color: var(--rd-text-dim);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   line-height: 1;
   padding: 0 2px;
   border-radius: var(--rd-radius-sm);
@@ -164,7 +164,7 @@
   padding: 1px 7px;
   border-radius: 999px;
   background: rgb(255 255 255 / 7%);
-  font-size: 10px;
+  font-size: var(--rd-fs-micro);
   color: var(--rd-text-faint);
   flex-shrink: 0;
   white-space: nowrap;
@@ -177,7 +177,7 @@
 }
 
 .iconLetter {
-  font-size: 11px;
+  font-size: var(--rd-fs-micro);
   font-weight: 600;
   color: var(--rd-text-dim);
 }

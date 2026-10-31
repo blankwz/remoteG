@@ -30,7 +30,7 @@
 .select {
   background: var(--rd-bg-deep); color: var(--rd-text);
   border: 1px solid var(--rd-border); border-radius: 6px;
-  padding: 5px 6px; font-size: 12px; cursor: pointer;
+  padding: 5px 6px; font-size: var(--rd-fs-dim); cursor: pointer;
   transition: border-color var(--rd-dur-fast) var(--rd-ease);
 }
 .select:hover { border-color: var(--rd-border-strong); }
@@ -53,7 +53,7 @@
 /* 录制中：图标转错误红（录屏激活态归红系） */
 .recOn { color: var(--rd-err); }
 
-.toolLabel { font-size: 11px; line-height: 1; white-space: nowrap; }
+.toolLabel { font-size: var(--rd-fs-micro); line-height: 1; white-space: nowrap; }
 
 .sep { width: 1px; align-self: stretch; background: var(--rd-border); margin: 4px 4px; flex: none; }
 
@@ -81,24 +81,24 @@
 }
 .panelWide { min-width: 300px; }
 .panelTitle {
-  display: block; font-size: 11px; color: var(--rd-text-faint);
+  display: block; font-size: var(--rd-fs-micro); color: var(--rd-text-faint);
   margin: 2px 6px 8px; letter-spacing: .3px;
 }
 .panelItem {
   display: block; width: 100%; text-align: left;
   background: transparent; border: none; color: var(--rd-text);
-  padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: var(--rd-fs-body);
 }
 .panelItem:hover { background: var(--rd-hover); }
 .panelAdd { display: flex; gap: 6px; margin-top: 6px; }
 .panelAdd input {
   flex: 1; background: var(--rd-bg-deep); color: var(--rd-text);
-  border: 1px solid var(--rd-border); border-radius: 6px; padding: 6px 9px; font-size: 12px;
+  border: 1px solid var(--rd-border); border-radius: 6px; padding: 6px 9px; font-size: var(--rd-fs-dim);
 }
 .panelAdd input:focus { outline: none; border-color: var(--rd-accent); }
 .panelAdd button {
   background: var(--rd-accent); color: white; border: none;
-  border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: var(--rd-fs-dim);
 }
 .panelAdd button:hover { background: var(--rd-accent-strong); }
 
@@ -120,12 +120,12 @@
 }
 .moreItemOn .moreIcon { color: var(--rd-accent-text); background: rgb(61 126 255 / 18%); }
 .moreText { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.moreLabel { font-size: 13px; line-height: 1.2; }
-.moreHint { font-size: 11px; color: var(--rd-text-faint); line-height: 1.2; }
+.moreLabel { font-size: var(--rd-fs-body); line-height: 1.2; }
+.moreHint { font-size: var(--rd-fs-micro); color: var(--rd-text-faint); line-height: 1.2; }
 
 .modsRow { display: flex; gap: 5px; margin-bottom: 8px; }
 .modBtn {
-  flex: 1; padding: 6px 0; border-radius: 6px; font-size: 12px;
+  flex: 1; padding: 6px 0; border-radius: 6px; font-size: var(--rd-fs-dim);
   background: var(--rd-bg-deep); color: var(--rd-text-dim);
   border: 1px solid var(--rd-border); cursor: pointer;
 }
@@ -133,7 +133,7 @@
 .modOn { background: var(--rd-accent); color: white; border-color: var(--rd-accent); }
 .keysGrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin-bottom: 8px; }
 .keyBtn {
-  padding: 6px 0; border-radius: 6px; font-size: 12px;
+  padding: 6px 0; border-radius: 6px; font-size: var(--rd-fs-dim);
   background: var(--rd-bg-deep); color: var(--rd-text);
   border: 1px solid var(--rd-border); cursor: pointer; text-align: center;
 }
@@ -141,7 +141,7 @@
 .closeRow {
   display: flex; align-items: center; gap: 4px; width: 100%; justify-content: center;
   background: transparent; border: none; color: var(--rd-text-faint);
-  padding: 5px 0 2px; cursor: pointer; font-size: 11px;
+  padding: 5px 0 2px; cursor: pointer; font-size: var(--rd-fs-micro);
 }
 .closeRow:hover { color: var(--rd-text); }
 

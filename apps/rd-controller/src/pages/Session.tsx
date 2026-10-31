@@ -29,6 +29,7 @@ import type { RecordControl, SessionControl } from "../session/WindowGroupView";
 import { WindowSidebar } from "../session/WindowSidebar";
 import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
+import { disconnectDevice } from "../api/devices";
 import { FloatingToolbar, type Quality } from "../session/FloatingToolbar";
 import { useDismiss } from "../ui/useDismiss";
 import { DEFAULT_TERM_SHELL, TERM_SHELLS, parseShell } from "../api/term";
@@ -105,6 +106,8 @@ export function Session({ deviceId }: { deviceId: string }) {
   });
   /** 当前设备名（顶栏上下文显示）。 */
   const [deviceName, setDeviceName] = useState<string | null>(null);
+  /** 当前设备地址（空态上下文卡）。 */
+  const [deviceAddr, setDeviceAddr] = useState<string | null>(null);
   /** 窗口真实标题表（打开标签时从窗口列表反查，避免标签裸显句柄号）。 */
   const titleCacheRef = useRef<Map<string, string>>(new Map());
   /** 「+ 终端」shell 选择下拉开关。 */
@@ -315,6 +318,7 @@ export function Session({ deviceId }: { deviceId: string }) {
         const dev = devs.find((d) => d.id === deviceId);
         if (alive && dev !== undefined) {
           setDeviceName(dev.name);
+          setDeviceAddr(dev.addr);
           // 反查窗口真实标题（标签命名用）
           const cache = new Map<string, string>();
           for (const w of wins) {
@@ -344,6 +348,17 @@ export function Session({ deviceId }: { deviceId: string }) {
   const goWindows = useCallback(() => {
     window.location.hash = `#/windows/${deviceId}`;
   }, [deviceId]);
+
+  /** 会话内一键断开（R13 交互#4：曾 4 击经设备页 ⋯ 菜单）。 */
+  const doDisconnect = useCallback(async () => {
+    try {
+      await disconnectDevice(deviceId);
+      showToast("已断开连接", false);
+    } catch (e) {
+      showToast(`断开没有成功：${errText(e)}`, true);
+    }
+    goWindows();
+  }, [deviceId, goWindows, showToast]);
 
   // 快捷键：Ctrl+Shift+H 信息 / S 保存画面 / L 锁屏 / V 只看 / C 取回剪贴板 /
   // X 发送剪贴板；Ctrl+Alt+1..9 切会话标签。
@@ -846,6 +861,14 @@ export function Session({ deviceId }: { deviceId: string }) {
           />
           {/* chip 簇右置（R11 D11：曾与 bar 同行挤偏工具栏中心 ~80px） */}
           <div className={styles.chipCluster}>
+            <button
+              type="button"
+              className={styles.disconnectBtn}
+              title="断开与该设备的连接并返回窗口列表"
+              onClick={() => void doDisconnect()}
+            >
+              断开
+            </button>
             {activeWindow !== null && (
               <span
                 className={styles.encryptChip}
@@ -966,7 +989,12 @@ export function Session({ deviceId }: { deviceId: string }) {
         )}
         {activeTab === null ? (
           <div className={styles.empty}>
-            <p className={styles.emptyTitle}>从左侧列表选择一个远程窗口</p>
+            <p className={styles.emptyTitle}>
+              {deviceName !== null ? `${deviceName}：从左侧列表选择一个远程窗口` : "从左侧列表选择一个远程窗口"}
+            </p>
+            {deviceAddr !== null && (
+              <p className={styles.emptyAddr}>{deviceAddr}</p>
+            )}
             <p className={styles.emptyHint}>
               点击左侧窗口即在远端打开会话；或直接开一个终端。
             </p>
@@ -978,6 +1006,16 @@ export function Session({ deviceId }: { deviceId: string }) {
               >
                 <IconTerminal size={14} />
                 打开终端
+              </button>
+              <button type="button" className={styles.toolBtn} onClick={goWindows}>
+                回窗口列表
+              </button>
+              <button
+                type="button"
+                className={`${styles.toolBtn} ${styles.disconnectBtn}`}
+                onClick={() => void doDisconnect()}
+              >
+                断开连接
               </button>
             </div>
           </div>
@@ -992,26 +1030,37 @@ export function Session({ deviceId }: { deviceId: string }) {
               onStatus={(s) => setTermStatus(activeTab.id, s)}
             />
           </div>
-        ) : (
-          <div className={styles.stage}>
-            <WindowGroupView
-              key={activeTab.id}
-              deviceId={deviceId}
-              windowId={activeTab.id}
-              store={activeTab.store}
-              showHud={hudVisible}
-              exportFnRef={exportFnRef}
-              recordCtlRef={recordCtlRef}
-              sessionCtlRef={sessionCtlRef}
-              onRecordingAutoStop={handleRecordingAutoStop}
-              onRootGone={() => {
-                const title = titleCacheRef.current.get(activeTab.id);
-                closeTab(activeTab.id);
-                showToast(`对方已关闭${title !== undefined ? `「${title}」` : "该窗口"}，可从左侧列表重新打开`, false);
-              }}
-            />
-          </div>
-        )}
+        ) : null}
+        {/* 窗口标签保活（R13 交互#3）：全部挂载、非激活隐藏——切签不再
+         * close/open 会话付全价黑屏重连；active 门控使 ref 注册/视口上报
+         * 只属于激活标签。 */}
+        {tabs
+          .filter((t) => t.kind === "window")
+          .map((t) => (
+            <div
+              key={t.id}
+              className={styles.stage}
+              style={t.id === activeId ? undefined : { display: "none" }}
+            >
+              <WindowGroupView
+                key={t.id}
+                active={t.id === activeId}
+                deviceId={deviceId}
+                windowId={t.id}
+                store={t.store}
+                showHud={hudVisible && t.id === activeId}
+                exportFnRef={exportFnRef}
+                recordCtlRef={recordCtlRef}
+                sessionCtlRef={sessionCtlRef}
+                onRecordingAutoStop={handleRecordingAutoStop}
+                onRootGone={() => {
+                  const title = titleCacheRef.current.get(t.id);
+                  closeTab(t.id);
+                  showToast(`对方已关闭${title !== undefined ? `「${title}」` : "该窗口"}，可从左侧列表重新打开`, false);
+                }}
+              />
+            </div>
+          ))}
         </div>
       </div>
     </main>

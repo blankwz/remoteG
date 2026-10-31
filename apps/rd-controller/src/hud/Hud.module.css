@@ -5,7 +5,7 @@
   gap: 12px;
   align-items: center;
   font-family: var(--rd-font-mono);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   color: var(--rd-text-dim);
   background: rgb(10 12 15 / 72%);
   border: 1px solid rgb(255 255 255 / 9%);

@@ -33,6 +33,7 @@
   --rd-font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
   /* 字号阶梯（UX R1）：页面标题 / 卡片标题 / 正文 / 辅助 / 标注 */
   --rd-fs-h1: 20px;
+  --rd-fs-md: 14px;
   --rd-fs-title: 15px;
   --rd-fs-body: 13px;
   --rd-fs-dim: 12px;
@@ -66,7 +67,7 @@
     "PingFang SC",
     "Microsoft YaHei",
     sans-serif;
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
@@ -135,7 +136,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   font-weight: 600;
   letter-spacing: 0.2px;
   color: var(--rd-text);
@@ -163,7 +164,7 @@
   align-items: center;
   padding: 5px 12px;
   border-radius: var(--rd-radius-sm);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   white-space: nowrap;
 }
 
@@ -213,7 +214,7 @@
   flex: 0 0 240px;
   padding: 6px 10px;
   font-family: var(--rd-font-mono);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   border: 1px solid var(--rd-border);
   border-radius: var(--rd-radius-sm);
   background: var(--rd-bg-deep);
@@ -231,7 +232,7 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-accent);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   cursor: pointer;
 }
 
@@ -247,7 +248,7 @@
 
 .statusText {
   font-family: var(--rd-font-mono);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   color: var(--rd-text-faint);
 }
 
@@ -262,7 +263,7 @@
 .error {
   margin: 0;
   color: var(--rd-err);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   white-space: pre-wrap;
 }
 

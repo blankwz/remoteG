@@ -358,6 +358,9 @@ interface GroupViewProps {
   deviceId: string;
   windowId: string;
   store: SessionStore;
+  /** 是否为激活标签（R13 保活：非激活实例隐藏挂载——ref 注册与视口上报
+   * 必须让位给激活实例，否则工具栏控制器指错标签、Fit 上报 1×1）。 */
+  active: boolean;
   /** HUD 显隐（Ctrl+Shift+H 切换）。 */
   showHud: boolean;
   /** 导出函数注册位（页面层 Ctrl+Shift+S 触发）。 */
@@ -378,6 +381,7 @@ export function WindowGroupView({
   deviceId,
   windowId,
   store,
+  active,
   showHud,
   exportFnRef,
   recordCtlRef,
@@ -722,10 +726,10 @@ export function WindowGroupView({
 
   // 会话打开后聚焦键盘捕获（键盘即生效；点 HUD 控件可正常夺走焦点）
   useEffect(() => {
-    if (phase === "open") {
+    if (phase === "open" && active) {
       textareaRef.current?.focus({ preventScroll: true });
     }
-  }, [phase]);
+  }, [phase, active]);
 
   // 容器尺寸跟踪（Scale 模式计算缩放比；Fit 视口上报另有观察器）
   useEffect(() => {
@@ -734,6 +738,9 @@ export function WindowGroupView({
       return undefined;
     }
     const update = () => {
+      if (el.clientWidth === 0 && el.clientHeight === 0) {
+        return; // 隐藏挂载（保活非激活标签）不采样 0 尺寸
+      }
       setContainerSize({ w: el.clientWidth, h: el.clientHeight });
     };
     update();
@@ -921,7 +928,7 @@ export function WindowGroupView({
 
   // Fit 模式视口上报：初始一次 + ResizeObserver 去抖 + zoom 变化/重开后重报
   useEffect(() => {
-    if (snapshot.fit !== "FIT") {
+    if (snapshot.fit !== "FIT" || !active) {
       return undefined;
     }
     const el = containerRef.current;
@@ -950,7 +957,7 @@ export function WindowGroupView({
       ro.disconnect();
       window.clearTimeout(timer);
     };
-  }, [deviceId, windowId, snapshot.fit, snapshot.zoom, phase]);
+  }, [active, deviceId, windowId, snapshot.fit, snapshot.zoom, phase]);
 
   /** 导出当前根窗口 video+tile 合成画面（原始像素 PNG → 下载目录）。 */
   const exportPng = useCallback(async (): Promise<string> => {
@@ -983,13 +990,16 @@ export function WindowGroupView({
   }, [windowId]);
 
   useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
     exportFnRef.current = exportPng;
     return () => {
       if (exportFnRef.current === exportPng) {
         exportFnRef.current = null;
       }
     };
-  }, [exportFnRef, exportPng]);
+  }, [active, exportFnRef, exportPng]);
 
   // ---- 录屏（T-028 F10）：video+tile 逐帧合成 → MediaRecorder(webm) → 下载目录 ----
 
@@ -1064,6 +1074,9 @@ export function WindowGroupView({
   // （R11 D01——曾直接丢弃 blob，与 REC 徽标「切走会保存」的承诺矛盾），
   // 保存结果经 onRecordingAutoStop 回调页面层复位徽标并 toast 告知路径。
   useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
     if (recordCtlRef) {
       recordCtlRef.current = { start: startRecording, stop: stopRecording };
     }
@@ -1094,10 +1107,13 @@ export function WindowGroupView({
     };
     // windowId 决定保存文件名；startRecording/stopRecording 随之变化时仅
     // 重新注册控制器，不重跑本清理逻辑
-  }, [recordCtlRef, startRecording, stopRecording, windowId]);
+  }, [active, recordCtlRef, startRecording, stopRecording, windowId]);
 
   // 会话操作（只看切换/剪贴板互传）注册到页面层悬浮工具栏（T-028 工具栏迁移）
   useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
     if (sessionCtlRef) {
       sessionCtlRef.current = {
         toggleViewOnly: onToggleViewOnly,
@@ -1111,7 +1127,7 @@ export function WindowGroupView({
         sessionCtlRef.current = null;
       }
     };
-  }, [sessionCtlRef, onToggleViewOnly, onCopyToRemote, onCopyFromRemote, viewOnly]);
+  }, [active, sessionCtlRef, onToggleViewOnly, onCopyToRemote, onCopyFromRemote, viewOnly]);
 
   // ---- 渲染 ----
 

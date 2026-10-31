@@ -1,0 +1,133 @@
+/* 设置页（R13 设计#4 整块）：行式布局，行内 label+control 两栏 */
+.page {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.title {
+  margin: 0 0 16px;
+  font-size: var(--rd-fs-h1);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--rd-text);
+}
+
+.list {
+  max-width: 680px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.label b {
+  font-size: var(--rd-fs-body);
+  color: var(--rd-text);
+  font-weight: 600;
+}
+
+.hint {
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-faint);
+}
+
+.select {
+  flex: none;
+  padding: 5px 10px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-body);
+}
+
+.check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--rd-accent);
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stepBtn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-body);
+  cursor: pointer;
+}
+
+.stepBtn:hover {
+  border-color: var(--rd-accent);
+}
+
+.stepValue {
+  min-width: 44px;
+  text-align: center;
+  font-size: var(--rd-fs-body);
+  color: var(--rd-text);
+}
+
+.phrases {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 320px;
+}
+
+.phrase {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--rd-border);
+  border-radius: 999px;
+  background: var(--rd-bg-deep);
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text);
+}
+
+.phraseDel {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--rd-text-faint);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.phraseDel:hover {
+  color: var(--rd-err);
+}

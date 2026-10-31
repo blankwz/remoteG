@@ -119,6 +119,18 @@ export function Devices() {
   /** 上次连接的设备（「继续上次」快达卡；null = 无历史）。 */
   const [resume, setResume] = useState<{ id: string; name: string; online: boolean } | null>(null);
 
+  /** 打开添加/编辑对话框（记录触发点：effect 里再取已被 autoFocus 抢走）。 */
+  const addTriggerRef = useRef<HTMLElement | null>(null);
+  const openAddDialog = useCallback((prefill?: { addr: string; name: string } | null, edit?: DeviceDto | null) => {
+    addTriggerRef.current = document.activeElement as HTMLElement | null;
+    if (prefill !== undefined && prefill !== null) {
+      setForm({ addr: prefill.addr, code: "", name: prefill.name });
+      setFormError(null);
+    }
+    setEditing(edit ?? null);
+    setShowAdd(true);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const list = await listDevices();
@@ -212,8 +224,7 @@ export function Devices() {
         const msg = errText(e);
         // 指纹不匹配（对端重装/换证书）→ 一键重配对：预填地址打开添加对话框
         if (msg.includes("指纹不匹配")) {
-          setShowAdd(true);
-          setForm({ addr: d.addr, code: "", name: d.name });
+          openAddDialog({ addr: d.addr, name: d.name });
           setFormError(
             "对端证书已变化：可能是对方重装了系统/rd-agent，也可能是网络被劫持。" +
               "若对方确认刚重装过，请对方在托盘点「生成配对码」，你再输入新码完成重新配对；" +
@@ -288,10 +299,8 @@ export function Devices() {
 
   /** 把发现的设备预填进添加对话框（需再输配对码完成配对）。 */
   const onPickDiscovered = useCallback((d: DiscoveredDeviceDto) => {
-    setShowAdd(true);
-    setForm({ addr: d.addr, code: "", name: d.name });
-    setFormError(null);
-  }, []);
+    openAddDialog({ addr: d.addr, name: d.name });
+  }, [openAddDialog]);
 
   const onDisconnect = useCallback(
     async (d: DeviceDto) => {
@@ -368,11 +377,8 @@ export function Devices() {
 
   /** 进入编辑模式（复用添加对话框，隐藏配对码栏）。 */
   const onEdit = useCallback((d: DeviceDto) => {
-    setEditing(d);
-    setShowAdd(true);
-    setForm({ addr: d.addr, code: "", name: d.name });
-    setFormError(null);
-  }, []);
+    openAddDialog({ addr: d.addr, name: d.name }, d);
+  }, [openAddDialog]);
 
   /** Tailscale 链路测试（直达/DERP 中继）。结果标注设备名而非 id。 */
   const onLinkTest = useCallback(async (d: DeviceDto) => {
@@ -459,7 +465,7 @@ export function Devices() {
     if (!showAdd) {
       return undefined;
     }
-    const trigger = document.activeElement as HTMLElement | null;
+    const trigger = addTriggerRef.current;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -522,7 +528,7 @@ export function Devices() {
             <IconScan size={13} />
             {scanning ? "扫描中…" : "扫描局域网"}
           </button>
-          <button type="button" className={styles.addBtn} onClick={() => setShowAdd(true)}>
+          <button type="button" className={styles.addBtn} onClick={() => openAddDialog()}>
             <IconPlus size={13} />
             添加设备
           </button>
@@ -690,7 +696,7 @@ export function Devices() {
             两步开始：对方电脑装好 rd-agent → 在这里添加并输入对方托盘显示的 6 位配对码。
           </p>
           <div className={styles.emptyActions}>
-            <button type="button" className={styles.addBtn} onClick={() => setShowAdd(true)}>
+            <button type="button" className={styles.addBtn} onClick={() => openAddDialog()}>
               手动添加设备
             </button>
             <button

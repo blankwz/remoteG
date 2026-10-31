@@ -35,7 +35,7 @@
 .hint {
   margin: 4px 0 0;
   color: var(--rd-text-faint);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   line-height: 1.7;
 }
 
@@ -45,7 +45,7 @@
   background: none;
   border: none;
   padding: 0;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -71,7 +71,7 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-accent);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   cursor: pointer;
   transition:
     background-color 0.12s ease,
@@ -100,7 +100,7 @@
   border-radius: var(--rd-radius-sm);
   background: rgb(239 111 111 / 8%);
   color: var(--rd-err);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   white-space: pre-wrap;
 }
 
@@ -111,13 +111,13 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-accent-soft);
   color: var(--rd-accent-text);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
 }
 
 .empty {
   margin: 32px 0;
   color: var(--rd-text-faint);
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   line-height: 1.7;
 }
 
@@ -194,7 +194,7 @@
 }
 
 .name {
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   font-weight: 500;
   color: var(--rd-text);
   overflow: hidden;
@@ -204,7 +204,7 @@
 
 .addr {
   font-family: var(--rd-font-mono);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -217,7 +217,7 @@
   border: 1px solid var(--rd-border);
   border-radius: var(--rd-radius-sm);
   font-family: var(--rd-font-mono);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-dim);
 }
 
@@ -233,7 +233,7 @@
   border-radius: var(--rd-radius-sm);
   background: transparent;
   color: var(--rd-text-dim);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   cursor: pointer;
   transition:
     color 0.12s ease,
@@ -291,7 +291,7 @@
 
 .dialogTitle {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--rd-fs-title);
   font-weight: 600;
   color: var(--rd-text);
 }
@@ -303,7 +303,7 @@
 }
 
 .field > span {
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-dim);
 }
 
@@ -314,7 +314,7 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-bg-deep);
   color: var(--rd-text);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   transition: border-color 0.12s ease;
 }
 
@@ -347,17 +347,17 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
 }
 
 .hostLabel {
   color: var(--rd-text-faint);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 
 .hostAddr {
   font-family: var(--rd-font-mono);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   color: var(--rd-text-dim);
   word-break: break-all;
 }
@@ -368,7 +368,7 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-accent-soft);
   color: var(--rd-accent-text);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 
 .pairCode {
@@ -378,7 +378,7 @@
   background: var(--rd-accent-soft);
   color: var(--rd-accent-text);
   font-family: var(--rd-font-mono);
-  font-size: 16px;
+  font-size: var(--rd-fs-title);
   letter-spacing: 2px;
 }
 
@@ -388,7 +388,7 @@
   border-radius: var(--rd-radius-sm);
   background: rgb(240 180 60 / 12%);
   color: rgb(255 214 130);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 
 .hostSpacer {
@@ -404,7 +404,7 @@
   background: var(--rd-bg-deep);
   color: var(--rd-text-dim);
   font-family: var(--rd-font-mono);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -419,7 +419,7 @@
   margin-left: 8px;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--rd-fs-micro);
   font-weight: 400;
   vertical-align: 1px;
 }
@@ -439,7 +439,7 @@
   border-radius: 999px;
   background: var(--rd-accent-soft);
   color: var(--rd-accent-text);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   font-weight: 500;
 }
 
@@ -449,7 +449,7 @@
   border-radius: 999px;
   background: rgb(255 255 255 / 6%);
   color: var(--rd-text-dim);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
 }
 
 /* 删除二次确认（红底白字，原位替换） */
@@ -505,7 +505,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--rd-text-dim);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   text-align: left;
   cursor: pointer;
 }
@@ -535,7 +535,7 @@
   border: none;
   background: none;
   color: var(--rd-accent-text);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   cursor: pointer;
 }
 .helpToggle:hover {
@@ -550,7 +550,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   line-height: 1.7;
   color: var(--rd-text-dim);
   list-style: none;
@@ -577,7 +577,7 @@
   border: 1px solid var(--rd-border);
   border-radius: var(--rd-radius);
   background: var(--rd-card);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   cursor: pointer;
   user-select: none;
 }
@@ -598,7 +598,7 @@
 }
 .fecSub {
   color: var(--rd-text-faint);
-  font-size: 11px;
+  font-size: var(--rd-fs-micro);
 }
 
 /* header 按钮图标化 */
@@ -646,14 +646,14 @@
   border-radius: 999px;
   background: var(--rd-accent);
   color: #fff;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   font-weight: 600;
 }
 .resumeName {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--rd-fs-md);
   font-weight: 600;
   min-width: 0;
   overflow: hidden;
@@ -664,7 +664,7 @@
   margin-left: auto;
   flex: none;
   color: var(--rd-accent-text);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
 }
 
 /* 地址用途标注（Tailscale / 局域网） */
@@ -674,7 +674,7 @@
   padding: 1px 6px;
   border-radius: var(--rd-radius-sm);
   font-family: var(--rd-font-mono);
-  font-size: 10px;
+  font-size: var(--rd-fs-micro);
   background: rgb(255 255 255 / 7%);
   color: var(--rd-text-faint);
   vertical-align: 1px;
@@ -711,14 +711,14 @@
 
 .emptyTitle {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--rd-fs-title);
   font-weight: 600;
   color: var(--rd-text);
 }
 
 .emptyHint {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   line-height: 1.8;
   max-width: 380px;
 }
@@ -737,7 +737,7 @@
   border-radius: 999px;
   background: rgb(239 111 111 / 8%);
   color: var(--rd-err);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   cursor: pointer;
   transition:
     background-color 0.12s ease,
@@ -763,7 +763,7 @@
 /* 标题统计（信息密度 R3） */
 .titleMeta {
   margin-left: 12px;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   font-weight: 400;
   color: var(--rd-text-faint);
   letter-spacing: 0;
@@ -781,7 +781,7 @@
 .scanHeading {
   margin: 0 0 10px;
   padding: 8px 2px 0;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   font-weight: 500;
   color: var(--rd-text-faint);
 }
@@ -801,7 +801,7 @@
   border-radius: 999px;
   background: rgb(229 181 103 / 12%);
   color: var(--rd-warn);
-  font-size: 11px;
+  font-size: var(--rd-fs-micro);
   font-weight: 400;
 }
 
@@ -813,7 +813,7 @@
   border-radius: var(--rd-radius-sm);
   background: var(--rd-bg-deep);
   color: var(--rd-text);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
   transition:
     border-color 0.12s ease,
     box-shadow 0.12s ease;
@@ -828,7 +828,7 @@
 /* 本机被控副标题 */
 .hostSub {
   color: var(--rd-text-faint);
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   font-weight: 400;
 }
 

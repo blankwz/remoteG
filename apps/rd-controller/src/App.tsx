@@ -15,16 +15,19 @@ import { Hud } from "./hud/Hud";
 import { Devices } from "./pages/Devices";
 import { Session } from "./pages/Session";
 import { Windows } from "./pages/Windows";
+import { Settings } from "./pages/Settings";
 import type { DecodeStats } from "./video/decoder";
 import { H264Decoder } from "./video/decoder";
 import { VideoCanvas } from "./video/VideoCanvas";
+import { IconGear } from "./ui/Icon";
 import styles from "./App.module.css";
 
 type Route =
   | { page: "spike" }
   | { page: "devices" }
   | { page: "windows"; deviceId: string }
-  | { page: "session"; deviceId: string };
+  | { page: "session"; deviceId: string }
+  | { page: "settings" };
 
 function parseRoute(hash: string): Route {
   const parts = hash
@@ -36,6 +39,8 @@ function parseRoute(hash: string): Route {
   switch (parts[0]) {
     case "spike":
       return { page: "spike" };
+    case "settings":
+      return { page: "settings" };
     case "windows":
       if (parts[1]) return { page: "windows", deviceId: parts[1] };
       break;
@@ -147,6 +152,7 @@ export default function App() {
       {route.page === "devices" && <Devices />}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
       {route.page === "session" && <Session deviceId={route.deviceId} />}
+      {route.page === "settings" && <Settings />}
     </div>
   );
 }
@@ -165,6 +171,15 @@ function Nav({ active }: { active: Route["page"] }) {
       <div className={styles.navLinks}>
         <a className={linkClass("devices")} href="#/devices">
           设备
+        </a>
+        <a
+          className={linkClass("settings")}
+          href="#/settings"
+          title="设置"
+          aria-label="设置"
+        >
+          <IconGear size={14} />
+          设置
         </a>
         {active === "devices" && lastDeviceId !== null && (
           <>
