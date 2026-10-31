@@ -368,7 +368,7 @@ interface GroupViewProps {
   sessionCtlRef: RefObject<SessionControl | null>;
   /** 录制中标签被关闭：卸载路径自动落盘后回调（path=null 表示保存失败），
    * 页面层据此复位 REC 徽标并告知用户（R11 D01）。 */
-  onRecordingAutoStop: (path: string | null) => void;
+  onRecordingAutoStop: (path: string | null, error?: string) => void;
   /** 根窗口被远端销毁（DESTROYED 事件命中根）→ 页面移除标签。 */
   onRootGone: () => void;
 }
@@ -392,8 +392,8 @@ export function WindowGroupView({
   const [error, setError] = useState<string | null>(null);
   /** 当前是第几次重连尝试（遮罩文案用；0 = 不在重连中）。 */
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
-  /** 只看不控（v0.1/D-013 包4）：变更即重开会话。 */
-  const [viewOnly, setViewOnly] = useState(false);
+  /** 只看不控（R12 迁入 SessionStore：随标签持久 + 快照驱动高亮）。 */
+  const viewOnly = snapshot.viewOnly;
   /** Agent 会话级状态横幅（锁屏/暂停/退出；null = 不显示）。 */
   const [banner, setBanner] = useState<string | null>(null);
   /** 被控机本机有人在用（D-013 包5）：注入已被 Agent 挂起，显示禁止光标。 */
@@ -656,8 +656,9 @@ export function WindowGroupView({
     shiftKey: e.shiftKey,
     altKey: e.altKey,
     metaKey: e.metaKey,
-    // React 合成事件类型未暴露 isComposing，从原生事件读取
+    // React 合成事件类型未暴露 isComposing/AltGraph，从原生事件读取
     isComposing: e.nativeEvent.isComposing,
+    altGraph: e.nativeEvent.getModifierState("AltGraph"),
   });
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -834,8 +835,8 @@ export function WindowGroupView({
    * 误触恢复代价是第二次重开）。Agent 侧 open 参数恒 false，客户端不发
    * 输入即等效只看。 */
   const onToggleViewOnly = useCallback(() => {
-    setViewOnly((v) => !v);
-  }, []);
+    store.setViewOnly(!snapshot.viewOnly);
+  }, [store, snapshot.viewOnly]);
 
   const onCopyToRemote = useCallback(async (): Promise<void> => {
     // 本机剪贴板走 Rust 侧（WebView 的 navigator.clipboard 在 Tauri 下无权限）；
@@ -1087,7 +1088,7 @@ export function WindowGroupView({
               return saveFileToDownloads(`rd-rec-${windowId}-${stamp}.webm`, bytes);
             })
             .then((path) => onRecordingAutoStopRef.current(path))
-            .catch(() => onRecordingAutoStopRef.current(null));
+            .catch((e: unknown) => onRecordingAutoStopRef.current(null, errText(e)));
         }
       }
     };
@@ -1302,17 +1303,19 @@ export function WindowGroupView({
       ref={containerRef}
       style={hostBusy ? { cursor: "not-allowed" } : undefined}
     >
-      {banner !== null && <div className={styles.banner}>{banner}</div>}
+      {banner !== null && (
+        <div className={styles.banner} aria-live="polite">{banner}</div>
+      )}
       {reconnectedFlash && (
-        <div className={styles.reconnectedFlash}>已重新连接，画面恢复中</div>
+        <div className={styles.reconnectedFlash} aria-live="polite">已重新连接，画面恢复中</div>
       )}
       {viewOnly && (
-        <div className={styles.viewOnlyBar}>
-          只看模式：键鼠不会发送到远端，画面可正常观看。点工具栏「只看」恢复控制。
+        <div className={styles.viewOnlyBar} aria-live="polite">
+          只看模式：键鼠不会发送到远端（含锁屏/安全键/常用语），画面可正常观看。点工具栏「只看」恢复控制。
         </div>
       )}
       {hostBusy && (
-        <div className={styles.hostBusyBar}>对方正在使用电脑，你的输入已暂停（对方停手约 2 秒后自动恢复）</div>
+        <div className={styles.hostBusyBar} aria-live="polite">对方正在使用电脑，你的输入已暂停（对方停手约 2 秒后自动恢复）</div>
       )}
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
         <div

@@ -44,18 +44,19 @@ const DEVICES = [
   },
 ];
 
-/** 可捕获窗口（WindowDto）。 */
+/** 可捕获窗口（WindowDto）：坐标模拟真实桌面错落布局（1920×1080 基准，
+ * 桌面地图按几何摆放——曾全屏堆叠使地图退化）。 */
 const WINDOWS = [
-  { id: "3301", title: "main.ts - rd-controller - Visual Studio Code", process: "Code.exe", pid: 4021, icon: icon("#2f9e8f", "V"), x: 0, y: 0, w: 2560, h: 1392, dpi: 1.5, resizable: true, minimized: false },
-  { id: "3302", title: "rd - 窗口级远程控制 - 汇报材料.docx - Word", process: "WINWORD.EXE", pid: 8812, icon: icon("#2b579a", "W"), x: 0, y: 0, w: 1728, h: 1092, dpi: 1.5, resizable: true, minimized: false },
-  { id: "3303", title: "Q3 营收报表.xlsx - Excel", process: "EXCEL.EXE", pid: 7310, icon: icon("#217346", "X"), x: 0, y: 0, w: 1728, h: 1092, dpi: 1.5, resizable: true, minimized: false },
-  { id: "3304", title: "产品研发一群 - 企业微信", process: "WXWork.exe", pid: 9912, icon: icon("#3d7eff", "企"), x: 0, y: 0, w: 1160, h: 1392, dpi: 1.5, resizable: true, minimized: false },
-  { id: "3305", title: "rd-final.log - 记事本", process: "Notepad.exe", pid: 6230, icon: icon("#767676", "N"), x: 0, y: 0, w: 980, h: 720, dpi: 1.0, resizable: true, minimized: false },
-  { id: "3306", title: "Windows Terminal", process: "WindowsTerminal.exe", pid: 4402, icon: icon("#4d4d4d", ">"), x: 0, y: 0, w: 1400, h: 900, dpi: 1.5, resizable: true, minimized: false },
-  { id: "3307", title: "New Tab - Chrome", process: "chrome.exe", pid: 2210, icon: icon("#4285f4", "C"), x: 0, y: 0, w: 1600, h: 980, dpi: 1.0, resizable: true, minimized: false },
-  { id: "3308", title: "OBS 31.0 - 直播推流中", process: "obs64.exe", pid: 5511, icon: icon("#1f1f23", "O"), x: 0, y: 0, w: 1920, h: 1080, dpi: 1.0, resizable: true, minimized: false },
-  { id: "3309", title: "Steam", process: "steam.exe", pid: 3310, icon: icon("#171a21", "S"), x: 0, y: 0, w: 1440, h: 900, dpi: 1.0, resizable: true, minimized: true },
-  { id: "3310", title: "Postman", process: "Postman.exe", pid: 8899, icon: icon("#ff6c37", "P"), x: 0, y: 0, w: 1600, h: 980, dpi: 1.0, resizable: true, minimized: true },
+  { id: "3301", title: "main.ts - rd-controller - Visual Studio Code", process: "Code.exe", pid: 4021, icon: icon("#2f9e8f", "V"), x: 0, y: 0, w: 1280, h: 800, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3302", title: "rd - 窗口级远程控制 - 汇报材料.docx - Word", process: "WINWORD.EXE", pid: 8812, icon: icon("#2b579a", "W"), x: 1320, y: 0, w: 600, h: 900, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3303", title: "Q3 营收报表.xlsx - Excel", process: "EXCEL.EXE", pid: 7310, icon: icon("#217346", "X"), x: 0, y: 840, w: 1180, h: 240, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3304", title: "产品研发一群 - 企业微信", process: "WXWork.exe", pid: 9912, icon: icon("#3d7eff", "企"), x: 1960, y: 120, w: 480, h: 800, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3305", title: "rd-final.log - 记事本", process: "Notepad.exe", pid: 6230, icon: icon("#767676", "N"), x: 1320, y: 940, w: 560, h: 140, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3306", title: "Windows Terminal", process: "WindowsTerminal.exe", pid: 4402, icon: icon("#4d4d4d", ">"), x: 1220, y: 320, w: 700, h: 560, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3307", title: "New Tab - Chrome", process: "chrome.exe", pid: 2210, icon: icon("#4285f4", "C"), x: 2400, y: 500, w: 640, h: 520, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3308", title: "OBS 31.0 - 直播推流中", process: "obs64.exe", pid: 5511, icon: icon("#1f1f23", "O"), x: 120, y: 180, w: 900, h: 560, dpi: 1.0, resizable: true, minimized: false },
+  { id: "3309", title: "Steam", process: "steam.exe", pid: 3310, icon: icon("#171a21", "S"), x: 1500, y: 200, w: 800, h: 500, dpi: 1.0, resizable: true, minimized: true },
+  { id: "3310", title: "Postman", process: "Postman.exe", pid: 8899, icon: icon("#ff6c37", "P"), x: 300, y: 300, w: 760, h: 500, dpi: 1.0, resizable: true, minimized: true },
 ];
 
 const HOST_STATUS = {
@@ -91,8 +92,9 @@ export async function mockInvoke<T>(
     pair_device: DEVICES[0],
     edit_device: DEVICES[0],
     list_windows: WINDOWS,
-    // demo 无真实系统剪贴板通道：返回空串 → 页面层如实报「剪贴板是空的」（D03）
-    local_clipboard_read: "",
+    // demo 无真实系统剪贴板通道：返回演示文本让正向流程走通（R12 排错#5：
+    // 曾恒返空串，把「demo 无通道」错报成「你的剪贴板是空的」甩锅用户）
+    local_clipboard_read: "（demo 演示文本：桌面端可粘贴真实剪贴板）",
     local_clipboard_write: true,
   };
   await new Promise((r) => setTimeout(r, 80));

@@ -45,6 +45,9 @@ export interface SessionSnapshot {
   readonly stats: StatsDto | null;
   /** open_window 的 ack（codec/level/尺寸）。 */
   readonly ack: OpenWindowAckDto | null;
+  /** 只看不控（R12：随标签持久——曾放组件 state，切标签重挂载即静默失效，
+   * 画面外假锁、键鼠实际通向远端；快照驱动使工具栏/侧栏高亮即时同步）。 */
+  readonly viewOnly: boolean;
 }
 
 /** 会话快照的只读空态（无激活标签时占位）。 */
@@ -58,6 +61,7 @@ export const EMPTY_SNAPSHOT: SessionSnapshot = {
   notice: null,
   stats: null,
   ack: null,
+  viewOnly: false,
 };
 
 /** effectiveDpr = devicePixelRatio / zoom（任务卡步骤 5）；zoom <= 0 视为 1。 */
@@ -204,6 +208,11 @@ export class SessionStore {
   /** 设置缩放倍率。 */
   setZoom(zoom: number): void {
     this.set({ ...this.state, zoom });
+  }
+
+  /** 切换只看不控（随标签持久，快照通知订阅者）。 */
+  setViewOnly(viewOnly: boolean): void {
+    this.set({ ...this.state, viewOnly });
   }
 }
 

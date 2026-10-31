@@ -69,6 +69,9 @@ interface Props {
   /** 激活标签是否为窗口组（R11 交互#5：终端标签下隐藏只看/截屏/录屏/
    * 剪贴板等窗口专属操作——可点但必错的假可用性）。 */
   windowActions: boolean;
+  /** 只看态（R12：设备级注入通道一并停发——锁屏/安全键/常用语/虚拟按键
+   * 置灰，与「键鼠停发」的承诺对齐）。 */
+  inputLocked: boolean;
 }
 
 export function FloatingToolbar(props: Props) {
@@ -79,7 +82,7 @@ export function FloatingToolbar(props: Props) {
 
   // 点外/Escape 关闭弹出面板——协议统一走 useDismiss（R11 D08 唯一出口；
   // 早年不依赖 onMouseLeave——鼠标出界丢输入，Walter R2）
-  useDismiss(panel !== "none", rootRef, () => setPanel("none"));
+  useDismiss(panel !== "none", rootRef, () => setPanel("none"), { trap: true });
 
   if (!expanded) {
     return (
@@ -141,12 +144,14 @@ export function FloatingToolbar(props: Props) {
         icon={<IconLock size={16} />}
         label="锁屏"
         title="远端锁屏（Ctrl+Shift+L，3 秒内再点确认）"
+        disabled={props.inputLocked}
         onClick={props.onLockScreen}
       />
       <ToolBtn
         icon={<IconKeyboard size={16} />}
         label="安全键"
         title="向远端发送 Ctrl+Alt+Del（远端卡死时呼出系统安全界面/任务管理器）"
+        disabled={props.inputLocked}
         onClick={props.onCtrlAltDel}
       />
       <Sep />
@@ -203,6 +208,7 @@ function ToolBtn({
   label,
   title,
   active,
+  disabled,
   onClick,
   ariaExpanded,
   ariaHaspopup,
@@ -211,16 +217,19 @@ function ToolBtn({
   label: string;
   title: string;
   active?: boolean;
+  disabled?: boolean;
   onClick: () => void;
   /** 弹出面板触发钮的展开态语义（R11 D14）。 */
   ariaExpanded?: boolean;
   ariaHaspopup?: "menu";
 }) {
+  const hint = disabled ? `${title}（只看中：恢复控制后可用）` : title;
   return (
     <button
       type="button"
       className={`${styles.toolBtn} ${active ? styles.toolBtnOn : ""}`}
-      title={title}
+      title={hint}
+      disabled={disabled}
       onClick={onClick}
       aria-expanded={ariaExpanded}
       aria-haspopup={ariaHaspopup}
@@ -245,20 +254,23 @@ function MorePanel(
     label: string;
     hint: string;
     active?: boolean;
+    disabled?: boolean;
     on: () => void;
   }> = [
     {
       key: "phrases",
       icon: <IconMessage size={15} />,
       label: "常用语",
-      hint: "常用短语一键发送",
+      hint: props.inputLocked ? "只看中：恢复控制后可用" : "常用短语一键发送",
+      disabled: props.inputLocked,
       on: props.onPhrases,
     },
     {
       key: "vkeys",
       icon: <IconKeyboard size={15} />,
       label: "虚拟按键",
-      hint: "组合键 / 特殊键",
+      hint: props.inputLocked ? "只看中：恢复控制后可用" : "组合键 / 特殊键",
+      disabled: props.inputLocked,
       on: props.onVkeys,
     },
     // 剪贴板走窗口组控制器，终端标签下不可用（交互#5：不亮假按钮）
@@ -312,7 +324,11 @@ function MorePanel(
           key={it.key}
           type="button"
           className={`${styles.moreItem} ${it.active ? styles.moreItemOn : ""}`}
+          disabled={it.disabled}
           onClick={() => {
+            if (it.disabled) {
+              return;
+            }
             it.on();
             if (it.key === "phrases" || it.key === "vkeys") {
               return; // 面板切换由对应 panel 接管

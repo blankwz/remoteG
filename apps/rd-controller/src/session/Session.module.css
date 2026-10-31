@@ -1025,3 +1025,8 @@
 .stageWaitingRetry:hover {
   border-color: var(--rd-accent);
 }
+
+/* 侧栏展开时工具栏行随画布右移（R12 设计#2：bar 居中基准=画布中线而非窗口中线） */
+.toolbarRowShift {
+  margin-left: 220px;
+}

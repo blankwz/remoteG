@@ -170,6 +170,8 @@ export interface KeyInput {
   altKey: boolean;
   metaKey: boolean;
   isComposing: boolean;
+  /** AltGr（欧陆布局）：Chrome 上报为 Ctrl+Alt 同按——保留组合必须让路。 */
+  readonly altGraph?: boolean;
 }
 
 /** 键事件处理结果，视图据此决定 preventDefault。 */
@@ -190,6 +192,9 @@ export type KeyAction =
  * 保留组合不下发远端——否则页面层热键与远端注入各走一次（R11 双入口回归）。
  */
 export function isReservedCombo(k: KeyInput): boolean {
+  if (k.altGraph) {
+    return false; // AltGr+数字是欧陆布局的 @#~ 等字符，不劫持
+  }
   if (k.metaKey || k.altKey) {
     // Ctrl+Shift+* 组合不含 Alt；Ctrl+Alt+digit 见下（Shift 必须未按）
     return k.ctrlKey && k.altKey && !k.shiftKey && RESERVED_CTRL_ALT_DIGIT.test(k.code);
@@ -207,7 +212,7 @@ export function isReservedCombo(k: KeyInput): boolean {
 }
 
 /** Ctrl+Alt+1..9（切标签保留组合）。 */
-const RESERVED_CTRL_ALT_DIGIT = /^Digit[1-9]$/;
+const RESERVED_CTRL_ALT_DIGIT = /^(Digit|Numpad)[1-9]$/;
 
 /** 键盘 / IME 映射器：跟踪按下集合，失焦时全部抬起防远端卡键。 */
 export class InputMapper {

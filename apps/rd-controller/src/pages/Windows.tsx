@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectDevice,
   listDevices,
+  recordConnect,
   rememberLastDeviceId,
 } from "../api/devices";
 import {
@@ -83,6 +84,46 @@ export function filterWindows(
   );
 }
 
+/**
+ * 桌面地图布局（R12 设计 P0：窗口页从「进程列表」升级为「那台电脑的桌面」
+ * ——WindowDto 已有 x/y/w/h 几何，零后端拿 80% 空间记忆效果）。
+ * 虚拟桌面固定 1920×1080 基准，窗口矩形按比例映射为百分比定位（越界裁剪）。
+ */
+export interface DesktopRect {
+  readonly id: string;
+  readonly title: string;
+  readonly process: string;
+  readonly minimized: boolean;
+  readonly leftPct: number;
+  readonly topPct: number;
+  readonly widthPct: number;
+  readonly heightPct: number;
+}
+
+/** 虚拟桌面基准（主流单屏；多屏超界窗口裁剪到界内）。 */
+const VIRTUAL_DESKTOP = { w: 1920, h: 1080 };
+
+export function desktopMap(
+  windows: readonly WindowDto[],
+): readonly DesktopRect[] {
+  return windows.map((w) => {
+    const left = Math.min(Math.max(0, w.x), VIRTUAL_DESKTOP.w - 80);
+    const top = Math.min(Math.max(0, w.y), VIRTUAL_DESKTOP.h - 60);
+    const width = Math.min(Math.max(120, w.w), VIRTUAL_DESKTOP.w - left);
+    const height = Math.min(Math.max(80, w.h), VIRTUAL_DESKTOP.h - top);
+    return {
+      id: w.id,
+      title: w.title.length > 0 ? w.title : "(无标题窗口)",
+      process: w.process,
+      minimized: w.minimized,
+      leftPct: (left / VIRTUAL_DESKTOP.w) * 100,
+      topPct: (top / VIRTUAL_DESKTOP.h) * 100,
+      widthPct: (width / VIRTUAL_DESKTOP.w) * 100,
+      heightPct: (height / VIRTUAL_DESKTOP.h) * 100,
+    };
+  });
+}
+
 /** “新建终端”下拉可用的 shell（?term=<shell> 由会话页 T-021/T-023 消费）。 */
 const SHELLS = [
   { id: "pwsh", label: "PowerShell" },
@@ -119,6 +160,8 @@ const SKELETONS = [1, 2, 3, 4, 5, 6, 7, 8];
 export function Windows({ deviceId }: { deviceId: string }) {
   const [windows, setWindows] = useState<readonly WindowDto[]>([]);
   const [query, setQuery] = useState("");
+  /** 视图切换（R12 设计 P0：默认桌面地图，列表降为次视图）。 */
+  const [view, setView] = useState<"map" | "list">("map");
   const [status, setStatus] = useState<LoadStatus>("connecting");
   /** 当前设备名（标题上下文：我在谁的窗口里）。 */
   const [deviceName, setDeviceName] = useState<string | null>(null);
@@ -198,6 +241,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
       setStatus("loading");
       await loadList(seq);
       rememberLastDeviceId(deviceId);
+      recordConnect(deviceId);
       setStatus("ready");
       retryRef.current = 0;
     } catch (e) {
@@ -272,6 +316,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
   }, []);
 
   const filtered = filterWindows(windows, query);
+  const mapRects = desktopMap(filtered);
 
   return (
     <main className={styles.page}>
@@ -388,14 +433,78 @@ export function Windows({ deviceId }: { deviceId: string }) {
       )}
 
       {status === "ready" && windows.length > 0 && (
-        <p className={styles.countLine}>
-          {windows.length} 个窗口
-          {windows.some((w) => w.minimized) &&
-            ` · ${windows.filter((w) => w.minimized).length} 个已最小化`}
-        </p>
+        <div className={styles.listHead}>
+          <p className={styles.countLine}>
+            {windows.length} 个窗口
+            {windows.some((w) => w.minimized) &&
+              ` · ${windows.filter((w) => w.minimized).length} 个已最小化`}
+          </p>
+          <div className={styles.viewToggle} role="group" aria-label="视图切换">
+            <button
+              type="button"
+              className={view === "map" ? styles.viewBtnOn : styles.viewBtn}
+              aria-pressed={view === "map"}
+              onClick={() => setView("map")}
+            >
+              桌面
+            </button>
+            <button
+              type="button"
+              className={view === "list" ? styles.viewBtnOn : styles.viewBtn}
+              aria-pressed={view === "list"}
+              onClick={() => setView("list")}
+            >
+              列表
+            </button>
+          </div>
+        </div>
       )}
 
-      <ul className={styles.grid}>
+      {status === "ready" && view === "map" && windows.length > 0 && filtered.length > 0 && (
+        <div className={styles.desktopMap} aria-label="远端桌面窗口布局（点击窗口打开会话）">
+          {mapRects.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              className={styles.mapWin}
+              data-minimized={r.minimized}
+              style={{
+                left: `${r.leftPct}%`,
+                top: `${r.topPct}%`,
+                width: `${r.widthPct}%`,
+                height: `${r.heightPct}%`,
+              }}
+              title={`${r.title} — 打开远程会话`}
+              onClick={() => {
+                const w = filtered.find((x) => x.id === r.id);
+                if (w !== undefined) {
+                  openWindow(w);
+                }
+              }}
+            >
+              <span className={styles.mapWinBar}>
+                {(() => {
+                  const w = filtered.find((x) => x.id === r.id);
+                  const icon = w?.icon ?? null;
+                  return icon !== null ? (
+                    <img src={icon} alt="" width={14} height={14} />
+                  ) : (
+                    <span className={styles.mapWinLetter}>
+                      {fallbackIcon(r.process)}
+                    </span>
+                  );
+                })()}
+                <span className={styles.mapWinTitle}>{r.title}</span>
+              </span>
+              {r.minimized && (
+                <span className={styles.mapWinMin}>最小化</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <ul className={styles.grid} style={status === "ready" && view === "map" ? { display: "none" } : undefined}>
         {filtered.map((w) => (
           <li key={w.id}>
             <button

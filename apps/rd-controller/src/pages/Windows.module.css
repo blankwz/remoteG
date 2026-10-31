@@ -377,3 +377,98 @@
   color: var(--rd-text-faint);
   font-size: 12px;
 }
+
+/* ---- 桌面地图（R12 设计 P0：几何真实的空间记忆，列表降为次视图） ---- */
+.listHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.viewToggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-panel);
+}
+.viewBtn,
+.viewBtnOn {
+  padding: 3px 12px;
+  border: none;
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-dim);
+  cursor: pointer;
+}
+.viewBtnOn {
+  background: var(--rd-accent);
+  color: #fff;
+}
+.desktopMap {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  margin: 0 0 16px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: var(--rd-radius);
+  background:
+    radial-gradient(ellipse at 30% 20%, rgb(61 126 255 / 6%), transparent 60%),
+    var(--rd-bg-deep);
+  overflow: hidden;
+}
+.mapWin {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: var(--rd-radius-sm);
+  background: linear-gradient(180deg, rgb(255 255 255 / 7%), rgb(255 255 255 / 3%));
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  color: var(--rd-text);
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+  transition:
+    border-color var(--rd-dur-fast) var(--rd-ease),
+    box-shadow var(--rd-dur-fast) var(--rd-ease);
+}
+.mapWin:hover {
+  border-color: var(--rd-accent);
+  box-shadow: var(--rd-shadow);
+  z-index: 2;
+}
+.mapWin[data-minimized="true"] {
+  opacity: 0.55;
+}
+.mapWinBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.mapWinLetter {
+  flex: none;
+  font-size: var(--rd-fs-micro);
+  font-weight: 600;
+  color: var(--rd-text-dim);
+}
+.mapWinTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-dim);
+}
+.mapWinMin {
+  flex: none;
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  font-size: 10px;
+  color: var(--rd-text-faint);
+}

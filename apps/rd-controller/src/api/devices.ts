@@ -192,3 +192,64 @@ export async function probeDecodeCaps(): Promise<DecodeCapsDto> {
     h264High444: high444.supported === true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// 连接历史（R12 设计#3：设备行「上次连接」时间感；localStorage 先例 lastDeviceId）
+// ---------------------------------------------------------------------------
+
+const CONNECT_LOG_KEY = "rd.connectLog";
+const CONNECT_LOG_MAX = 50;
+
+interface ConnectLogEntry {
+  readonly id: string;
+  readonly ts: number;
+}
+
+function readConnectLog(): readonly ConnectLogEntry[] {
+  try {
+    const raw = window.localStorage.getItem(CONNECT_LOG_KEY);
+    if (raw === null) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ConnectLogEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 记录一次成功连接（进入窗口页即记；重复连同一设备只更新时刻）。 */
+export function recordConnect(deviceId: string): void {
+  try {
+    const next = [
+      { id: deviceId, ts: Date.now() },
+      ...readConnectLog().filter((e) => e.id !== deviceId),
+    ].slice(0, CONNECT_LOG_MAX);
+    window.localStorage.setItem(CONNECT_LOG_KEY, JSON.stringify(next));
+  } catch {
+    // 存储不可用仅失去时间感，不致命
+  }
+}
+
+/** 上次成功连接时刻；无记录返回 null。 */
+export function lastConnectedAt(deviceId: string): number | null {
+  return readConnectLog().find((e) => e.id === deviceId)?.ts ?? null;
+}
+
+/** 相对时间人话（刚刚/n 分钟前/n 小时前/n 天前/更早）。 */
+export function relativeTime(ts: number): string {
+  const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (secs < 60) {
+    return "刚刚";
+  }
+  if (secs < 3600) {
+    return `${Math.floor(secs / 60)} 分钟前`;
+  }
+  if (secs < 86400) {
+    return `${Math.floor(secs / 3600)} 小时前`;
+  }
+  if (secs < 86400 * 30) {
+    return `${Math.floor(secs / 86400)} 天前`;
+  }
+  return "更早";
+}

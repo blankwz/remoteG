@@ -111,7 +111,12 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [termMenuOpen, setTermMenuOpen] = useState(false);
   /** 下拉容器（Esc/点外关闭协议，R11 D08——唯一出口 useDismiss）。 */
   const termMenuRef = useRef<HTMLDivElement>(null);
-  useDismiss(termMenuOpen, termMenuRef, useCallback(() => setTermMenuOpen(false), []));
+  useDismiss(
+    termMenuOpen,
+    termMenuRef,
+    useCallback(() => setTermMenuOpen(false), []),
+    { menu: true },
+  );
   /** 录制开始时刻（REC 常驻指示计时用；null = 未在录）。 */
   const [recordingSince, setRecordingSince] = useState<number | null>(null);
   /** 快捷键速查浮层（? 呼出）。 */
@@ -120,9 +125,14 @@ export function Session({ deviceId }: { deviceId: string }) {
   useEffect(() => {
     helpOpenRef.current = helpOpen;
   }, [helpOpen]);
+  /** 速查浮层（? 呼出）：trap + Esc + 焦点还原，协议同 useDismiss。 */
+  const helpCardRef = useRef<HTMLDivElement>(null);
+  useDismiss(helpOpen, helpCardRef, useCallback(() => setHelpOpen(false), []), {
+    trap: true,
+  });
   /** REC 指示的当前时长文本（每秒刷新）。 */
   const [recElapsed, setRecElapsed] = useState("");
-  /** 录屏状态（T-028 F10）。 */
+  /** 录屏状态（T-028 F10；切换/关闭标签自动停录并保存，刷新/关页丢失）。 */
   const [recordingOn, setRecordingOn] = useState(false);
   /** 锁屏待确认时刻（3 秒内再点确认；快捷键 effect 的真状态依赖）。 */
   const [lockArmedAt, setLockArmedAt] = useState(0);
@@ -246,7 +256,7 @@ export function Session({ deviceId }: { deviceId: string }) {
   // URL ?open=<windowId> / ?term=<shell>：挂载与 hash 变化时解析并自动打开
   // 标签（打开均幂等，重复 hash 事件无副作用）。App 路由剥离查询串，同设备
   // 换开窗口只体现为 hash 变化，本页自行监听以捕获。
-  const lastHandledHashRef = useRef(" ");
+  const lastHandledHashRef = useRef("0000");
   useEffect(() => {
     const openFromHash = () => {
       if (window.location.hash === lastHandledHashRef.current) {
@@ -341,9 +351,12 @@ export function Session({ deviceId }: { deviceId: string }) {
   // 否则热键既下发远端又本地触发，R11 双入口回归）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ctrl+Alt+1..9 切标签（保留表同步判定，不下发远端）
+      // Ctrl+Alt+1..9 切标签（保留表同步判定，不下发远端）；AltGr 让路
       if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
-        if (/^Digit[1-9]$/.test(e.code)) {
+        if (e.getModifierState("AltGraph")) {
+          return;
+        }
+        if (/^(Digit|Numpad)[1-9]$/.test(e.code)) {
           const target = tabs[Number(e.code.slice(5)) - 1];
           if (target !== undefined) {
             e.preventDefault();
@@ -418,6 +431,14 @@ export function Session({ deviceId }: { deviceId: string }) {
   }, [tabs]);
 
   // ── 工具栏操作（T-028） ──
+  /** 只看态设备级注入通道总闸（快照驱动，R12 排错#1：曾四条通道照常下发）。 */
+  function viewOnlyNow(): boolean {
+    if (snapshot.viewOnly) {
+      showToast("只看中：键鼠停发，恢复控制后可用", true);
+      return true;
+    }
+    return false;
+  }
   async function doScreenshot() {
     // 静默失败 = 用户视角的「没反应」（2026-10-27 反馈）——所有路径都给提示
     if (!exportFnRef.current) {
@@ -466,6 +487,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     else await document.documentElement.requestFullscreen();
   }
   async function doLockScreen() {
+    if (viewOnlyNow()) {
+      return;
+    }
     if (Date.now() - lockArmedAt > 3000) {
       setLockArmedAt(Date.now());
       showToast("再次点击「锁屏」确认执行（3 秒内）", false);
@@ -481,6 +505,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     }
   }
   async function doCtrlAltDel() {
+    if (viewOnlyNow()) {
+      return;
+    }
     try {
       const m = await import("../api/input");
       await m.textInput(deviceId, "__RD_CAD__");
@@ -490,6 +517,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     }
   }
   async function doSendText(text: string) {
+    if (viewOnlyNow()) {
+      return;
+    }
     try {
       const m = await import("../api/input");
       await m.textInput(deviceId, text);
@@ -499,6 +529,9 @@ export function Session({ deviceId }: { deviceId: string }) {
     }
   }
   async function doSendCombo(keys: string[]) {
+    if (viewOnlyNow()) {
+      return;
+    }
     try {
       const { keyEvent } = await import("../api/input");
       const SCAN: Record<string, [number, boolean]> = {
@@ -581,11 +614,13 @@ export function Session({ deviceId }: { deviceId: string }) {
   /** 录制中标签被关闭：WindowGroupView 卸载路径自动落盘后回调（R11 D01）。
    * 复位 REC 徽标并如实告知保存结果——曾假承诺「切走会保存」实则丢文件。 */
   const handleRecordingAutoStop = useCallback(
-    (path: string | null) => {
+    (path: string | null, error?: string) => {
       setRecordingOn(false);
       setRecordingSince(null);
       showToast(
-        path !== null ? `标签已关闭，录制已自动保存：${path}` : "标签已关闭，录制没能保存成功",
+        path !== null
+          ? `已切换/关闭标签，录制已自动保存：${path}`
+          : `已切换/关闭标签，录制没能保存成功${error !== undefined ? `：${error}` : ""}`,
         path === null,
       );
     },
@@ -676,11 +711,29 @@ export function Session({ deviceId }: { deviceId: string }) {
         )}
       </div>
 
-      <nav className={styles.tabs} role="tablist" aria-label="会话标签">
+      <nav
+        className={styles.tabs}
+        role="tablist"
+        aria-label="会话标签"
+        tabIndex={-1}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") {
+            return;
+          }
+          e.preventDefault();
+          const idx = tabs.findIndex((t) => t.id === activeId);
+          const delta = e.key === "ArrowRight" ? 1 : -1;
+          const next = tabs[(idx + delta + tabs.length) % tabs.length];
+          if (next !== undefined) {
+            setActiveId(next.id);
+          }
+        }}
+      >
         {tabs.map((tab) =>
           tab.kind === "term" ? (
             <TabButton
               key={tab.id}
+              tabId={tab.id}
               title={tab.title ?? `终端 ${shellLabel(tab.shell)}`}
               closeLabel={`关闭 终端 ${shellLabel(tab.shell)}`}
               active={tab.id === activeId}
@@ -691,6 +744,7 @@ export function Session({ deviceId }: { deviceId: string }) {
             <WindowTabButton
               key={tab.id}
               tab={tab}
+              tabId={tab.id}
               fallbackTitle={
                 titleCacheRef.current.get(tab.id) ?? `窗口 ${tab.id}`
               }
@@ -761,7 +815,13 @@ export function Session({ deviceId }: { deviceId: string }) {
       )}
 
       {activeTab !== null && (
-        <div className={styles.toolbarRow}>
+        <div
+          className={
+            sidebarOpen
+              ? `${styles.toolbarRow} ${styles.toolbarRowShift}`
+              : styles.toolbarRow
+          }
+        >
           <FloatingToolbar
             windowActions={activeWindow !== null}
             onScreenshot={() => void doScreenshot()}
@@ -775,7 +835,8 @@ export function Session({ deviceId }: { deviceId: string }) {
             onRecordToggle={() => void doRecordToggle()}
             recordingOn={recordingOn}
             onToggleViewOnly={doToggleViewOnly}
-            viewOnly={sessionCtlRef.current?.viewOnly ?? false}
+            viewOnly={snapshot.viewOnly}
+            inputLocked={snapshot.viewOnly}
             onCopyToRemote={() => void doCopy("to")}
             onCopyFromRemote={() => void doCopy("from")}
             onToggleHud={() => setHudVisible((v) => !v)}
@@ -836,13 +897,17 @@ export function Session({ deviceId }: { deviceId: string }) {
             deviceId={deviceId}
             openIds={new Set(tabs.filter((t) => t.kind === "window").map((t) => t.id))}
             activeId={activeId}
-            viewOnly={sessionCtlRef.current?.viewOnly ?? false}
+            viewOnly={snapshot.viewOnly}
             onSelect={setActiveId}
             onOpen={openTab}
             onCloseTab={closeTab}
           />
         )}
-        <div className={styles.stageArea}>
+        <div
+          className={styles.stageArea}
+          role="tabpanel"
+          aria-labelledby={activeId !== null ? `rd-tab-${activeId}` : undefined}
+        >
         {helpOpen && (
           <div
             className={styles.helpOverlay}
@@ -850,7 +915,14 @@ export function Session({ deviceId }: { deviceId: string }) {
             aria-label="快捷键速查"
             onClick={() => setHelpOpen(false)}
           >
-            <div className={styles.helpCard}>
+            <div
+              ref={helpCardRef}
+              className={styles.helpCard}
+              role="dialog"
+              aria-modal="true"
+              aria-label="快捷键速查"
+              onClick={(e) => e.stopPropagation()}
+            >
               <b>快捷键</b>
               <ul>
                 <li><kbd>Ctrl+Alt+1..9</kbd> 切换会话标签</li>
@@ -866,7 +938,7 @@ export function Session({ deviceId }: { deviceId: string }) {
           </div>
         )}
         {recordingOn && (
-          <div className={styles.recBadge} title="正在录制远程画面（关闭本标签前会先自动保存）">
+          <div className={styles.recBadge} title="正在录制：切换或关闭标签会自动停录并保存；刷新/关闭页面将丢失本段录像">
             <span className={styles.recDot} aria-hidden="true" />
             REC {recElapsed}
           </div>
@@ -887,7 +959,7 @@ export function Session({ deviceId }: { deviceId: string }) {
             className={
               toastError ? `${styles.toastAnchor} ${styles.toastError}` : styles.toastAnchor
             }
-            role="status"
+            role={toastError ? "alert" : "status"}
           >
             {toast}
           </div>
@@ -947,6 +1019,7 @@ export function Session({ deviceId }: { deviceId: string }) {
 }
 
 interface TabButtonProps {
+  tabId: string;
   title: string;
   closeLabel: string;
   active: boolean;
@@ -957,6 +1030,7 @@ interface TabButtonProps {
 /** 标签按钮（两类标签共用外观）。容器 div + 两枚同级真 button——
  * button 内嵌 span[role=button] 是 nested-interactive 违规（R11 D15）。 */
 function TabButton({
+  tabId,
   title,
   closeLabel,
   active,
@@ -967,6 +1041,7 @@ function TabButton({
     <div className={active ? styles.tabActive : styles.tab} role="presentation">
       <button
         type="button"
+        id={`rd-tab-${tabId}`}
         className={styles.tabMain}
         role="tab"
         aria-selected={active}
@@ -994,12 +1069,14 @@ function TabButton({
 /** 窗口标签按钮：标题取自会话快照（MOVED/TITLE 事件更新），未知名回退窗口列表反查的标题。 */
 function WindowTabButton({
   tab,
+  tabId,
   fallbackTitle,
   active,
   onSelect,
   onClose,
 }: {
   tab: WindowTab;
+  tabId: string;
   fallbackTitle: string;
   active: boolean;
   onSelect: () => void;
@@ -1009,6 +1086,7 @@ function WindowTabButton({
   const title = snapshot.title ?? fallbackTitle;
   return (
     <TabButton
+      tabId={tabId}
       title={title}
       closeLabel={`关闭 ${title}`}
       active={active}

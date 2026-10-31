@@ -7,6 +7,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   APP_VERSION,
   clearLastDeviceId,
+  lastConnectedAt,
+  relativeTime,
   connectDevice,
   disconnectDevice,
   discoverDevices,
@@ -28,6 +30,7 @@ import {
   type DiscoveredDeviceDto,
 } from "../api/devices";
 import { call, listenStub } from "../api/bridge";
+import { useDismiss } from "../ui/useDismiss";
 
 import { IconLab, IconMore, IconPlus, IconScan } from "../ui/Icon";
 import styles from "./Devices.module.css";
@@ -93,8 +96,6 @@ export function Devices() {
     const t = window.setTimeout(() => setConfirmArmed(true), 400);
     return () => window.clearTimeout(t);
   }, [confirmRemoveId]);
-  /** 展开次操作菜单的设备 id（⋯ 溢出）。 */
-  const [menuId, setMenuId] = useState<string | null>(null);
   /** 连接帮助折叠显隐。 */
   const [helpOpen, setHelpOpen] = useState(false);
   /** 设备搜索（>3 台时出现；IT 管理员 R4）。 */
@@ -115,29 +116,6 @@ export function Devices() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // ⋯ 菜单点外关闭（Holmes R2：菜单协议统一）
-  useEffect(() => {
-    if (menuId === null) {
-      return undefined;
-    }
-    const onDown = (e: MouseEvent): void => {
-      const el = e.target as HTMLElement;
-      if (!el.closest(`.${styles.menuWrap}`)) {
-        setMenuId(null);
-      }
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        setMenuId(null);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menuId]);
   /** 上次连接的设备（「继续上次」快达卡；null = 无历史）。 */
   const [resume, setResume] = useState<{ id: string; name: string; online: boolean } | null>(null);
 
@@ -269,7 +247,6 @@ export function Devices() {
       } finally {
         setBusyId(null);
         setConfirmRemoveId(null);
-        setMenuId(null);
       }
     },
     [refresh],
@@ -414,6 +391,49 @@ export function Devices() {
       setBusyId(null);
     }
   }, []);
+
+  /** ⋯ 菜单动作分发（R12：菜单本体抽 DeviceRowMenu，协议收编 useDismiss）。 */
+  const onMenuAction = useCallback(
+    (
+      d: DeviceDto,
+      a: "disconnect" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+    ) => {
+      switch (a) {
+        case "disconnect":
+          void onDisconnect(d);
+          break;
+        case "copyAddr":
+          void navigator.clipboard
+            .writeText(d.addr)
+            .then(() => setNotice(`已复制地址：${d.addr}`))
+            .catch(() => undefined);
+          break;
+        case "probe":
+          void onProbe(d);
+          break;
+        case "linkTest":
+          void onLinkTest(d);
+          break;
+        case "copyFp":
+          void navigator.clipboard
+            .writeText(d.fingerprintHex)
+            .then(() =>
+              setNotice(
+                `「${d.name}」的设备指纹已复制（SHA-256 前 16 位：${d.fingerprintHex.slice(0, 16)}），可与对方核对`,
+              ),
+            )
+            .catch(() => undefined);
+          break;
+        case "edit":
+          onEdit(d);
+          break;
+        case "remove":
+          setConfirmRemoveId(d.id);
+          break;
+      }
+    },
+    [onDisconnect, onProbe, onLinkTest, onEdit],
+  );
 
   /** 搜索过滤后的设备列表（>3 台出现搜索框时使用）。 */
   const shownDevices =
@@ -704,6 +724,9 @@ export function Devices() {
                   </span>
                   <span className={styles.addr}>
                     {d.addr}
+                    {lastConnectedAt(d.id) !== null && (
+                      <span title="上次成功连接时间"> · 上次连接 {relativeTime(lastConnectedAt(d.id) as number)}</span>
+                    )}
                     {getHostVersion(d.id) !== null && (
                       <span title="被控端 rd-agent 版本"> · v{getHostVersion(d.id)}</span>
                     )}
@@ -739,118 +762,10 @@ export function Devices() {
                     </button>
                   </>
                 ) : (
-                  <>
-                    <div className={styles.menuWrap}>
-                      <button
-                        type="button"
-                        className={styles.moreBtn}
-                        aria-label={d.name + " 的更多操作"}
-                        title="更多操作"
-                        aria-haspopup="menu"
-                        aria-expanded={menuId === d.id}
-                        onClick={() => setMenuId(menuId === d.id ? null : d.id)}
-                      >
-                        <IconMore size={16} />
-                      </button>
-                      {menuId === d.id && (
-                        <div className={styles.menu} role="menu">
-                          {d.online && (
-                            <button
-                              type="button"
-                              className={styles.menuItem}
-                              role="menuitem"
-                              onClick={() => {
-                                setMenuId(null);
-                                void onDisconnect(d);
-                              }}
-                            >
-                              断开连接
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className={styles.menuItem}
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuId(null);
-                              void navigator.clipboard
-                                .writeText(d.addr)
-                                .then(() => setNotice(`已复制地址：${d.addr}`))
-                                .catch(() => undefined);
-                            }}
-                          >
-                            复制地址
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.menuItem}
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuId(null);
-                              void onProbe(d);
-                            }}
-                          >
-                            连通测试
-                          </button>
-                          {d.addr.split(":")[0]?.startsWith("100.") && (
-                            <button
-                              type="button"
-                              className={styles.menuItem}
-                              role="menuitem"
-                              onClick={() => {
-                                setMenuId(null);
-                                void onLinkTest(d);
-                              }}
-                              title="Tailscale 链路：直达或经中继"
-                            >
-                              线路测试
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className={styles.menuItem}
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuId(null);
-                              void navigator.clipboard
-                                .writeText(d.fingerprintHex)
-                                .then(() =>
-                                  setNotice(
-                                    `「${d.name}」的设备指纹已复制（SHA-256 前 16 位：${d.fingerprintHex.slice(0, 16)}），可与对方核对`,
-                                  ),
-                                )
-                                .catch(() => undefined);
-                            }}
-                            title="设备指纹是本连接的唯一凭证标识，可与对方屏幕上显示的指纹比对以防中间人"
-                          >
-                            查看指纹
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.menuItem}
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuId(null);
-                              onEdit(d);
-                            }}
-                          >
-                            编辑
-                          </button>
-                          <button
-                            type="button"
-                            className={`${styles.menuItem} ${styles.menuItemDanger}`}
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuId(null);
-                              setConfirmRemoveId(d.id);
-                            }}
-                          >
-                            删除设备…
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </>
+                  <DeviceRowMenu
+                    d={d}
+                    onAction={(a) => onMenuAction(d, a)}
+                  />
                 )}
               </div>
             </li>
@@ -1023,5 +938,86 @@ export function Devices() {
         </div>
       )}
     </main>
+  );
+}
+
+/** 单行 ⋯ 菜单（R12 无障碍：菜单协议唯一出口 useDismiss——Esc/点外/焦点还原
+ * + menu 键控 ↑↓/Home/End + 打开聚焦首项，`role="menu"` 不再是空承诺）。 */
+function DeviceRowMenu({
+  d,
+  onAction,
+}: {
+  d: DeviceDto;
+  onAction: (
+    a: "disconnect" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+  ) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useDismiss(open, wrapRef, useCallback(() => setOpen(false), []), { menu: true });
+  const act = (a: Parameters<typeof onAction>[0]): void => {
+    setOpen(false);
+    onAction(a);
+  };
+  return (
+    <div className={styles.menuWrap} ref={wrapRef}>
+      <button
+        type="button"
+        className={styles.moreBtn}
+        aria-label={d.name + " 的更多操作"}
+        title="更多操作"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <IconMore size={16} />
+      </button>
+      {open && (
+        <div className={styles.menu} role="menu" aria-label={`${d.name} 操作`}>
+          {d.online && (
+            <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("disconnect")}>
+              断开连接
+            </button>
+          )}
+          <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("copyAddr")}>
+            复制地址
+          </button>
+          <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("probe")}>
+            连通测试
+          </button>
+          {d.addr.split(":")[0]?.startsWith("100.") && (
+            <button
+              type="button"
+              className={styles.menuItem}
+              role="menuitem"
+              onClick={() => act("linkTest")}
+              title="Tailscale 链路：直达或经中继"
+            >
+              线路测试
+            </button>
+          )}
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => act("copyFp")}
+            title="设备指纹是本连接的唯一凭证标识，可与对方屏幕上显示的指纹比对以防中间人"
+          >
+            查看指纹
+          </button>
+          <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("edit")}>
+            编辑
+          </button>
+          <button
+            type="button"
+            className={`${styles.menuItem} ${styles.menuItemDanger}`}
+            role="menuitem"
+            onClick={() => act("remove")}
+          >
+            删除设备…
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

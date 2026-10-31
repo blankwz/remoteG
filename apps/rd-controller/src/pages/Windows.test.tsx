@@ -228,3 +228,34 @@ describe("api/windows", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// 桌面地图布局（R12 设计 P0 护栏：几何映射、越界裁剪、最小尺寸）
+// ---------------------------------------------------------------------------
+
+describe("desktopMap", () => {
+  const base = { pid: 1, icon: null, dpi: 1, resizable: true };
+
+  it("按虚拟桌面 1920×1080 映射为百分比", async () => {
+    const { desktopMap } = await import("./Windows");
+    const rects = desktopMap([
+      { ...base, id: "1", title: "A", process: "a.exe", x: 0, y: 0, w: 960, h: 540, minimized: false },
+      { ...base, id: "2", title: "B", process: "b.exe", x: 960, y: 540, w: 960, h: 540, minimized: false },
+    ]);
+    expect(rects[0]).toMatchObject({ leftPct: 0, topPct: 0, widthPct: 50, heightPct: 50 });
+    expect(rects[1]).toMatchObject({ leftPct: 50, topPct: 50, widthPct: 50, heightPct: 50 });
+  });
+
+  it("越界窗口裁剪到桌面内，过小窗口抬到最小尺寸", async () => {
+    const { desktopMap } = await import("./Windows");
+    const rects = desktopMap([
+      { ...base, id: "3", title: "C", process: "c.exe", x: 1800, y: 1000, w: 800, h: 600, minimized: true },
+      { ...base, id: "4", title: "D", process: "d.exe", x: 100, y: 100, w: 40, h: 20, minimized: false },
+    ]);
+    expect(rects[0].leftPct).toBeCloseTo((1800 / 1920) * 100, 5);
+    expect(rects[0].topPct).toBeCloseTo((1000 / 1080) * 100, 5);
+    expect(rects[0].widthPct).toBeCloseTo(((1920 - 1800) / 1920) * 100, 5);
+    expect(rects[1].widthPct).toBeCloseTo((120 / 1920) * 100, 5);
+    expect(rects[1].heightPct).toBeCloseTo((80 / 1080) * 100, 5);
+  });
+});

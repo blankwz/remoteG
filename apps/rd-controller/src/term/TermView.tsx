@@ -22,6 +22,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { openTerminal, termInput, termResize } from "../api/term";
+import { isReservedCombo } from "../input/InputMapper";
 import styles from "./TermView.module.css";
 
 // ---------------------------------------------------------------------------
@@ -313,6 +314,22 @@ export function TermView({ deviceId, tabId, shell, onTitle, onStatus }: TermView
       scheduleResize();
     };
     term.attachCustomKeyEventHandler((ev) => {
+      // 保留组合放行（R12 交互#1：曾 8 条热键在终端标签全灭，且 xterm 把
+      // Ctrl+Shift+C/X 折算 ^C/^X 注入远端 shell、Ctrl+Alt+digit 注入 ESC+数字
+      // ——判定复用 isReservedCombo 唯一出口防再双入口）
+      if (
+        ev.type === "keydown" &&
+        isReservedCombo({
+          code: ev.code,
+          ctrlKey: ev.ctrlKey,
+          shiftKey: ev.shiftKey,
+          altKey: ev.altKey,
+          metaKey: ev.metaKey,
+          isComposing: false,
+        })
+      ) {
+        return false;
+      }
       if (
         ev.type === "keydown" &&
         ev.ctrlKey &&
