@@ -101,4 +101,21 @@ export const KNOWN_DEBTS = [
 **验证基线**：tsc 0 错；测试 115/115 绿（modifiers 透传测试随保留表扩展同步修正）；构建通过；[round11-decisions](round11-decisions/) 5 张目检无回归。
 
 ---
+
+## R11 Phase 1 门禁落地申报（防线先行，已修债务永久出局）
+
+**形态**：与 known-debts「探针仍命中→绿」相反——清单登记**已修**债务（13 条源码锚 + 4 条跨文件不变量），断言探针保持消失（计数语义：D09 aria-hidden 合法残留 ≤1、INV 热键单监听 =1）。谁回潮，`pnpm test` 当场红。
+
+- 清单/扫描器：[src/testing/fixedDebts.ts](../src/testing/fixedDebts.ts)（纯函数扫描器）
+- 门禁测试：[src/testing/fixedDebts.test.ts](../src/testing/fixedDebts.test.ts)（实态扫描 + 双向锁定）
+- 配套护栏：[src/api/mock.test.ts](../src/api/mock.test.ts)（未知命令人话报错）
+- 依赖：@types/node（仅类型）；DOM 级断言（焦点回归/aria-expanded/axe）仍留债——需 jsdom+RTL 基建
+
+**注入活性验证（门禁是真的）**：
+1. 单测级：种探针必须红 / 干净必须放行 / 清单指向不存在文件必须红（合成内容 3 断言）
+2. 端到端级：向 WindowGroupView.tsx 实际种回 `（丢文件）` → 门禁当场报 `D01: 探针回潮，命中 1 处（上限 0）`；拔除后复绿 5/5
+
+**验证基线**：tsc 0 错；测试 **122/122 绿**（115 + 门禁 5 + mock 护栏 2）。
+
+---
 *2026-10-31 · 四视角 agent 独立走查 · 探针 13/13 实证 · 快照 [round11-audit](round11-audit/) / [round11-fix](round11-fix/) / [round11-decisions](round11-decisions/)*
