@@ -4,7 +4,7 @@
  * 设备页 hostCard）/ 终端字号（曾只有终端内快捷键）/ 自定义常用语管理
  * （曾只进不出）。全部接现有状态与存储，无新后端。
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { call } from "../api/bridge";
 import {
   CMD_TO_CTRL_KEY,
@@ -18,6 +18,7 @@ import {
   saveFontSize,
 } from "../term/TermView";
 import { Switch } from "../ui/Switch";
+import { getRelayAddr, setRelayAddr } from "../api/devices";
 import styles from "./Settings.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
@@ -59,6 +60,10 @@ export function Settings() {
   const [quality, setQuality] = useState<Quality>(readQuality);
   const [cmdToCtrl, setCmdToCtrl] = useState<boolean>(() => loadCmdToCtrl());
   const [fec, setFec] = useState<boolean | null>(null);
+  // 原生中继（T-033）：设置 → 远程访问 → 使用自建中继
+  const [relayAddr, setRelayAddrState] = useState("");
+  const [relayMsg, setRelayMsg] = useState<string | null>(null);
+  const [relayDirty, setRelayDirty] = useState(false);
   const [fontPx, setFontPx] = useState<number>(() => loadFontSize());
   const [phrases, setPhrases] = useState<readonly string[]>(readPhrases);
   const [fecError, setFecError] = useState<string | null>(null);
@@ -92,6 +97,23 @@ export function Settings() {
       setFecError(errText(e));
     }
   }, []);
+
+  // 读当前中继地址（挂载一次）
+  useEffect(() => {
+    void getRelayAddr()
+      .then((v) => setRelayAddrState(v ?? ""))
+      .catch(() => setRelayMsg("读取失败（本机被控服务未启动时也可设置）"));
+  }, []);
+
+  const onSaveRelay = useCallback(async () => {
+    try {
+      await setRelayAddr(relayAddr);
+      setRelayMsg("已保存：重启 rd 后生效");
+      setRelayDirty(false);
+    } catch (e) {
+      setRelayMsg(`保存失败：${errText(e)}`);
+    }
+  }, [relayAddr]);
 
   const onFont = useCallback((delta: number) => {
     const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontPx + delta));
@@ -163,6 +185,39 @@ export function Settings() {
             onChange={(v) => void onFec(v)}
             label="弱网纠错（FEC）"
           />
+        </li>
+        <li className={styles.section}>远程访问（跨网中继）</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>使用自建中继</b>
+            <span className={styles.hint}>
+              跨网打洞失败时的兜底通道（本机作为被控端使用）。支持 Cloudflare
+              Workers（https://xxx.workers.dev）或 VPS 直连地址（ip:21118）；
+              连接时直连优先，失败自动走中继；中继只见密文。
+              {relayMsg !== null && ` · ${relayMsg}`}
+            </span>
+          </span>
+          <span className={styles.relayEdit}>
+            <input
+              className={styles.relayInput}
+              value={relayAddr}
+              placeholder="https://xxx.workers.dev 或 1.2.3.4:21118"
+              spellCheck={false}
+              aria-label="原生中继地址"
+              onChange={(e) => {
+                setRelayAddrState(e.currentTarget.value);
+                setRelayDirty(true);
+              }}
+            />
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={!relayDirty}
+              onClick={() => void onSaveRelay()}
+            >
+              保存
+            </button>
+          </span>
         </li>
         <li className={styles.section}>终端与常用语</li>
         <li className={styles.row}>

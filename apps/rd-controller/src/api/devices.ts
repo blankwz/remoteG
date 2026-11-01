@@ -43,8 +43,9 @@ export function editDevice(
   id: string,
   name: string,
   addr: string,
+  relay: string,
 ): Promise<DeviceDto> {
-  return call("edit_device", { id, name, addr });
+  return call("edit_device", { id, name, addr, relay: relay || null });
 }
 
 /** Tailscale 链路测试（直达 or DERP 中继 + 逐跳延迟）。 */
@@ -64,11 +65,23 @@ export interface DeviceDto {
   online: boolean;
   /** 物理网卡 MAC（WOL 远程开机用；空 = 未采集过）。 */
   macAddrs: string[];
+  /** 原生中继地址（T-032；直连失败时自动回退）。 */
+  relay: string | null;
 }
 
 /** 远程开机（T-031 WOL）：向本网段广播魔术包（需同网段）。 */
 export function wakeDevice(id: string): Promise<void> {
   return call("wake_device", { id });
+}
+
+/** 读被控端原生中继地址（T-033；未配置 = null）。 */
+export function getRelayAddr(): Promise<string | null> {
+  return call("get_relay_addr");
+}
+
+/** 写被控端原生中继地址（空串 = 清除）；重启 rd 后生效。 */
+export function setRelayAddr(relay: string): Promise<void> {
+  return call("set_relay_addr", { relay });
 }
 
 /** connect_device 返回的对端能力。 */

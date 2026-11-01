@@ -538,8 +538,9 @@ pub struct DeviceConn {
 }
 
 impl DeviceConn {
-    /// 连接 `host[:port]` 设备：解析地址 → QUIC（`expected` 校验对端指纹）→
-    /// open_control → 启动后台读循环与数据流 accept 循环。
+    /// 连接 `host[:port]` 设备：解析地址 → QUIC 直连（`expected` 校验对端指纹）
+    /// → 失败且配置了 `relay`（原生中继，T-032）时自动回退 → open_control →
+    /// 启动后台读循环与数据流 accept 循环。
     /// 不发 Hello（见 [`DeviceConn::handshake`]；配对流程需要区分 `Error{1}`）。
     pub async fn connect(
         device_id: &str,
@@ -547,6 +548,7 @@ impl DeviceConn {
         identity: &Identity,
         expected: Option<Fingerprint>,
         media_fec: bool,
+        relay: Option<String>,
     ) -> anyhow::Result<Arc<Self>> {
         // M2 #4 切入点（默认关闭）：设置 RD_PLAN 环境变量时走 Switchboard Plan
         // 执行器选路（LAN 发现/回退语义，spec/02），传输仍是 rd 原生 QUIC。
@@ -578,7 +580,28 @@ impl DeviceConn {
         let sock = resolve_addr(addr, DEFAULT_AGENT_PORT)
             .await
             .context("地址解析失败")?;
-        let conn = Arc::new(connect(sock, identity, expected).await?);
+        let conn = match connect(sock, identity, expected).await {
+            Ok(c) => Arc::new(c),
+            // 直连失败 → 原生中继回退（T-032）：DIAL 按指纹寻人，
+            // E2E 加密/配对校验与直连完全一致，中继只见密文
+            Err(direct_err) => {
+                let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
+                    return Err(direct_err);
+                };
+                let Some(target_fp) = expected else {
+                    // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
+                    return Err(direct_err);
+                };
+                let relay_addr =
+                    rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+                tracing::info!(%relay_addr, "直连失败，回退原生中继");
+                Arc::new(
+                    rd_transport::connect_via_relay(relay_addr, target_fp, identity, expected)
+                        .await
+                        .context("经中继连接失败（被控端不在线或中继不可达）")?,
+                )
+            }
+        };
         let peer_fp = conn.peer_fingerprint();
         let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
         tracing::info!(

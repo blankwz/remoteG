@@ -56,7 +56,7 @@ export function Devices() {
   const [showAdd, setShowAdd] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
-  const [form, setForm] = useState({ addr: "127.0.0.1:21118", code: "", name: "" });
+  const [form, setForm] = useState({ addr: "127.0.0.1:21118", code: "", name: "", relay: "" });
   /** 局域网扫描结果（发现 ≠ 信任，点击仅预填添加对话框）。 */
   const [discovered, setDiscovered] = useState<DiscoveredDeviceDto[] | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -122,15 +122,18 @@ export function Devices() {
 
   /** 打开添加/编辑对话框（记录触发点：effect 里再取已被 autoFocus 抢走）。 */
   const addTriggerRef = useRef<HTMLElement | null>(null);
-  const openAddDialog = useCallback((prefill?: { addr: string; name: string } | null, edit?: DeviceDto | null) => {
-    addTriggerRef.current = document.activeElement as HTMLElement | null;
-    if (prefill !== undefined && prefill !== null) {
-      setForm({ addr: prefill.addr, code: "", name: prefill.name });
-      setFormError(null);
-    }
-    setEditing(edit ?? null);
-    setShowAdd(true);
-  }, []);
+  const openAddDialog = useCallback(
+    (prefill?: { addr: string; name: string; relay?: string } | null, edit?: DeviceDto | null) => {
+      addTriggerRef.current = document.activeElement as HTMLElement | null;
+      if (prefill !== undefined && prefill !== null) {
+        setForm({ addr: prefill.addr, code: "", name: prefill.name, relay: prefill.relay ?? "" });
+        setFormError(null);
+      }
+      setEditing(edit ?? null);
+      setShowAdd(true);
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -343,15 +346,15 @@ export function Devices() {
       try {
         if (editing !== null) {
           // 编辑模式：只改名称/地址，不需要配对码
-          await editDevice(editing.id, form.name, form.addr);
+          await editDevice(editing.id, form.name, form.addr, form.relay);
           setShowAdd(false);
           setEditing(null);
-          setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
+          setForm({ addr: "127.0.0.1:21118", code: "", name: "", relay: "" });
           await refresh();
         } else {
           const d = await pairDevice(form.addr, form.code, form.name);
           setShowAdd(false);
-          setForm({ addr: "127.0.0.1:21118", code: "", name: "" });
+          setForm({ addr: "127.0.0.1:21118", code: "", name: "", relay: "" });
           await refresh();
           // 输码直连：配对成功即连接进入（省一击——竞品对照 R4 共识）
           setBusyId(d.id);
@@ -377,9 +380,12 @@ export function Devices() {
   );
 
   /** 进入编辑模式（复用添加对话框，隐藏配对码栏）。 */
-  const onEdit = useCallback((d: DeviceDto) => {
-    openAddDialog({ addr: d.addr, name: d.name }, d);
-  }, [openAddDialog]);
+  const onEdit = useCallback(
+    (d: DeviceDto) => {
+      openAddDialog({ addr: d.addr, name: d.name, relay: d.relay ?? undefined }, d);
+    },
+    [openAddDialog],
+  );
 
   /** Tailscale 链路测试（直达/DERP 中继）。结果标注设备名而非 id。 */
   const onLinkTest = useCallback(async (d: DeviceDto) => {
@@ -516,7 +522,7 @@ export function Devices() {
   }, [showAdd, closeAdd]);
 
   const updateForm = useCallback(
-    (field: "addr" | "code" | "name", value: string) => {
+    (field: "addr" | "code" | "name" | "relay", value: string) => {
       setForm((prev) => ({ ...prev, [field]: value }));
     },
     [],
@@ -936,6 +942,18 @@ export function Devices() {
                   placeholder="被控端托盘显示的 6 位数字"
                   inputMode="numeric"
                   maxLength={6}
+                />
+              </label>
+            )}
+            {editing !== null && (
+              <label className={styles.field}>
+                <span>原生中继（可选）</span>
+                <input
+                  className={styles.input}
+                  value={form.relay}
+                  onChange={(e) => updateForm("relay", e.currentTarget.value)}
+                  placeholder="跨网打洞失败的兜底，如 vps.example.com:21118；直连失败才启用"
+                  spellCheck={false}
                 />
               </label>
             )}

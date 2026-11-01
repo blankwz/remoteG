@@ -172,6 +172,8 @@ pub struct DeviceDto {
     pub online: bool,
     /// 物理网卡 MAC（WOL 远程开机用；空 = 未采集过，前端置灰按钮）。
     pub mac_addrs: Vec<String>,
+    /// 原生中继地址（T-032；直连失败时自动回退）。
+    pub relay: Option<String>,
 }
 
 /// connect_device 返回的 Agent 能力。
@@ -228,6 +230,9 @@ pub struct DeviceEntry {
     pub added_at: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mac_addrs: Vec<String>,
+    /// 原生中继地址（T-032；serde default 兼容旧文件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// 设备列表存储（与 TrustStore 同款原子写：tmp + fsync + rename）。
@@ -268,6 +273,7 @@ impl DeviceStore {
         {
             existing.name = entry.name;
             existing.addr = entry.addr;
+            existing.relay = entry.relay;
         } else {
             self.devices.push(entry);
         }
@@ -368,6 +374,7 @@ fn to_dto(entry: &DeviceEntry, online: bool) -> DeviceDto {
         added_at: entry.added_at,
         online,
         mac_addrs: entry.mac_addrs.clone(),
+        relay: entry.relay.clone(),
     }
 }
 
@@ -413,6 +420,7 @@ fn save_device(
         addr: addr.to_string(),
         fingerprint_hex: fp_hex,
         mac_addrs: Vec::new(),
+        relay: None,
         added_at: unix_now(),
     };
     store.upsert(entry.clone()).map_err(|e| format!("{e:#}"))?;
@@ -533,6 +541,7 @@ pub async fn pair_device(
         state.identity(),
         None,
         crate::commands::devices::media_fec_setting(state.data_dir()),
+        None,
     )
     .await
     .map_err(|e| describe_connect_error(&e))?;
@@ -576,20 +585,23 @@ pub async fn connect_device(
             .ok_or_else(|| "设备不存在".to_string())?
     };
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
-    // 握手 3s 超时（D-013 包2）：对不可达地址 QUIC 握手可拖到 ~10s，
-    // 自动重连循环会被单次慢失败拖住——快速失败让退避节奏生效。
+    // 握手超时（D-013 包2）：纯直连 3s 快速失败让退避节奏生效；配置了
+    // 原生中继时放宽到 30s——直连失败后还要走中继 DIAL 握手（≤15s）
+    let has_relay = entry.relay.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let secs = if has_relay { 30 } else { 3 };
     let conn = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(secs),
         DeviceConn::connect(
             &id,
             &entry.addr,
             state.identity(),
             Some(fp),
             crate::commands::devices::media_fec_setting(state.data_dir()),
+            entry.relay.clone(),
         ),
     )
     .await
-    .map_err(|_| format!("连接 {} 超时（3s）", entry.addr))?
+    .map_err(|_| format!("连接 {} 超时（{secs}s）", entry.addr))?
     .map_err(|e| describe_connect_error(&e))?;
     let ack = match conn.handshake(state.decode_caps()).await {
         Ok(ack) => ack,
@@ -780,6 +792,7 @@ pub async fn probe_device(id: String, state: State<'_, ConnManager>) -> Result<b
             state.identity(),
             Some(fp),
             crate::commands::devices::media_fec_setting(state.data_dir()),
+            None,
         ),
     )
     .await
@@ -916,6 +929,7 @@ pub fn edit_device(
     id: String,
     name: String,
     addr: String,
+    relay: Option<String>,
     state: State<'_, ConnManager>,
 ) -> Result<DeviceDto, String> {
     let addr = normalize_addr(addr.trim());
@@ -923,6 +937,12 @@ pub fn edit_device(
         return Err("设备地址不能为空".into());
     }
     let name = name.trim().to_string();
+    let relay = relay
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(raw) = &relay {
+        rd_transport::parse_relay_addr(raw).map_err(|e| format!("{e:#}"))?;
+    }
     let mut store = open_store(&state)?;
     let mut entry = store
         .by_id(&id)
@@ -932,6 +952,7 @@ pub fn edit_device(
         entry.name = name;
     }
     entry.addr = addr;
+    entry.relay = relay;
     store
         .upsert(entry.clone())
         .map_err(|e| format!("保存设备失败:{e}"))?;
@@ -1085,6 +1106,62 @@ pub async fn set_media_fec(enabled: bool, state: State<'_, ConnManager>) -> Resu
 #[tauri::command]
 pub async fn get_media_fec(state: State<'_, ConnManager>) -> Result<bool, String> {
     Ok(media_fec_setting(state.data_dir()))
+}
+
+// ---------------------------------------------------------------------------
+// 原生中继（T-033）：设置页「远程访问」——写入被控端 agent.toml 的 relay_addr
+// （融合版目录 rd_agent::default_config_dir()/app），重启 rd 后生效。
+// ---------------------------------------------------------------------------
+
+fn agent_config_file() -> std::path::PathBuf {
+    rd_agent::default_config_dir()
+        .join("app")
+        .join("agent.toml")
+}
+
+/// 读当前原生中继地址（未配置 = None）。
+#[tauri::command]
+pub fn get_relay_addr() -> Result<Option<String>, String> {
+    let path = agent_config_file();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 agent.toml 失败：{e}"))?;
+    let cfg: rd_agent::Config =
+        toml::from_str(&raw).map_err(|e| format!("解析 agent.toml 失败：{e}"))?;
+    Ok(cfg.relay_addr)
+}
+
+/// 写原生中继地址（空串 = 清除）；保留 agent.toml 其他字段，原子写。
+#[tauri::command]
+pub fn set_relay_addr(relay: String) -> Result<(), String> {
+    let trimmed = relay.trim().to_string();
+    if !trimmed.is_empty() {
+        rd_transport::parse_relay_endpoint(&trimmed).map_err(|e| format!("{e:#}"))?;
+    }
+    let path = agent_config_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
+    }
+    let mut value: toml::Value = if path.exists() {
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| format!("读取 agent.toml 失败：{e}"))?;
+        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    } else {
+        toml::Value::Table(Default::default())
+    };
+    if let Some(table) = value.as_table_mut() {
+        if trimmed.is_empty() {
+            table.remove("relay_addr");
+        } else {
+            table.insert("relay_addr".into(), toml::Value::String(trimmed));
+        }
+    }
+    let body = toml::to_string_pretty(&value).map_err(|e| format!("序列化配置失败：{e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, body).map_err(|e| format!("写入配置失败：{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置失败：{e}"))?;
+    Ok(())
 }
 
 /// fec 生效值：env 覆盖 > settings.json > 默认关（T-027 语义保留）。

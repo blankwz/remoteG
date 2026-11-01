@@ -1,0 +1,12 @@
+# rd 原生中继 · Caddy 自动 HTTPS（Let's Encrypt 自动签发+续期）
+# RELAY_DOMAIN 经 docker-compose 环境变量注入
+{$RELAY_DOMAIN} {
+    reverse_proxy relay:8787 {
+        # WebSocket 必须允许（Caddy 默认支持），关键是不缓冲：
+        flush_interval -1
+    }
+    # 中继只有小帧转发，不需要大 body
+    request_body {
+        max_size 1MB
+    }
+}

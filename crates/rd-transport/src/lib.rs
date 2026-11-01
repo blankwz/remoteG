@@ -8,8 +8,12 @@
 pub mod conn;
 pub mod framing;
 pub mod identity;
+pub mod relay;
+pub mod relay_ws;
 pub mod verify;
 
 pub use conn::{connect, Conn, ControlRx, ControlTx, DataRx, DataTx, Server, ALPN};
 pub use framing::{DataFrame, StreamKind, TileHeader, VideoHeader};
 pub use identity::{Fingerprint, Identity};
+pub use relay::{bind_via_relay, connect_via_relay, parse_relay_addr};
+pub use relay_ws::{bind_via_relay_ep, connect_via_relay_ep, parse_relay_endpoint, RelayEndpoint};

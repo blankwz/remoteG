@@ -14,8 +14,12 @@ quinn = { version = "0.11", default-features = false, features = [
 ] }
 quinn-proto = "0.11"
 rcgen = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+rd-relay = { path = "../rd-relay" }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rd-proto = { path = "../rd-proto" }
 rustls = { workspace = true, features = ["ring"] }
 sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

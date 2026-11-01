@@ -155,6 +155,34 @@ pub fn start(
         tokio::spawn(async move { discover::serve(state).await });
     }
     {
+        // 原生中继（T-032）：配置了 relay_addr / RD_RELAY 才启用。异步注册
+        // （agent.toml relay_addr = "1.2.3.4:21118"）；失败仅降级——直连
+        // 路径完全不受影响，中继是打洞失败场景的兜底入口
+        let relay_raw = std::env::var("RD_RELAY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| state.config.relay_addr.clone());
+        if let Some(raw) = relay_raw {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                match rd_transport::relay::parse_relay_addr(&raw) {
+                    Ok(addr) => {
+                        match rd_transport::relay::bind_via_relay(addr, &state.identity).await {
+                            Ok(server) => {
+                                tracing::info!(%addr, "原生中继监听就绪（跨网兜底入口）");
+                                server::serve_all(state, vec![server]).await;
+                            }
+                            Err(err) => {
+                                tracing::warn!(%addr, "中继注册失败（直连不受影响）: {err:#}")
+                            }
+                        }
+                    }
+                    Err(err) => tracing::warn!("中继地址解析失败（直连不受影响）: {err:#}"),
+                }
+            });
+        }
+    }
+    {
         // encode_caps 预热（D-013 包2）：ffmpeg 444 探测提前到启动时后台执行
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(rd_encode::caps::probe_encode_caps).await;

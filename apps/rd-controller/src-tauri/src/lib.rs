@@ -134,6 +134,8 @@ pub fn run() {
             commands::devices::open_studio,
             commands::devices::set_media_fec,
             commands::devices::get_media_fec,
+            commands::devices::get_relay_addr,
+            commands::devices::set_relay_addr,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
             commands::devices::set_host_paused,

@@ -39,6 +39,9 @@ pub struct Config {
     pub max_fps: u32,
     /// 初始视频码率(kbps)。
     pub start_kbps: u32,
+    /// 原生中继地址(T-032,如 "1.2.3.4:21118");配置后额外经中继接受连接,
+    /// 直连路径不受影响。环境变量 RD_RELAY 优先。跨网打洞失败的兜底通道。
+    pub relay_addr: Option<String>,
 }
 
 impl Default for Config {
@@ -52,6 +55,7 @@ impl Default for Config {
             refine_enabled: true,
             max_fps: 120,
             start_kbps: 8000,
+            relay_addr: None,
         }
     }
 }

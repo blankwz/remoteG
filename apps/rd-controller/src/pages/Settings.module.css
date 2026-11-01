@@ -140,3 +140,28 @@
   letter-spacing: 0.6px;
   color: var(--rd-accent-text);
 }
+
+/* 原生中继（T-033）：地址输入 + 保存按钮 */
+.relayEdit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  max-width: 360px;
+}
+
+.relayInput {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(0 0 0 / 0.3);
+  color: var(--text-1, #e8e8ea);
+  font-family: inherit;
+}
+
+.relayInput:focus {
+  outline: 1px solid rgb(120 170 255 / 0.6);
+}

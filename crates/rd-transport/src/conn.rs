@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use prost::Message;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{IdleTimeout, ReadExactError, TransportConfig, VarInt};
+use quinn::{EndpointConfig, IdleTimeout, ReadExactError, TransportConfig, VarInt};
 use quinn_proto::congestion::{Bbr, BbrConfig, Controller, ControllerFactory};
 use rustls::pki_types::CertificateDer;
 
@@ -37,22 +37,18 @@ pub struct Server {
 impl Server {
     /// 在 `addr` 上开始监听（UDP/QUIC），要求双向证书认证。
     pub fn bind(addr: SocketAddr, id: &Identity) -> anyhow::Result<Self> {
-        let (certs, key) = id.rustls_identity()?;
-        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-        let verifier = PeerVerifier::new(provider.signature_verification_algorithms, None);
-        let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])?
-            .with_client_cert_verifier(std::sync::Arc::new(verifier))
-            .with_single_cert(certs, key)
-            .map_err(|e| anyhow::anyhow!("invalid server identity: {e}"))?;
-        tls.alpn_protocols = vec![ALPN.to_vec()];
+        let endpoint = quinn::Endpoint::server(server_config(id)?, addr)?;
+        Ok(Self { endpoint })
+    }
 
-        let quic_server = QuicServerConfig::try_from(std::sync::Arc::new(tls))
-            .map_err(|e| anyhow::anyhow!("quic server config: {e}"))?;
-
-        let mut config = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_server));
-        config.transport_config(std::sync::Arc::new(transport_config()));
-        let endpoint = quinn::Endpoint::server(config, addr)?;
+    /// 经自定义 UDP socket（中继虚拟链路，T-032 见 relay.rs）建 QUIC 服务端。
+    pub fn bind_over(socket: impl quinn::AsyncUdpSocket, id: &Identity) -> anyhow::Result<Self> {
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            EndpointConfig::default(),
+            Some(server_config(id)?),
+            std::sync::Arc::new(socket),
+            std::sync::Arc::new(quinn::TokioRuntime),
+        )?;
         Ok(Self { endpoint })
     }
 
@@ -81,6 +77,55 @@ pub async fn connect(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<Conn> {
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse::<SocketAddr>()?)?;
+    endpoint.set_default_client_config(client_config(id, expected)?);
+    let conn = Conn::new(endpoint.connect(addr, SERVER_NAME)?.await?)?;
+    verify_fingerprint(&conn, expected)?;
+    Ok(conn)
+}
+
+/// 经自定义 UDP socket（中继虚拟链路）向 `remote`（虚拟地址即可）发起 QUIC。
+pub(crate) async fn connect_over(
+    socket: impl quinn::AsyncUdpSocket,
+    remote: SocketAddr,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        std::sync::Arc::new(socket),
+        std::sync::Arc::new(quinn::TokioRuntime),
+    )?;
+    endpoint.set_default_client_config(client_config(id, expected)?);
+    let conn = Conn::new(endpoint.connect(remote, SERVER_NAME)?.await?)?;
+    verify_fingerprint(&conn, expected)?;
+    Ok(conn)
+}
+
+/// 双向证书认证的服务端 TLS+QUIC 配置。
+fn server_config(id: &Identity) -> anyhow::Result<quinn::ServerConfig> {
+    let (certs, key) = id.rustls_identity()?;
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = PeerVerifier::new(provider.signature_verification_algorithms, None);
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_client_cert_verifier(std::sync::Arc::new(verifier))
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow::anyhow!("invalid server identity: {e}"))?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    let quic_server = QuicServerConfig::try_from(std::sync::Arc::new(tls))
+        .map_err(|e| anyhow::anyhow!("quic server config: {e}"))?;
+    let mut config = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_server));
+    config.transport_config(std::sync::Arc::new(transport_config()));
+    Ok(config)
+}
+
+/// 指纹钉扎的客户端 TLS+QUIC 配置。
+fn client_config(
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<quinn::ClientConfig> {
     let (certs, key) = id.rustls_identity()?;
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let verifier = PeerVerifier::new(provider.signature_verification_algorithms, expected);
@@ -91,18 +136,15 @@ pub async fn connect(
         .with_client_auth_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("invalid client identity: {e}"))?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
-
     let quic_client = QuicClientConfig::try_from(std::sync::Arc::new(tls))
         .map_err(|e| anyhow::anyhow!("quic client config: {e}"))?;
-
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse::<SocketAddr>()?)?;
     let mut config = quinn::ClientConfig::new(std::sync::Arc::new(quic_client));
     config.transport_config(std::sync::Arc::new(transport_config()));
-    endpoint.set_default_client_config(config);
+    Ok(config)
+}
 
-    let conn = endpoint.connect(addr, SERVER_NAME)?.await?;
-    let conn = Conn::new(conn)?;
-    // 握手后二次确认（验证器已在 TLS 层拦截，这里是纵深防御）
+/// 握手后二次确认（验证器已在 TLS 层拦截，这里是纵深防御）。
+fn verify_fingerprint(conn: &Conn, expected: Option<Fingerprint>) -> anyhow::Result<()> {
     if let Some(expected) = expected {
         let actual = conn.peer_fingerprint();
         if actual != expected {
@@ -110,7 +152,7 @@ pub async fn connect(
             anyhow::bail!("peer fingerprint mismatch: got {}", actual.hex());
         }
     }
-    Ok(conn)
+    Ok(())
 }
 
 fn transport_config() -> TransportConfig {
@@ -155,7 +197,7 @@ pub struct Conn {
 }
 
 impl Conn {
-    fn new(conn: quinn::Connection) -> anyhow::Result<Self> {
+    pub(crate) fn new(conn: quinn::Connection) -> anyhow::Result<Self> {
         // quinn 的 rustls 后端把对端证书链作为 Vec<CertificateDer> 放进 peer_identity
         let peer_fingerprint = conn
             .peer_identity()

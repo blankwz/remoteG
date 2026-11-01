@@ -1,0 +1,35 @@
+# rd 原生中继 · Docker 一条命令 + Caddy 自动 HTTPS（T-033）
+#
+# 前置：VPS 80/443 端口开放 + 一个 DNS 记录指到这台机器。
+# 用法：
+#   cp .env.example .env     # 填 RELAY_DOMAIN=relay.example.com
+#   docker compose up -d
+# 验证：curl https://relay.example.com/healthz
+services:
+  relay:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./node/relay.mjs:/app/relay.mjs:ro
+      - ./node/package.json:/app/package.json:ro
+    command: ["node", "relay.mjs", "8787"]
+    restart: unless-stopped
+    networks: [relay]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    environment:
+      # Caddyfile 里引用 $RELAY_DOMAIN
+      - RELAY_DOMAIN=${RELAY_DOMAIN:-relay.example.com}
+    networks: [relay]
+
+networks:
+  relay:
+
+volumes:
+  caddy_data:

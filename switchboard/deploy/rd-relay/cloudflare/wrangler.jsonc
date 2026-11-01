@@ -1,0 +1,14 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "rd-relay",
+    "main": "worker.mjs",
+    "compatibility_date": "2026-06-01",
+    // 每个 tag 一个 DO（SQLite 存储版跑 Free 计划）
+    "durable_objects": {
+        "bindings": [{ "name": "RELAY", "class_name": "RelayDO" }]
+    },
+    "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayDO"] }],
+    // 想用自己的域名（替代 *.workers.dev）时取消注释：
+    // "routes": [{ "pattern": "relay.example.com", "custom_domain": true }],
+    "observability": { "enabled": true }
+}
