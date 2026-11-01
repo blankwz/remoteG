@@ -362,7 +362,7 @@ mod tests {
 
     /// 假 WS 中继：按路径收 agent/client 两个连接，注册握手后桥接二进制。
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "与 UDP 版 e2e 同因待查；部署中继后排查"]
+    #[ignore = "与 UDP 版 e2e 同因（非确定性竞态）待专项排查"]
     async fn ws版经中继的完整握手与控制流回环() -> anyhow::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("ws://{}", listener.local_addr()?);
@@ -445,7 +445,7 @@ mod tests {
         let accepter = tokio::spawn(async move {
             let conn = server.accept().await?;
             assert_eq!(conn.peer_fingerprint(), client_fp);
-            let (mut tx, mut rx) = conn.open_control().await?;
+            let (mut tx, mut rx) = conn.accept_control().await?;
             let Some(env) = rx.recv().await? else {
                 anyhow::bail!("连接已关闭");
             };
@@ -461,6 +461,10 @@ mod tests {
                 })),
             })
             .await?;
+            // 保活：与 UDP 版 e2e 同理——任务结束会 drop rd Conn（隐式关连接），
+            // 必须撑到客户端读毕响应并主动关闭
+            // 客户端隐式关连接（预期收尾）；继续读只是消化残余帧
+            let _ = rx.recv().await;
             anyhow::Ok(())
         });
 

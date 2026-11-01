@@ -274,14 +274,34 @@ mod tests {
     use rd_proto::v0::{envelope, Hello};
     use rd_relay::spawn as relay_spawn;
 
+    /// quinn 视角日志（握手挂起排查用）：RUST_LOG=quinn=debug,quinn_proto=debug
+    static LOG_INIT: std::sync::Once = std::sync::Once::new();
+    fn init_log() {
+        LOG_INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        tracing_subscriber::EnvFilter::new("quinn=debug,quinn_proto=debug")
+                    }),
+                )
+                .with_writer(std::io::stderr)
+                .try_init();
+        });
+    }
+
     /// 经中继的完整链路：REG/DIAL 握手 → QUIC 双向认证（指纹钉扎）→
     /// 控制流 Envelope 往返。relay 是真实 rd_relay 实例（127.0.0.1 随机端口）。
-    /// #[ignore]（2026-11-01）：套件内偶发 QUIC 握手挂起（数据报双向可达、
-    /// Initial 重传不收敛），挂因未定位——先移出默认门禁；协议基础由 rd-relay
-    /// 单测锁定。部署中继后 `cargo test -p rd-transport --lib -- --ignored` 排查。
+    ///
+    /// #[ignore]（2026-11-02）：非确定性竞态——多数运行通过（分层实验
+    /// layered_relay_udp_raw_quinn 确定性通过），但偶发「client Initial 经
+    /// 中继送达 agent 后，server Initial 不再发出」的挂起。已排除：中继转发
+    /// （探针证明双向全通）、抽象 socket 用法（minimal_abstract_quinn 通过）、
+    /// endpoint 生命周期（钉住实验）。疑似 quinn 驱动唤醒竞态，待专项排查。
+    /// 手动复现：cargo test -p rd-transport --lib 经中继 -- --test-threads 1
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "e2e 偶发握手挂起待查（见上方注释）"]
+    #[ignore = "非确定性握手竞态待专项排查（证据见上方注释）"]
     async fn 经中继的完整握手与控制流回环() -> anyhow::Result<()> {
+        init_log();
         let relay_addr = relay_spawn("127.0.0.1:0".parse()?).await?;
         let server_id = Identity::generate("relay-e2e-server")?;
         let client_id = Identity::generate("relay-e2e-client")?;
@@ -293,13 +313,16 @@ mod tests {
         let accepter = tokio::spawn(async move {
             let conn = server.accept().await?;
             assert_eq!(conn.peer_fingerprint(), client_fp);
-            let (mut tx, mut rx) = conn.open_control().await?;
+            let (mut tx, mut rx) = conn.accept_control().await?;
             let Some(env) = rx.recv().await? else {
                 anyhow::bail!("连接已关闭");
             };
             let Some(envelope::Msg::Hello(h)) = env.msg else {
                 anyhow::bail!("期望 Hello");
             };
+            // 注意：任务结束时 rd Conn 被 drop → quinn implicit_close 整条连接
+            // （ConnectionRef::drop 语义）。因此【应答必须在任务内完成回读验证】
+            // 由客户端侧负责读，本任务只发。
             tx.send(&rd_proto::v0::Envelope {
                 req_id: 1,
                 msg: Some(envelope::Msg::HelloAck(rd_proto::v0::HelloAck {
@@ -309,6 +332,16 @@ mod tests {
                 })),
             })
             .await?;
+            // 保活：连接生命周期 = 本任务生命周期。任务结束会 drop rd Conn
+            // → quinn implicit_close(0,"") 关闭整条连接（ConnectionRef::drop
+            // 语义）——曾把客户端的响应读掐死，故必须撑到客户端读毕关闭。
+            loop {
+                match rx.recv().await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break,
+                    Err(_) => break, // 客户端隐式关连接（预期收尾）
+                }
+            }
             anyhow::Ok(())
         });
 
@@ -332,6 +365,8 @@ mod tests {
             anyhow::bail!("期望 HelloAck");
         };
         assert_eq!(ack.host_name, "echo-relay-e2e");
+        // 读毕响应 → 主动关闭 → 服务端保活循环自然收尾
+        conn.close(0, "e2e done");
         accepter.await??;
         Ok(())
     }

@@ -22,7 +22,7 @@ use crate::verify::PeerVerifier;
 
 pub const ALPN: &[u8] = b"rd/0";
 /// 证书钉扎体系下服务器名不参与校验（自定义验证器忽略 SNI），仅占位。
-const SERVER_NAME: &str = "rd.local";
+pub(crate) const SERVER_NAME: &str = "rd.local";
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// datagram 收发缓冲（槽位字节数；单包上限由 QUIC 首包 MTU 决定，约 1200B）。
@@ -103,6 +103,27 @@ pub(crate) async fn connect_over(
     Ok(conn)
 }
 
+/// 测试专用：暴露传输配置（BBR + MTU 钳制，minimal_abstract_quinn 实验）。
+#[doc(hidden)]
+pub fn transport_config_for_test() -> quinn::TransportConfig {
+    transport_config()
+}
+
+/// 测试专用：暴露服务端配置工厂（minimal_abstract_quinn 实验）。
+#[doc(hidden)]
+pub fn server_config_for_test(id: &Identity) -> anyhow::Result<quinn::ServerConfig> {
+    server_config(id)
+}
+
+/// 测试专用：暴露客户端配置工厂。
+#[doc(hidden)]
+pub fn client_config_for_test(
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<quinn::ClientConfig> {
+    client_config(id, expected)
+}
+
 /// 双向证书认证的服务端 TLS+QUIC 配置。
 fn server_config(id: &Identity) -> anyhow::Result<quinn::ServerConfig> {
     let (certs, key) = id.rustls_identity()?;
@@ -122,7 +143,7 @@ fn server_config(id: &Identity) -> anyhow::Result<quinn::ServerConfig> {
 }
 
 /// 指纹钉扎的客户端 TLS+QUIC 配置。
-fn client_config(
+pub(crate) fn client_config(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<quinn::ClientConfig> {
@@ -197,6 +218,12 @@ pub struct Conn {
 }
 
 impl Conn {
+    /// 测试专用：暴露底层 quinn 连接（minimal_abstract_quinn 分层实验）。
+    #[doc(hidden)]
+    pub fn raw_conn(&self) -> quinn::Connection {
+        self.conn.clone()
+    }
+
     pub(crate) fn new(conn: quinn::Connection) -> anyhow::Result<Self> {
         // quinn 的 rustls 后端把对端证书链作为 Vec<CertificateDer> 放进 peer_identity
         let peer_fingerprint = conn

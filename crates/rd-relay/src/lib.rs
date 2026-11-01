@@ -248,6 +248,7 @@ fn handle_data(
     if payload.len() <= 8 {
         return;
     }
+    eprintln!("[probe] 数据 tag={tag} from={from} bytes={}", payload.len());
     let peer = {
         let mut t = table.lock().expect("relay table 锁中毒");
         let Some(s) = t.by_tag.get_mut(&tag) else {

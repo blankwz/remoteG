@@ -12,7 +12,10 @@ pub mod relay;
 pub mod relay_ws;
 pub mod verify;
 
-pub use conn::{connect, Conn, ControlRx, ControlTx, DataRx, DataTx, Server, ALPN};
+pub use conn::{
+    client_config_for_test, connect, server_config_for_test, transport_config_for_test, Conn,
+    ControlRx, ControlTx, DataRx, DataTx, Server, ALPN,
+};
 pub use framing::{DataFrame, StreamKind, TileHeader, VideoHeader};
 pub use identity::{Fingerprint, Identity};
 pub use relay::{bind_via_relay, connect_via_relay, parse_relay_addr};
