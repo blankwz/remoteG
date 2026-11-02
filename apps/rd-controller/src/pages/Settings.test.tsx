@@ -88,6 +88,40 @@ describe("中继地址保存（P1-2）", () => {
   });
 });
 
+describe("自定义常用语添加（R16）", () => {
+  it("输入新短语回车：出现在列表、持久化到存储、输入框清空", async () => {
+    render(<Settings />);
+    const input = screen.getByLabelText("新增常用短语");
+    fireEvent.change(input, { target: { value: "收到，这就处理" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByText("收到，这就处理")).toBeTruthy();
+    expect((input as HTMLInputElement).value).toBe(""); // 清空输入
+    expect(
+      JSON.parse(window.localStorage.getItem("rd-phrases") ?? "[]"),
+    ).toEqual(["收到，这就处理"]);
+  });
+
+  it("空串不添加：仅空白字符点「添加」，列表仍为空且不写入存储", () => {
+    render(<Settings />);
+    const input = screen.getByLabelText("新增常用短语");
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    expect(screen.getByText("暂无自定义短语")).toBeTruthy();
+    expect(window.localStorage.getItem("rd-phrases")).toBeNull();
+  });
+
+  it("已存在短语不重复添加：点「添加」后存储仍为原集合", () => {
+    window.localStorage.setItem("rd-phrases", JSON.stringify(["你好呀"]));
+    render(<Settings />);
+    const input = screen.getByLabelText("新增常用短语");
+    fireEvent.change(input, { target: { value: "你好呀" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    expect(
+      JSON.parse(window.localStorage.getItem("rd-phrases") ?? "[]"),
+    ).toEqual(["你好呀"]); // 去重取舍：短语文本即渲染 key，重复项撞 key 且无线索价值
+  });
+});
+
 describe("全局 UI 缩放（P1-4）", () => {
   it("切档即时改根节点变量并持久化", async () => {
     render(<Settings />);

@@ -138,6 +138,47 @@
   color: var(--rd-err);
 }
 
+/* 短语添加区（R16：设置页补添加入口，避免只能删不能加死胡同） */
+.phraseAdd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.phraseInput {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(0 0 0 / 0.3);
+  color: var(--text-1, #e8e8ea);
+  font-family: inherit;
+}
+
+.phraseInput:focus {
+  outline: 1px solid rgb(120 170 255 / 0.6);
+}
+
+.phraseAddBtn {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-body);
+  cursor: pointer;
+}
+
+.phraseAddBtn:hover {
+  border-color: var(--rd-accent);
+}
+
 /* 节标题（R14 设计 finish：五属性分组，非平铺表格） */
 .section {
   padding: 10px 4px 0;

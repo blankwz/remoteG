@@ -113,21 +113,27 @@ export function FloatingToolbar(props: Props) {
 
   return (
     <div className={styles.bar} ref={rootRef}>
-      <label className={styles.qualityWrap} title="画质：自动=智能自适应；弱网选流畅">
-        <IconGauge size={15} className={styles.qualityIcon} />
-        <select
-          className={styles.select}
-          value={props.quality}
-          onChange={(e) => props.onQualityChange(e.target.value as Quality)}
-        >
-          {(Object.keys(QUALITY_LABEL) as Quality[]).map((q) => (
-            <option key={q} value={q}>
-              {QUALITY_LABEL[q]}
-            </option>
-          ))}
-        </select>
-      </label>
-      <Sep />
+      {/* 画质是视频流专属控制；终端标签无远端画面，随 windowActions 收口
+        （R17：与只看/截屏/录屏同款"不亮假可用性"，漏网自纠） */}
+      {props.windowActions && (
+        <>
+          <label className={styles.qualityWrap} title="画质：自动=智能自适应；弱网选流畅">
+            <IconGauge size={15} className={styles.qualityIcon} />
+            <select
+              className={styles.select}
+              value={props.quality}
+              onChange={(e) => props.onQualityChange(e.target.value as Quality)}
+            >
+              {(Object.keys(QUALITY_LABEL) as Quality[]).map((q) => (
+                <option key={q} value={q}>
+                  {QUALITY_LABEL[q]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Sep />
+        </>
+      )}
       {props.windowActions && (
         <>
           <ToolBtn

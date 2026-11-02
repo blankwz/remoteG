@@ -21,6 +21,7 @@ import {
   saveFontSize,
 } from "../term/TermView";
 import {
+  PHRASES_MAX,
   readCustomPhrases,
   saveCustomPhrases,
 } from "../session/phrases";
@@ -90,6 +91,10 @@ export function Settings() {
   const [relayDirty, setRelayDirty] = useState(false);
   const [fontPx, setFontPx] = useState<number>(() => loadFontSize());
   const [phrases, setPhrases] = useState<readonly string[]>(readCustomPhrases);
+  /** 新增常用语文案输入（R16：设置页补添加入口，避免"只能删不能加"死胡同）。 */
+  const [phraseInput, setPhraseInput] = useState("");
+  /** 中继挂载期读取失败（R16：从 relayMsg 独立出来，不再混进保存类反馈）。 */
+  const [relayReadFailed, setRelayReadFailed] = useState(false);
   const [fecError, setFecError] = useState<string | null>(null);
   /** 全局 UI 缩放（P1-4；切换即时生效并持久化）。 */
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
@@ -130,7 +135,7 @@ export function Settings() {
   useEffect(() => {
     void getRelayAddr()
       .then((v) => setRelayAddrState(v ?? ""))
-      .catch(() => setRelayMsg("读取失败（本机被控服务未启动时也可设置）"));
+      .catch(() => setRelayReadFailed(true)); // 读取失败独立提示，不再混进 relayMsg
   }, []);
 
   const onSaveRelay = useCallback(async () => {
@@ -167,6 +172,26 @@ export function Settings() {
     setPhrases(next);
     saveCustomPhrases(next);
   }, []);
+
+  /** 新增常用语（R16，与 removePhrase 对称）：空串不添加、重复去重、达上限不添加。 */
+  const addPhrase = useCallback(() => {
+    const text = phraseInput.trim();
+    if (text.length === 0) {
+      return; // 空串不添加
+    }
+    const current = readCustomPhrases();
+    if (current.includes(text)) {
+      setPhraseInput(""); // 已存在：去重（短语文本即渲染 key，重复既撞 key 也无意义）
+      return;
+    }
+    if (current.length >= PHRASES_MAX) {
+      return; // 对齐存储上限（20 条），不再追加
+    }
+    const next = [...current, text];
+    setPhrases(next);
+    saveCustomPhrases(next);
+    setPhraseInput("");
+  }, [phraseInput]);
 
   return (
     <main className={styles.page}>
@@ -254,6 +279,11 @@ export function Settings() {
               连接时直连优先，失败自动走中继；中继只见密文。
               {relayMsg !== null && ` · ${relayMsg}`}
             </span>
+            {relayReadFailed && (
+              <span className={styles.hint}>
+                未能读取当前中继设置（被控服务未启动）——可直接填写并保存，重启后生效
+              </span>
+            )}
             {relayError !== null && (
               <span className={styles.hintError} role="alert">
                 {relayError}
@@ -304,7 +334,7 @@ export function Settings() {
           <span className={styles.label}>
             <b>自定义常用语</b>
             <span className={styles.hint}>
-              悬浮工具栏「常用语」面板的短语（默认 5 条不可删；面板内点 × 也可删）
+              本页可直接新增与删除，与悬浮工具栏「常用语」面板同一份（内置 5 条不可删）
             </span>
           </span>
           <span className={styles.phrases}>
@@ -322,6 +352,23 @@ export function Settings() {
                 </button>
               </span>
             ))}
+            <span className={styles.phraseAdd}>
+              <input
+                className={styles.phraseInput}
+                value={phraseInput}
+                placeholder="新增常用语…"
+                aria-label="新增常用短语"
+                onChange={(e) => setPhraseInput(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    addPhrase();
+                  }
+                }}
+              />
+              <button type="button" className={styles.phraseAddBtn} onClick={addPhrase}>
+                添加
+              </button>
+            </span>
           </span>
         </li>
       </ul>

@@ -108,3 +108,16 @@ describe("常用语面板删除（P1-3）", () => {
     expect(readCustomPhrases()).toEqual([]);
   });
 });
+
+describe("终端标签下画质下拉收口（R17）", () => {
+  it("窗口标签（windowActions=true）显示画质下拉", () => {
+    mountToolbar({ windowActions: true });
+    expect(screen.queryByRole("combobox")).toBeTruthy(); // 画质 select
+  });
+
+  it("终端标签（windowActions=false）隐藏画质下拉——终端无视频流，不亮假可用性", () => {
+    mountToolbar({ windowActions: false });
+    expect(screen.queryByRole("combobox")).toBeNull(); // 画质 select 随 windowActions 收口
+    expect(screen.getByText("锁屏")).toBeTruthy();      // 设备级操作仍保留
+  });
+});
