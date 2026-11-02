@@ -4393,6 +4393,9 @@ name = "rd-relay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
+ "rcgen",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4450,6 +4453,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "ed25519-dalek",
  "futures-util",
  "prost",
  "quinn",

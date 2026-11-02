@@ -129,17 +129,26 @@ pub fn local_ip_addrs() -> Vec<std::net::IpAddr> {
                 let sa = u.Address.lpSockaddr;
                 if !sa.is_null() {
                     let sa = unsafe { &*sa };
-                    let bytes = |range: std::ops::Range<usize>| -> Vec<u8> {
-                        sa.sa_data[range].iter().map(|b| *b as u8).collect()
-                    };
+                    // IPv4 走 sockaddr_in 的 sa_data；IPv6 地址 22 字节放不进
+                    // sa_data[14]，必须按 SOCKADDR_IN6 读 sin6_addr（否则越界
+                    // panic——安全审计连带修复：panic 会杀掉中继注册任务）
                     let ip = match sa.sa_family {
                         AF_INET => {
-                            let o: Option<[u8; 4]> = bytes(2..6).try_into().ok();
+                            let o: Option<[u8; 4]> = sa.sa_data[2..6]
+                                .iter()
+                                .map(|b| *b as u8)
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .ok();
                             o.map(IpAddr::from)
                         }
                         AF_INET6 => {
-                            let o: Option<[u8; 16]> = bytes(2..18).try_into().ok();
-                            o.map(IpAddr::from)
+                            use windows::Win32::Networking::WinSock::SOCKADDR_IN6;
+                            let sa6 =
+                                unsafe { &*(sa as *const _ as *const SOCKADDR_IN6) };
+                            let bytes: [u8; 16] =
+                                unsafe { sa6.sin6_addr.u.Byte };
+                            Some(IpAddr::from(bytes))
                         }
                         _ => None,
                     };

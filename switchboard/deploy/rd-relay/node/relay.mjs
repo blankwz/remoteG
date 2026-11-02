@@ -12,6 +12,9 @@ import http from "node:http";
 const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8787);
 const MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+/** 会话数上限：满员拒绝新注册（防未认证 REG 塞爆内存——安全审计 F4） */
+const MAX_SESSIONS = 1024;
+
 /** tag → { agent, client } 会话表（内存态；进程重启即清，客户端会自动重连） */
 const sessions = new Map();
 
@@ -93,7 +96,11 @@ const wsClose = (ws, code = 1000) => {
 
 function getSession(tag) {
   let s = sessions.get(tag);
-  if (!s) { s = { agent: null, client: null }; sessions.set(tag, s); }
+  if (!s) {
+    if (sessions.size >= MAX_SESSIONS) return null; // 满员：拒绝新会话
+    s = { agent: null, client: null };
+    sessions.set(tag, s);
+  }
   return s;
 }
 
@@ -152,6 +159,11 @@ server.on("upgrade", (req, socket) => {
   ws.readyState = "open";
 
   const s = getSession(tag);
+  if (!s) {
+    wsClose(socket, 1013); // 满员：会话表已达上限
+    socket.destroy();
+    return;
+  }
   if (role === "agent") {
     if (s.agent) wsClose(s.agent, 4000); // 同 tag 重复注册：踢旧（最新地址为准）
     s.agent = ws;
@@ -180,10 +192,21 @@ server.on("upgrade", (req, socket) => {
   socket.on("close", () => {
     ws.readyState = "closed";
     const cur = sessions.get(tag);
-    if (cur && cur[role] === ws) cur[role] = null;
+    if (cur && cur[role] === ws) {
+      cur[role] = null;
+      // 两端皆空即回收条目（安全审计 F4：会话表只减不增防泄漏）
+      if (!cur.agent && !cur.client) sessions.delete(tag);
+    }
   });
   socket.on("error", () => { /* 网络错：close 事件统一清理 */ });
 });
+
+// 兜底 GC：清掉两端皆空的残留条目（close 回收为主，这里防极端路径漏删）
+setInterval(() => {
+  for (const [tag, s] of sessions) {
+    if (!s.agent && !s.client) sessions.delete(tag);
+  }
+}, 60_000).unref();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`rd-relay (node) 监听 0.0.0.0:${PORT} —— /healthz /agent?th= /c/<tag>`);

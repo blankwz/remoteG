@@ -90,20 +90,45 @@ enum Role {
 /// 列表仅 Controller 角色且中继支持打洞协调时非空：`[中继处映射地址,
 /// 直连候选...]`。`candidates` 仅 Agent 角色生效（随 REG 上报直连候选）。
 /// 带重试与 NAT 保活语义。
+///
+/// 每周期 REG 同时发 **legacy + 签名** 两份（安全审计 F4）：旧中继只认
+/// legacy（签名报文被当未知类型静默丢弃）、新中继认签名（legacy 在已建立
+/// 签名会话后被忽略）——应答格式一致，握手侧无需区分被哪种受理。DIAL 只发
+/// legacy（签名 DIAL 语义不成立，见 rd-relay 模块注释「残余风险」）。
 async fn relay_handshake(
     sock: &UdpSocket,
     relay: SocketAddr,
     fp: &Fingerprint,
+    id: &Identity,
     role: Role,
     candidates: &[SocketAddr],
     timeout: Duration,
 ) -> anyhow::Result<(u64, Vec<SocketAddr>)> {
-    let (ack_kind, msg) = match role {
-        Role::Agent => (rd_relay::TYPE_REG_ACK, encode_reg(&fp.0, candidates)),
-        Role::Controller => (
-            rd_relay::TYPE_DIAL_ACK,
-            encode_control(rd_relay::TYPE_DIAL, &fp.0),
-        ),
+    let msgs = match role {
+        Role::Agent => {
+            use ed25519_dalek::pkcs8::DecodePrivateKey;
+            use ed25519_dalek::Signer;
+            let signing = ed25519_dalek::SigningKey::from_pkcs8_der(&id.key_der)
+                .map_err(|e| anyhow::anyhow!("解析本机身份私钥失败: {e}"))?;
+            let sig = signing
+                .sign(&rd_relay::signed_message(rd_relay::TYPE_REG2, &fp.0))
+                .to_bytes();
+            vec![
+                encode_reg(&fp.0, candidates),
+                rd_relay::encode_signed_control(
+                    rd_relay::TYPE_REG2,
+                    &fp.0,
+                    &id.cert_der,
+                    &sig,
+                    candidates,
+                ),
+            ]
+        }
+        Role::Controller => vec![encode_control(rd_relay::TYPE_DIAL, &fp.0)],
+    };
+    let ack_kind = match role {
+        Role::Agent => rd_relay::TYPE_REG_ACK,
+        Role::Controller => rd_relay::TYPE_DIAL_ACK,
     };
     let deadline = Instant::now() + timeout;
     loop {
@@ -118,11 +143,13 @@ async fn relay_handshake(
                 ),
             });
         }
-        sock.send_to(&msg, relay)
-            .await
-            .map_err(|e| anyhow::anyhow!("发送握手包失败: {e}"))?;
-        // 等应答最多一个重发周期
-        let mut buf = [0u8; 96];
+        for msg in &msgs {
+            sock.send_to(msg, relay)
+                .await
+                .map_err(|e| anyhow::anyhow!("发送握手包失败: {e}"))?;
+        }
+        // 等应答最多一个重发周期；缓冲需容下 DIAL ACK 全尾巴（50B + 4×19B 地址）
+        let mut buf = [0u8; 256];
         loop {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
@@ -368,6 +395,7 @@ pub async fn connect_via_relay_punch(
         &sock,
         relay,
         &target_fp,
+        id,
         Role::Controller,
         &[],
         HANDSHAKE_TIMEOUT,
@@ -549,6 +577,7 @@ pub async fn bind_via_relay_ex(
         &sock,
         relay,
         &local_fp,
+        id,
         Role::Agent,
         &candidates,
         HANDSHAKE_TIMEOUT,
@@ -749,6 +778,7 @@ mod tests {
             &ctrl_sock,
             relay_addr,
             &server_fp,
+            &client_id,
             Role::Controller,
             &[],
             HANDSHAKE_TIMEOUT,

@@ -6,6 +6,11 @@ description = "rd native relay: tagged-UDP forwarder (E2E encrypted traffic only
 
 [dependencies]
 anyhow = { workspace = true }
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+sha2 = "0.10"
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+rcgen = { workspace = true }
