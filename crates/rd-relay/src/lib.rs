@@ -14,14 +14,16 @@
 //!   status: 1=ok 2=not_found 3=conflict（fp→tag 冲突）
 //! tag = fingerprint 前 8 字节（自证书指纹派生，无需协商；碰撞概率可忽略）
 //!
-//! ## 打洞协调（T-034）
+//! ## 打洞协调（T-034/T-035）
 //! DIAL 成功时中继顺带做两件事：
-//! 1. DIAL ACK 尾部附上被控端在中继处的 NAT 地址（`[family][port][ip]`，
-//!    family 4=IPv4/6=IPv6）——旧客户端不认识这个尾巴，忽略即可；
+//! 1. DIAL ACK 尾部附上被控端地址列表（`[family][port][ip]` 逐个连排）：
+//!    首个 = 被控端在中继处的 NAT 映射（反射打洞的探测目标），其余 =
+//!    被控端随 REG 上报的直连候选（本机网卡地址/UPnP 外部映射等，上限
+//!    [`MAX_CANDIDATES`]）——旧客户端只读首个，忽略其余；
 //! 2. 向被控端发 PUNCH_NOTIFY（携带控制端在中继处的地址）。
-//! 双端据此互发探测包（[`PUNCH_PROBE`]）开 NAT 洞：控制端从被控端探测包的
-//! 源地址学到其直连 socket 的公网映射，直接对它发起 QUIC；打洞失败仍走
-//! 中继打标转发。旧中继（不回地址/不发通知）→ 双端自然退化为纯中继路径。
+//! 控制端拿到列表后**多路竞速**：对映射地址做反射打洞（互发
+//! [`PUNCH_PROBE`] 开洞学映射）、对候选直接发起 QUIC、与中继路径同场竞速，
+//! 谁先握手完成用谁。旧中继（不回地址/不发通知）→ 自然退化为纯中继路径。
 //! ```
 //!
 //! ## 为什么不是"流拼接"
@@ -65,14 +67,18 @@ const CTRL_LEN: usize = 41;
 const ACK_BASE_LEN: usize = CTRL_LEN + 1 + 8;
 /// 双端打洞探测包的固定载荷（非 QUIC；QUIC 端点收到会静默丢弃）。
 pub const PUNCH_PROBE: &[u8] = b"RDPUNCH1";
+/// 被控端上报的直连候选地址上限（控制报 ≤1500B：REG ≈ 41+4×19B，余量充足）。
+pub const MAX_CANDIDATES: usize = 4;
 
-/// 会话：一个被控端指纹 ↔ 双端最新 NAT 地址。
+/// 会话：一个被控端指纹 ↔ 双端最新 NAT 地址 + 被控端上报的直连候选（T-035）。
 struct Session {
     fp: [u8; 32],
     agent: Option<SocketAddr>,
     agent_seen: Instant,
     ctrl: Option<SocketAddr>,
     ctrl_seen: Instant,
+    /// 被控端直连候选（本机网卡地址/UPnP 映射等，agent 采集后随 REG 上报）。
+    candidates: Vec<SocketAddr>,
 }
 
 /// 状态表 + GC 共享句柄。
@@ -163,26 +169,57 @@ pub fn decode_addr(buf: &[u8], off: usize) -> Option<(SocketAddr, usize)> {
     })
 }
 
-/// DIAL ACK 编码：基础应答 + 可选的被控端地址尾巴（打洞协调）。
-pub fn encode_dial_ack(
-    fp: &[u8; 32],
-    status: u8,
-    tag: u64,
-    agent_addr: Option<SocketAddr>,
-) -> Vec<u8> {
+/// DIAL ACK 编码：基础应答 + 可选地址尾巴（打洞协调）：`[中继处映射地址]
+/// [被控端直连候选...]`。首个为被控端在中继处的映射地址（探测/反射学习
+/// 目标），其余为被控端上报的直连候选。旧客户端只读首个，行为不变。
+pub fn encode_dial_ack(fp: &[u8; 32], status: u8, tag: u64, agent_addrs: &[SocketAddr]) -> Vec<u8> {
     let mut out = encode_control_ack(TYPE_DIAL_ACK, fp, status, tag);
-    if let Some(addr) = agent_addr {
-        encode_addr(&mut out, &addr);
+    for addr in agent_addrs {
+        encode_addr(&mut out, addr);
     }
     out
 }
 
-/// 读取 DIAL ACK 尾巴里的被控端地址（无尾巴 = 旧中继 → 不打洞）。
-pub fn decode_dial_ack_agent_addr(buf: &[u8]) -> Option<SocketAddr> {
-    if buf.len() <= ACK_BASE_LEN {
-        return None;
+/// 读取 DIAL ACK 尾巴里的地址列表（空 = 旧中继 → 不打洞）。
+pub fn decode_dial_ack_agent_addrs(buf: &[u8]) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    let mut off = ACK_BASE_LEN;
+    while off < buf.len() {
+        match decode_addr(buf, off) {
+            Some((addr, used)) => {
+                out.push(addr);
+                off += used;
+            }
+            None => break, // 坏尾巴：保留已解出的部分
+        }
     }
-    decode_addr(buf, ACK_BASE_LEN).map(|(a, _)| a)
+    out
+}
+
+/// REG 编码：`[tag0][type1][fp32][候选地址...]`——被控端把直连候选（本机
+/// 网卡地址、UPnP 外部映射等）随注册上报，中继存进会话供 DIAL ACK 下发。
+pub fn encode_reg(fp: &[u8; 32], candidates: &[SocketAddr]) -> Vec<u8> {
+    let mut out = encode_control(TYPE_REG, fp);
+    for addr in candidates.iter().take(MAX_CANDIDATES) {
+        encode_addr(&mut out, addr);
+    }
+    out
+}
+
+/// 解码 REG 尾巴里的直连候选（无尾巴 = 旧 agent，兼容）。
+pub fn decode_reg_candidates(buf: &[u8]) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    let mut off = CTRL_LEN;
+    while off < buf.len() && out.len() < MAX_CANDIDATES {
+        match decode_addr(buf, off) {
+            Some((addr, used)) => {
+                out.push(addr);
+                off += used;
+            }
+            None => break,
+        }
+    }
+    out
 }
 
 /// PUNCH_NOTIFY 编码：[tag0][type5][fp32][发起方地址]。
@@ -276,6 +313,7 @@ async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8],
             let reply = {
                 let mut t = table.lock().expect("relay table 锁中毒");
                 let tag = Table::tag_of(&fp);
+                let candidates = decode_reg_candidates(pkt);
                 // 冲突判定：同 tag 但指纹不同
                 let conflict = match t.by_tag.get(&tag) {
                     Some(existing) => existing.fp != fp,
@@ -293,11 +331,13 @@ async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8],
                             agent_seen: Instant::now(),
                             ctrl: None,
                             ctrl_seen: Instant::now(),
+                            candidates: Vec::new(),
                         }
                     });
-                    // NAT 地址始终以最新出包为准
+                    // NAT 地址与直连候选始终以最新出包为准
                     s.agent = Some(from);
                     s.agent_seen = Instant::now();
+                    s.candidates = candidates;
                     tracing::debug!(tag, peer = %from, "REG 刷新");
                     Some(encode_control_ack(TYPE_REG_ACK, &fp, STATUS_OK, tag))
                 }
@@ -314,13 +354,16 @@ async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8],
                         s.ctrl = Some(from);
                         s.ctrl_seen = Instant::now();
                         tracing::info!(tag, peer = %from, "控制端接入");
+                        // 地址列表：首个 = 中继处映射地址（探测目标），其余 = 直连候选
                         let agent_addr = s.agent;
+                        let mut addrs = agent_addr.into_iter().collect::<Vec<_>>();
+                        addrs.extend(s.candidates.iter().copied());
                         let notify = agent_addr.map(|addr| (encode_punch_notify(&fp, &from), addr));
-                        (encode_dial_ack(&fp, STATUS_OK, tag, agent_addr), notify)
+                        (encode_dial_ack(&fp, STATUS_OK, tag, &addrs), notify)
                     }
                     _ => {
                         tracing::debug!(peer = %from, "DIAL 目标不在线");
-                        (encode_dial_ack(&fp, STATUS_NOT_FOUND, 0, None), None)
+                        (encode_dial_ack(&fp, STATUS_NOT_FOUND, 0, &[]), None)
                     }
                 }
             };
@@ -546,6 +589,63 @@ mod tests {
         assert!(decode_addr(&[7, 0, 0, 1, 2, 3, 4], 0).is_none());
     }
 
+    /// 候选地址管道（T-035）：REG 尾巴携带候选 → 会话存储 → DIAL ACK 返回
+    /// `[中继处映射地址, 候选...]`；超出上限的候选被截断。
+    #[tokio::test]
+    async fn reg候选上报_dial_ack下发() -> anyhow::Result<()> {
+        let relay = spawn("127.0.0.1:0".parse()?).await?;
+        let fp = [7u8; 32];
+        let cands: Vec<SocketAddr> = ["10.0.0.5:21118", "192.168.1.9:21118", "[fd00::5]:21118"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+
+        let agent = UdpSocket::bind("127.0.0.1:0").await?;
+        let agent_local = agent.local_addr()?;
+        agent.send_to(&encode_reg(&fp, &cands), relay).await?;
+        wait_for(
+            || {
+                let mut buf = [0u8; 64];
+                match agent.try_recv_from(&mut buf) {
+                    Ok((n, from))
+                        if from == relay
+                            && decode_control_ack_tail(&buf[..n])
+                                .map(|(s, _)| s == STATUS_OK)
+                                .unwrap_or(false) =>
+                    {
+                        Some(())
+                    }
+                    _ => None,
+                }
+            },
+            Duration::from_secs(3),
+        )
+        .await?;
+
+        let ctrl = UdpSocket::bind("127.0.0.1:0").await?;
+        ctrl.send_to(&encode_control(TYPE_DIAL, &fp), relay).await?;
+        let acked = wait_for(
+            || {
+                let mut buf = [0u8; 256];
+                match ctrl.try_recv_from(&mut buf) {
+                    Ok((n, from)) if from == relay => {
+                        decode_control_ack_tail(&buf[..n]).filter(|(s, _)| *s == STATUS_OK)?;
+                        let v = decode_dial_ack_agent_addrs(&buf[..n]);
+                        (!v.is_empty()).then_some(v)
+                    }
+                    _ => None,
+                }
+            },
+            Duration::from_secs(3),
+        )
+        .await?;
+        // 首个 = 映射地址，其后 = 候选原序
+        let mut expect = vec![agent_local];
+        expect.extend(cands);
+        assert_eq!(acked, expect, "DIAL ACK 应为 [映射地址, 候选...]");
+        Ok(())
+    }
+
     /// 打洞协调全链路（协议层）：REG → DIAL →
     /// ① DIAL ACK 尾巴携带被控端在中继处的地址；② 被控端收到 PUNCH_NOTIFY
     /// 且其中的发起方地址 = 控制端 socket 地址。
@@ -582,14 +682,15 @@ mod tests {
         let ctrl_local = ctrl.local_addr()?;
         ctrl.send_to(&encode_control(TYPE_DIAL, &fp_agent), relay)
             .await?;
-        // ① ACK 带被控端地址（= agent 的本机地址，loopback 无 NAT）
-        let acked_agent_addr = wait_for(
+        // ① ACK 带被控端地址列表（无候选上报时仅含映射地址 = agent 本机地址）
+        let acked_agent_addrs = wait_for(
             || {
-                let mut buf = [0u8; 64];
+                let mut buf = [0u8; 128];
                 match ctrl.try_recv_from(&mut buf) {
                     Ok((n, from)) if from == relay => {
                         decode_control_ack_tail(&buf[..n]).filter(|(s, _)| *s == STATUS_OK)?;
-                        decode_dial_ack_agent_addr(&buf[..n])
+                        let v = decode_dial_ack_agent_addrs(&buf[..n]);
+                        (!v.is_empty()).then_some(v)
                     }
                     _ => None,
                 }
@@ -597,7 +698,11 @@ mod tests {
             Duration::from_secs(3),
         )
         .await?;
-        assert_eq!(acked_agent_addr, agent_local, "ACK 尾巴应是被控端地址");
+        assert_eq!(
+            acked_agent_addrs,
+            vec![agent_local],
+            "ACK 首个应是被控端映射地址"
+        );
 
         // ② agent 收到 PUNCH_NOTIFY，发起方地址 = ctrl 本机地址
         let (fp, initiator) = wait_for(

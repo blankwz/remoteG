@@ -18,6 +18,7 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 if-addrs = "0.13"
+igd = "0.12"
 rd-capture-win = { path = "../../crates/rd-capture-win" }
 rd-encode = { path = "../../crates/rd-encode" }
 rd-input-win = { path = "../../crates/rd-input-win" }

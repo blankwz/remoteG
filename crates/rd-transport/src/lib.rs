@@ -20,6 +20,8 @@ pub use conn::{
 pub use direct::bind_udp_socket;
 pub use framing::{DataFrame, StreamKind, TileHeader, VideoHeader};
 pub use identity::{Fingerprint, Identity};
+/// 直连候选上限（透传 rd-relay 协议常量，agent 采集端用）。
+pub use rd_relay::MAX_CANDIDATES;
 pub use relay::{
     bind_via_relay, bind_via_relay_ex, connect_via_relay, connect_via_relay_punch,
     parse_relay_addr, punch_enabled, punch_respond, ConnPath, RelayServer,

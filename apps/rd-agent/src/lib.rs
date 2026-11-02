@@ -17,6 +17,7 @@ pub mod input_handler;
 pub mod netinfo;
 pub mod power;
 pub mod privacy;
+pub mod punch_candidates;
 pub mod server;
 pub mod session;
 pub mod term_handler;
@@ -170,11 +171,24 @@ pub fn start(
             // socket（与 QUIC accept 同端口）向控制端发探测包，帮它开洞直连。
             let punch_on = rd_transport::relay::punch_enabled();
             let punch_socks = punch_on.then(|| direct_socks.clone());
+            // 直连候选（T-035）：本机网卡地址 + UPnP 外部映射，随 REG 上报
+            let listen_port = bound.first().map(|a| a.port()).unwrap_or(21118);
             let state = Arc::clone(&state);
             tokio::spawn(async move {
+                let candidates = if punch_on {
+                    punch_candidates::collect(listen_port).await
+                } else {
+                    Vec::new()
+                };
                 match rd_transport::relay::parse_relay_addr(&raw) {
                     Ok(addr) => {
-                        match rd_transport::relay::bind_via_relay_ex(addr, &state.identity).await {
+                        match rd_transport::relay::bind_via_relay_ex(
+                            addr,
+                            &state.identity,
+                            candidates,
+                        )
+                        .await
+                        {
                             Ok(relay_server) => {
                                 tracing::info!(%addr, "原生中继监听就绪（跨网兜底入口）");
                                 if let Some(socks) = punch_socks {

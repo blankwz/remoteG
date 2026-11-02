@@ -37,8 +37,8 @@ use crate::conn::{self, Conn};
 use crate::direct::DirectUdpSocket;
 use crate::identity::{Fingerprint, Identity};
 use rd_relay::{
-    decode_control, decode_control_ack_tail, decode_dial_ack_agent_addr, encode_control,
-    DEFAULT_PORT, PUNCH_PROBE,
+    decode_control, decode_control_ack_tail, decode_dial_ack_agent_addrs, encode_control,
+    encode_reg, DEFAULT_PORT, PUNCH_PROBE,
 };
 
 /// 握手超时（覆盖「被控端还没注册」的等待窗口；REG/DIAL 每 500ms 重试一次）。
@@ -86,20 +86,25 @@ enum Role {
     Controller,
 }
 
-/// 在 `sock` 上完成 REG/DIAL 握手，返回 (会话 tag, 被控端中继处地址)。
-/// 地址仅 Controller 角色且中继支持打洞协调时为 Some。带重试与 NAT 保活语义。
+/// 在 `sock` 上完成 REG/DIAL 握手，返回 (会话 tag, 地址列表)。
+/// 列表仅 Controller 角色且中继支持打洞协调时非空：`[中继处映射地址,
+/// 直连候选...]`。`candidates` 仅 Agent 角色生效（随 REG 上报直连候选）。
+/// 带重试与 NAT 保活语义。
 async fn relay_handshake(
     sock: &UdpSocket,
     relay: SocketAddr,
     fp: &Fingerprint,
     role: Role,
+    candidates: &[SocketAddr],
     timeout: Duration,
-) -> anyhow::Result<(u64, Option<SocketAddr>)> {
-    let (send_kind, ack_kind) = match role {
-        Role::Agent => (rd_relay::TYPE_REG, rd_relay::TYPE_REG_ACK),
-        Role::Controller => (rd_relay::TYPE_DIAL, rd_relay::TYPE_DIAL_ACK),
+) -> anyhow::Result<(u64, Vec<SocketAddr>)> {
+    let (ack_kind, msg) = match role {
+        Role::Agent => (rd_relay::TYPE_REG_ACK, encode_reg(&fp.0, candidates)),
+        Role::Controller => (
+            rd_relay::TYPE_DIAL_ACK,
+            encode_control(rd_relay::TYPE_DIAL, &fp.0),
+        ),
     };
-    let msg = encode_control(send_kind, &fp.0);
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() >= deadline {
@@ -143,12 +148,13 @@ async fn relay_handshake(
             };
             match status {
                 rd_relay::STATUS_OK => {
-                    // 打洞协调：DIAL ACK 尾巴的被控端地址（旧中继无尾巴 → None）
-                    let agent_addr = match role {
-                        Role::Controller => decode_dial_ack_agent_addr(&buf[..n]),
-                        Role::Agent => None,
+                    // 打洞协调（T-034/T-035）：DIAL ACK 尾巴的地址列表
+                    // `[中继处映射地址, 直连候选...]`（旧中继无尾巴 → 空）
+                    let agent_addrs = match role {
+                        Role::Controller => decode_dial_ack_agent_addrs(&buf[..n]),
+                        Role::Agent => Vec::new(),
                     };
-                    return Ok((tag, agent_addr));
+                    return Ok((tag, agent_addrs));
                 }
                 // 被控端还没注册上：继续等（重发 DIAL）
                 rd_relay::STATUS_NOT_FOUND => break,
@@ -332,8 +338,8 @@ impl AsyncUdpSocket for RelayUdpSocket {
 pub enum ConnPath {
     /// 经中继打标转发（打洞失败/不可用的兜底）。
     Relay,
-    /// 打洞成功的直连（打洞竞速的优选）。
-    PunchDirect,
+    /// 直连命中（反射打洞或候选地址直连，T-034/T-035）。
+    Direct,
 }
 
 /// 控制端拨号：经中继连接指纹为 `target_fp` 的被控端（E2E 加密与直连一致）。
@@ -348,9 +354,9 @@ pub async fn connect_via_relay(
         .map(|(_, conn)| conn)
 }
 
-/// 控制端拨号（打洞竞速版，T-034）：DIAL 拿到被控端中继处地址后，
-/// 中继 QUIC 与打洞直连**竞速**，谁先完成握手用谁；输者直接丢弃。
-/// 中继不支持打洞协调（旧版 relay / 无地址尾巴）时自动退化为纯中继。
+/// 控制端拨号（打洞竞速版，T-034/T-035）：DIAL 拿到被控端地址列表后，
+/// 中继 QUIC 与全部直连路（反射打洞 + 各候选直连）**竞速**，谁先完成握手
+/// 用谁；输者直接丢弃。列表为空（旧版 relay）时自动退化为纯中继。
 pub async fn connect_via_relay_punch(
     relay: SocketAddr,
     target_fp: Fingerprint,
@@ -358,47 +364,48 @@ pub async fn connect_via_relay_punch(
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<(ConnPath, Conn)> {
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let (tag, agent_addr) = relay_handshake(
+    let (tag, agent_addrs) = relay_handshake(
         &sock,
         relay,
         &target_fp,
         Role::Controller,
+        &[],
         HANDSHAKE_TIMEOUT,
     )
     .await?;
-    tracing::info!(%relay, tag, "中继握手完成（DIAL），开始双路竞速");
+    tracing::info!(
+        %relay,
+        tag,
+        candidates = agent_addrs.len(),
+        "中继握手完成（DIAL），开始多路竞速"
+    );
 
     // 路 A：中继打标转发（sock 已完成握手，直接交给虚拟 socket）
     let relay_fut = connect_relay_session(sock, tag, relay, id, expected);
-    // 路 B：打洞直连（无地址尾巴 = 旧中继 → 立即失败，只剩路 A）
-    let punch_fut = async {
-        match agent_addr {
-            Some(agent_addr) => punch_direct_connect(relay, agent_addr, id, expected).await,
-            None => anyhow::bail!("中继不支持打洞协调（旧版），走纯中继"),
-        }
-    };
+    // 路 B：全部直连路竞速（反射打洞 + 候选直连；空列表 = 旧中继 → 立即失败）
+    let direct_fut = connect_direct_racing(relay, agent_addrs, id, expected);
 
-    tokio::pin!(relay_fut, punch_fut);
+    tokio::pin!(relay_fut, direct_fut);
     let mut relay_err = None;
-    let mut punch_err = None;
+    let mut direct_err = None;
     let conn = loop {
         tokio::select! {
             r = &mut relay_fut, if relay_err.is_none() => match r {
                 Ok(conn) => break (ConnPath::Relay, conn),
                 Err(e) => relay_err = Some(e),
             },
-            p = &mut punch_fut, if punch_err.is_none() => match p {
-                Ok(conn) => break (ConnPath::PunchDirect, conn),
+            p = &mut direct_fut, if direct_err.is_none() => match p {
+                Ok(conn) => break (ConnPath::Direct, conn),
                 Err(e) => {
-                    tracing::info!(err = %e, "打洞未成，等待中继路径");
-                    punch_err = Some(e);
+                    tracing::info!(err = %e, "直连各路未成，等待中继路径");
+                    direct_err = Some(e);
                 }
             },
             else => {
                 // 两条路都失败：中继错误优先返回（诊断价值更高）
                 let e = relay_err
                     .take()
-                    .or(punch_err.take())
+                    .or(direct_err.take())
                     .expect("loop 退出必有错误");
                 return Err(e);
             }
@@ -406,7 +413,7 @@ pub async fn connect_via_relay_punch(
     };
     match conn.0 {
         ConnPath::Relay => tracing::info!("竞速结果：走中继"),
-        ConnPath::PunchDirect => tracing::info!("竞速结果：打洞直连命中"),
+        ConnPath::Direct => tracing::info!("竞速结果：直连命中"),
     }
     Ok(conn)
 }
@@ -424,7 +431,69 @@ async fn connect_relay_session(
     conn::connect_over(socket, relay, id, expected).await
 }
 
-/// 打洞直连（路 B）：与被控端互发探测包开洞 → 从被控端探测包源地址学到其
+/// 全部直连路竞速（路 B，T-035）：`candidates[0]`（中继处映射地址）走反射
+/// 打洞（互发探测学映射），其余候选直接对它发起 QUIC（候选 = 本机网卡
+/// 地址/UPnP 外部映射等已可达入口，无需探测）。任一路先完成即胜出。
+async fn connect_direct_racing(
+    relay: SocketAddr,
+    candidates: Vec<SocketAddr>,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    if candidates.is_empty() {
+        anyhow::bail!("中继不支持打洞协调（旧版），走纯中继");
+    }
+    // 各路并发成独立任务，结果经通道汇流；首个 Ok 胜出，其余随任务结束丢弃
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut dials: Vec<(&str, SocketAddr)> = vec![("punch-reflex", candidates[0])];
+    dials.extend(candidates.iter().skip(1).map(|c| ("candidate", *c)));
+    let mut pending = 0usize;
+    for (kind, addr) in dials {
+        let tx = tx.clone();
+        let id = id.clone();
+        pending += 1;
+        tokio::spawn(async move {
+            let r = match kind {
+                "punch-reflex" => punch_direct_connect(relay, addr, &id, expected).await,
+                _ => {
+                    tracing::info!(%addr, "候选直连：直接发起 QUIC");
+                    connect_candidate(addr, &id, expected).await
+                }
+            };
+            let _ = tx.send(r);
+        });
+    }
+    drop(tx);
+    let mut last_err = None;
+    while pending > 0 {
+        match rx.recv().await {
+            Some(Ok(conn)) => return Ok(conn),
+            Some(Err(e)) => {
+                tracing::debug!(err = %e, "一条直连路失败");
+                last_err = Some(e);
+                pending -= 1;
+            }
+            None => break,
+        }
+    }
+    Err(last_err.expect("至少一条直连路"))
+}
+
+/// 候选地址直连：对「已可达入口」（IPv6 全局地址、UPnP 映射、同网段地址等）
+/// 直接发起 QUIC，窗口 [`PUNCH_WINDOW`] 内握手不成即放弃。
+async fn connect_candidate(
+    cand: SocketAddr,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    let sock = crate::direct::bind_udp_socket("0.0.0.0:0".parse().unwrap()).await?;
+    let fut = conn::connect_over(DirectUdpSocket::new(sock), cand, id, expected);
+    tokio::time::timeout(punch_window(), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("候选直连超时（{cand}）"))?
+}
+
+/// 反射打洞：与被控端互发探测包开洞 → 从被控端探测包源地址学到其
 /// 直连 socket 的公网映射 → 用同一个 socket（同端口=同 NAT 映射，兼容端口
 /// 受限型 NAT）对它发起 QUIC。窗口 [`PUNCH_WINDOW`] 内学不到映射即失败。
 async fn punch_direct_connect(
@@ -466,25 +535,43 @@ pub struct RelayServer {
     pub punch_req: mpsc::UnboundedReceiver<SocketAddr>,
 }
 
-/// 被控端监听（完整版）：向中继注册（REG），后续连接经中继进来；同时拿到
-/// 打洞请求通道——[`punch_respond`] 消费它向控制端发探测包开洞。
-pub async fn bind_via_relay_ex(relay: SocketAddr, id: &Identity) -> anyhow::Result<RelayServer> {
+/// 被控端监听（完整版）：向中继注册（REG，附带 `candidates` 直连候选供
+/// DIAL ACK 下发），后续连接经中继进来；同时拿到打洞请求通道——
+/// [`punch_respond`] 消费它向控制端发探测包开洞。
+pub async fn bind_via_relay_ex(
+    relay: SocketAddr,
+    id: &Identity,
+    candidates: Vec<SocketAddr>,
+) -> anyhow::Result<RelayServer> {
     let local_fp = id.fingerprint();
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let (tag, _) = relay_handshake(&sock, relay, &local_fp, Role::Agent, HANDSHAKE_TIMEOUT).await?;
-    tracing::info!(%relay, tag, "中继握手完成（REG），QUIC 监听改走中继");
+    let (tag, _) = relay_handshake(
+        &sock,
+        relay,
+        &local_fp,
+        Role::Agent,
+        &candidates,
+        HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    tracing::info!(
+        %relay,
+        tag,
+        candidates = candidates.len(),
+        "中继握手完成（REG），QUIC 监听改走中继"
+    );
     let (punch_tx, punch_req) = mpsc::unbounded_channel();
     let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, Some(punch_tx));
     let server = crate::conn::Server::bind_over(socket, id)?;
     Ok(RelayServer { server, punch_req })
 }
 
-/// 被控端监听（兼容版）：只要 QUIC Server，不要打洞通道。
+/// 被控端监听（兼容版）：只要 QUIC Server，不要打洞通道与候选上报。
 pub async fn bind_via_relay(
     relay: SocketAddr,
     id: &Identity,
 ) -> anyhow::Result<crate::conn::Server> {
-    Ok(bind_via_relay_ex(relay, id).await?.server)
+    Ok(bind_via_relay_ex(relay, id, Vec::new()).await?.server)
 }
 
 /// 被控端打洞响应：通道里的每个地址都从所有直连 QUIC socket（与 accept 共
@@ -650,7 +737,7 @@ mod tests {
         // 被控端：直连 QUIC server（探测与 accept 共端口）+ 中继注册 + 真实响应者
         let direct_sock = crate::direct::bind_udp_socket("127.0.0.1:0".parse().unwrap()).await?;
         let direct_server = crate::Server::bind_socket(Arc::clone(&direct_sock), &server_id)?;
-        let relay_server = bind_via_relay_ex(relay_addr, &server_id).await?;
+        let relay_server = bind_via_relay_ex(relay_addr, &server_id, Vec::new()).await?;
         tokio::spawn(punch_respond(
             relay_server.punch_req,
             vec![Arc::clone(&direct_sock)],
@@ -658,15 +745,19 @@ mod tests {
 
         // 控制端：完成中继握手，拿到被控端在中继处的地址
         let ctrl_sock = UdpSocket::bind("127.0.0.1:0").await?;
-        let (_, agent_addr) = relay_handshake(
+        let (_, agent_addrs) = relay_handshake(
             &ctrl_sock,
             relay_addr,
             &server_fp,
             Role::Controller,
+            &[],
             HANDSHAKE_TIMEOUT,
         )
         .await?;
-        let agent_addr = agent_addr.expect("新版中继 DIAL ACK 应带地址尾巴");
+        let agent_addr = agent_addrs
+            .first()
+            .copied()
+            .expect("新版中继 DIAL ACK 应带地址尾巴");
 
         // 被控端 accept（指纹钉扎断言）
         let accepter = tokio::spawn(async move {
@@ -681,6 +772,42 @@ mod tests {
         assert_eq!(conn.peer_fingerprint(), server_fp, "E2E 指纹必须钉扎成功");
         accepter.await??;
         conn.close(0, "punch e2e done");
+        Ok(())
+    }
+
+    /// 候选直连竞速（T-035）：agent 经 REG 上报直连候选（一个可达 QUIC
+    /// server + 一个死地址），不响应打洞请求（反射路超时）→ 竞速命中候选。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 候选直连_竞速命中可达候选() -> anyhow::Result<()> {
+        let relay_addr = relay_spawn("127.0.0.1:0".parse()?).await?;
+        let server_id = Identity::generate("cand-server")?;
+        let client_id = Identity::generate("cand-client")?;
+        let server_fp = server_id.fingerprint();
+        let client_fp = client_id.fingerprint();
+
+        // 被控端：可达候选 = 独立的 QUIC server（模拟 IPv6/UPnP 入口）；
+        // 死地址 = 不可达候选（竞速里应被自动淘汰）
+        let cand_sock = crate::direct::bind_udp_socket("127.0.0.1:0".parse().unwrap()).await?;
+        let cand_server = crate::Server::bind_socket(Arc::clone(&cand_sock), &server_id)?;
+        let cand_addr = cand_sock.local_addr()?;
+        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        // 注册（带候选）但不消费 punch_req：反射路必然超时
+        let _server = bind_via_relay_ex(relay_addr, &server_id, vec![cand_addr, dead])
+            .await?
+            .server;
+        let accepter = tokio::spawn(async move {
+            let conn = cand_server.accept().await?;
+            assert_eq!(conn.peer_fingerprint(), client_fp, "E2E 指纹必须钉扎成功");
+            anyhow::Ok(())
+        });
+
+        let (path, conn) =
+            connect_via_relay_punch(relay_addr, server_fp, &client_id, Some(server_fp)).await?;
+        assert_eq!(path, ConnPath::Direct, "可达候选应先于中继命中");
+        assert_eq!(conn.peer_fingerprint(), server_fp, "E2E 指纹必须钉扎成功");
+        accepter.await??;
+        conn.close(0, "candidate e2e done");
         Ok(())
     }
 
