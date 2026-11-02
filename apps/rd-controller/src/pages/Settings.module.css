@@ -52,6 +52,12 @@
   color: var(--rd-text-faint);
 }
 
+/* 行内错误提示（P1-2 中继地址校验失败等） */
+.hintError {
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-err);
+}
+
 .select {
   flex: none;
   padding: 5px 10px;

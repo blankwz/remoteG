@@ -16,6 +16,9 @@ export interface DismissOptions {
   readonly menu?: boolean;
   /** Tab 困在容器内循环（对话框类浮层）。 */
   readonly trap?: boolean;
+  /** menu 键控与初始聚焦的作用域（触发钮与菜单同容器的下拉用：键控只在
+   * 菜单项间循环，不含触发钮；省略时沿用容器本身）。 */
+  readonly menuScope?: RefObject<HTMLElement | null>;
 }
 
 /** 容器内可聚焦元素（菜单项/按钮）。 */
@@ -43,11 +46,14 @@ export function useDismiss(
     const trigger = document.activeElement as HTMLElement | null;
     const opts = optionsRef.current;
 
-    if (opts.menu && ref.current !== null) {
-      // 打开即聚焦首项（APG：menu 打开后方向键即生效）
-      const items = focusablesIn(ref.current);
-      if (items.length > 0) {
-        (items[0] as HTMLElement).focus();
+    if (opts.menu) {
+      // 打开即聚焦首项（APG：menu 打开后方向键即生效）；作用域优先 menuScope
+      const scope = opts.menuScope?.current ?? ref.current;
+      if (scope !== null) {
+        const items = focusablesIn(scope);
+        if (items.length > 0) {
+          (items[0] as HTMLElement).focus();
+        }
       }
     }
 
@@ -85,7 +91,7 @@ export function useDismiss(
         return;
       }
       if (opts.menu && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End")) {
-        const items = focusablesIn(el);
+        const items = focusablesIn(opts.menuScope?.current ?? el);
         if (items.length === 0) {
           return;
         }

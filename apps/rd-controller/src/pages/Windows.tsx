@@ -19,7 +19,8 @@ import {
   type WindowDto,
   type WindowEventDto,
 } from "../api/windows";
-import { IconArrowLeft, IconChevronDown, IconRefresh, IconSearch, IconTerminal } from "../ui/Icon";
+import { IconArrowLeft, IconRefresh, IconSearch } from "../ui/Icon";
+import { ShellMenu } from "../ui/ShellMenu";
 import styles from "./Windows.module.css";
 
 /**
@@ -361,29 +362,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
             <IconRefresh size={13} />
             刷新
           </button>
-          <details className={styles.termMenu}>
-            <summary className={styles.termBtn}>
-              <IconTerminal size={14} />
-              新建终端
-              <IconChevronDown size={12} />
-            </summary>
-            <div className={styles.termItems}>
-              {SHELLS.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className={styles.termItem}
-                  onClick={(e) => {
-                    e.currentTarget.closest("details")?.removeAttribute("open");
-                    openTerminal(s.id);
-                  }}
-                >
-                  <IconTerminal size={13} />
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </details>
+          <ShellMenu shells={SHELLS} onPick={openTerminal} variant="primary" />
         </div>
       </header>
 
@@ -465,7 +444,11 @@ export function Windows({ deviceId }: { deviceId: string }) {
       )}
 
       {status === "ready" && view === "map" && windows.length > 0 && filtered.length > 0 && (
-        <div className={styles.desktopMap} aria-label="远端桌面窗口布局（点击窗口打开会话）">
+        <div
+          className={styles.desktopMap}
+          aria-label="远端桌面窗口布局（点击窗口打开会话）。按 1920×1080 虚拟桌面摆位，远端为多屏或超宽分辨率时布局仅供参考。"
+          title="按 1920×1080 虚拟桌面摆位；远端为多屏或超宽分辨率时布局仅供参考，窗口位置以列表视图为准"
+        >
           {mapRects.map((r) => (
             <button
               key={r.id}

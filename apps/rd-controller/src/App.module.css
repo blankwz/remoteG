@@ -32,13 +32,16 @@
   --rd-shadow: 0 6px 20px rgb(0 0 0 / 40%);
   --rd-shadow-pop: 0 12px 40px rgb(0 0 0 / 55%);
   --rd-font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* 全局 UI 缩放（P1-4）：根节点 --rd-ui-scale（默认 1），字号阶梯按它缩放；
+     切档只改这一个变量，即时生效、布局零重排冲突 */
+  --rd-ui-scale: 1;
   /* 字号阶梯（UX R1）：页面标题 / 卡片标题 / 正文 / 辅助 / 标注 */
-  --rd-fs-h1: 20px;
-  --rd-fs-md: 14px;
-  --rd-fs-title: 15px;
-  --rd-fs-body: 13px;
-  --rd-fs-dim: 12px;
-  --rd-fs-micro: 11px;
+  --rd-fs-h1: calc(20px * var(--rd-ui-scale));
+  --rd-fs-md: calc(14px * var(--rd-ui-scale));
+  --rd-fs-title: calc(15px * var(--rd-ui-scale));
+  --rd-fs-body: calc(13px * var(--rd-ui-scale));
+  --rd-fs-dim: calc(12px * var(--rd-ui-scale));
+  --rd-fs-micro: calc(11px * var(--rd-ui-scale));
   /* 主色渐变（品牌按钮/标志用） */
   --rd-accent-grad: linear-gradient(135deg, #3269e6, #2b5fd0);
   /* 实心按钮红（白字 5.02:1；--rd-err 保持亮档作深底文字用） */

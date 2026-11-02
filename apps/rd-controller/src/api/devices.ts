@@ -79,7 +79,7 @@ export function getRelayAddr(): Promise<string | null> {
   return call("get_relay_addr");
 }
 
-/** 写被控端原生中继地址（空串 = 清除）；重启 rd 后生效。 */
+/** 写被控端原生中继地址（空串 = 清除）；被控核心随 rd-controller 启动，重启生效。 */
 export function setRelayAddr(relay: string): Promise<void> {
   return call("set_relay_addr", { relay });
 }

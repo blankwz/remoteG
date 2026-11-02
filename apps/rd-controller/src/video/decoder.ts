@@ -169,6 +169,19 @@ export class H264Decoder {
     return this.latestHeader;
   }
 
+  /**
+   * 重置关键帧等待状态（后台标签降流恢复用，P0-3）：跳帧期间参考链已断，
+   * 之后到达的 delta 直到下一个 keyframe 都不可解——复用首帧等待逻辑，
+   * 丢弃 delta 并在 keyframe 到达时续播。尚未见到关键帧时调用无副作用。
+   */
+  resetForKeyframe(): void {
+    if (!this.seenKeyframe) {
+      return;
+    }
+    this.seenKeyframe = false;
+    this.droppedBeforeKey = 0;
+  }
+
   /** 关闭解码器；重复调用安全。 */
   close(): void {
     if (this.closed) return;

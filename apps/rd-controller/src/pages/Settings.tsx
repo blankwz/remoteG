@@ -3,6 +3,9 @@
  * 画质默认（曾埋在会话工具栏）/ Cmd→Ctrl（曾埋在 HUD）/ 弱网纠错（曾埋在
  * 设备页 hostCard）/ 终端字号（曾只有终端内快捷键）/ 自定义常用语管理
  * （曾只进不出）。全部接现有状态与存储，无新后端。
+ *
+ * P1 批次补：远程访问中继地址保存前格式校验（错误只提示不写入）、生效
+ * 文案写实（重启 rd-controller）；外观组新增全局 UI 缩放（P1-4）。
  */
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api/bridge";
@@ -17,6 +20,17 @@ import {
   loadFontSize,
   saveFontSize,
 } from "../term/TermView";
+import {
+  readCustomPhrases,
+  saveCustomPhrases,
+} from "../session/phrases";
+import {
+  UI_SCALES,
+  applyUiScale,
+  loadUiScale,
+  saveUiScale,
+  type UiScale,
+} from "../ui/uiScale";
 import { Switch } from "../ui/Switch";
 import { getRelayAddr, setRelayAddr } from "../api/devices";
 import styles from "./Settings.module.css";
@@ -24,6 +38,27 @@ import styles from "./Settings.module.css";
 /** 把 Error/unknown 统一成消息文本。 */
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * 中继地址保存前校验（P1-2）：与后端 rd_transport::parse_relay_endpoint
+ * 对齐——URL 形式（http/https/ws/wss）或 ip:port（ip 可省端口，后端补
+ * 默认 21118；主机名不带协议不支持，后端 SocketAddr 解析会拒绝）。
+ * 合法返回 null；空串 = 清除中继，合法。
+ */
+export function relayAddrError(raw: string): string | null {
+  const v = raw.trim();
+  if (v.length === 0) {
+    return null;
+  }
+  if (/^(https?|wss?):\/\//i.test(v)) {
+    return v.split("://")[1]?.length ?? 0
+      ? null
+      : "缺主机名：示例 https://xxx.workers.dev";
+  }
+  return /^(\d{1,3}(\.\d{1,3}){3})(:\d{1,5})?$/.test(v)
+    ? null
+    : "格式不对：请填 https://xxx.workers.dev 或 1.2.3.4:21118";
 }
 
 type Quality = "auto" | "high" | "medium" | "low";
@@ -34,20 +69,9 @@ const QUALITY_LABEL: Record<Quality, string> = {
   medium: "均衡",
   low: "流畅（弱网）",
 };
-const PHRASES_KEY = "rd-phrases";
-
 function readQuality(): Quality {
   const saved = window.localStorage.getItem(QUALITY_KEY);
   return saved === "high" || saved === "medium" || saved === "low" ? saved : "auto";
-}
-
-function readPhrases(): readonly string[] {
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(PHRASES_KEY) ?? "[]");
-    return Array.isArray(parsed) ? (parsed as string[]) : [];
-  } catch {
-    return [];
-  }
 }
 
 /** macOS 才显示 Cmd→Ctrl 行（Windows 上是无条件噪音）。 */
@@ -65,8 +89,12 @@ export function Settings() {
   const [relayMsg, setRelayMsg] = useState<string | null>(null);
   const [relayDirty, setRelayDirty] = useState(false);
   const [fontPx, setFontPx] = useState<number>(() => loadFontSize());
-  const [phrases, setPhrases] = useState<readonly string[]>(readPhrases);
+  const [phrases, setPhrases] = useState<readonly string[]>(readCustomPhrases);
   const [fecError, setFecError] = useState<string | null>(null);
+  /** 全局 UI 缩放（P1-4；切换即时生效并持久化）。 */
+  const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
+  /** 中继地址保存前的格式错误（P1-2；有错不写入）。 */
+  const [relayError, setRelayError] = useState<string | null>(null);
 
   void call<boolean>("get_media_fec")
     .then(setFec)
@@ -106,14 +134,27 @@ export function Settings() {
   }, []);
 
   const onSaveRelay = useCallback(async () => {
+    const invalid = relayAddrError(relayAddr);
+    if (invalid !== null) {
+      setRelayError(invalid);
+      return; // 格式错误不写入
+    }
+    setRelayError(null);
     try {
-      await setRelayAddr(relayAddr);
-      setRelayMsg("已保存：重启 rd 后生效");
+      await setRelayAddr(relayAddr.trim());
+      setRelayMsg("已保存：重启 rd-controller 后生效");
       setRelayDirty(false);
     } catch (e) {
       setRelayMsg(`保存失败：${errText(e)}`);
     }
   }, [relayAddr]);
+
+  /** 全局 UI 缩放（P1-4）：改档即时生效 + 持久化。 */
+  const onUiScale = useCallback((s: UiScale) => {
+    setUiScale(s);
+    applyUiScale(s);
+    saveUiScale(s);
+  }, []);
 
   const onFont = useCallback((delta: number) => {
     const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontPx + delta));
@@ -122,19 +163,36 @@ export function Settings() {
   }, [fontPx]);
 
   const removePhrase = useCallback((text: string) => {
-    const next = readPhrases().filter((p) => p !== text);
+    const next = readCustomPhrases().filter((p) => p !== text);
     setPhrases(next);
-    try {
-      window.localStorage.setItem(PHRASES_KEY, JSON.stringify(next));
-    } catch {
-      // 存储不可用仅失去持久化
-    }
+    saveCustomPhrases(next);
   }, []);
 
   return (
     <main className={styles.page}>
       <h1 className={styles.title}>设置</h1>
       <ul className={styles.list}>
+        <li className={styles.section}>外观</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>界面缩放</b>
+            <span className={styles.hint}>
+              放大整个界面的文字与控件（低视力 / 高分屏适用）；选完立即生效
+            </span>
+          </span>
+          <select
+            className={styles.select}
+            value={uiScale}
+            aria-label="界面缩放"
+            onChange={(e) => onUiScale(Number(e.currentTarget.value) as UiScale)}
+          >
+            {UI_SCALES.map((s) => (
+              <option key={s} value={s}>
+                {Math.round(s * 100)}%
+              </option>
+            ))}
+          </select>
+        </li>
         <li className={styles.section}>连接画质</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -196,6 +254,11 @@ export function Settings() {
               连接时直连优先，失败自动走中继；中继只见密文。
               {relayMsg !== null && ` · ${relayMsg}`}
             </span>
+            {relayError !== null && (
+              <span className={styles.hintError} role="alert">
+                {relayError}
+              </span>
+            )}
           </span>
           <span className={styles.relayEdit}>
             <input
@@ -204,9 +267,11 @@ export function Settings() {
               placeholder="https://xxx.workers.dev 或 1.2.3.4:21118"
               spellCheck={false}
               aria-label="原生中继地址"
+              aria-invalid={relayError !== null}
               onChange={(e) => {
                 setRelayAddrState(e.currentTarget.value);
                 setRelayDirty(true);
+                setRelayError(null);
               }}
             />
             <button
@@ -238,7 +303,9 @@ export function Settings() {
         <li className={styles.row}>
           <span className={styles.label}>
             <b>自定义常用语</b>
-            <span className={styles.hint}>悬浮工具栏「常用语」面板的短语（默认 5 条不可删）</span>
+            <span className={styles.hint}>
+              悬浮工具栏「常用语」面板的短语（默认 5 条不可删；面板内点 × 也可删）
+            </span>
           </span>
           <span className={styles.phrases}>
             {phrases.length === 0 && <span className={styles.hint}>暂无自定义短语</span>}

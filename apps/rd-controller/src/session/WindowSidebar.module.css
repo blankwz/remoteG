@@ -181,3 +181,10 @@
   font-weight: 600;
   color: var(--rd-text-dim);
 }
+
+/* 「已暂停」徽标（P0-3：后台标签停止收流解码，状态要可见） */
+.badgePaused {
+  border: 1px solid rgb(240 180 60 / 40%);
+  background: rgb(240 180 60 / 12%);
+  color: rgb(255 214 130);
+}

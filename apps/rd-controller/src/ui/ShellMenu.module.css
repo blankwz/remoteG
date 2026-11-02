@@ -1,0 +1,106 @@
+/* ShellMenu（P2-③ 新建终端下拉统一）：结构样式在此持有，两页只换触发钮外观 */
+
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.caret {
+  opacity: 0.6;
+}
+
+/* toolbar 变体（会话页工具钮：描边灰） */
+.toolbarBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-body);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.toolbarBtn:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
+  background: rgb(255 255 255 / 4%);
+}
+
+.toolbarBtn:active {
+  transform: translateY(1px);
+}
+
+/* primary 变体（窗口页主操作钮：实心强调色） */
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border: 1px solid var(--rd-accent);
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: var(--rd-fs-body);
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.primaryBtn:hover {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  box-shadow: var(--rd-shadow-pop);
+  z-index: 20;
+}
+
+/* primary 变体（窗口页头靠右对齐）菜单靠右展开 */
+.menuRight {
+  left: auto;
+  right: 0;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 55%);
+}
+
+.item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-body);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 0.1s ease,
+    background-color 0.1s ease;
+}
+
+.item:hover {
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+}

@@ -8,7 +8,8 @@
  * 关闭只移除本地标签，远端会话保留供 resume）。
  *
  * URL 参数：`?open=<windowId>` 自动打开窗口标签；`?term=<shell>` 打开终端
- * 标签（如 `?term=wsl`）。快捷键：Ctrl+Shift+H 切换 HUD、Ctrl+Shift+S 导出
+ * 标签（如 `?term=wsl`）。快捷键速查：工具栏「更多 → 快捷键」或 `?` 键呼出。
+ * 其余：Ctrl+Shift+H 切换 HUD、Ctrl+Shift+S 导出
  * 当前激活窗口标签根窗口的合成 PNG（终端标签激活时为空操作提示）。
  */
 import {
@@ -30,17 +31,16 @@ import { WindowSidebar } from "../session/WindowSidebar";
 import { TermView } from "../term/TermView";
 import { closeWindow } from "../api/session";
 import { disconnectDevice } from "../api/devices";
-import { FloatingToolbar, type Quality } from "../session/FloatingToolbar";
+import { FloatingToolbar, QUALITY_LABEL, type Quality } from "../session/FloatingToolbar";
 import { FilesPanel } from "../session/FilesPanel";
 import { useDismiss } from "../ui/useDismiss";
 import { DEFAULT_TERM_SHELL, TERM_SHELLS, parseShell } from "../api/term";
 import type { TermStatus } from "../term/TermView";
+import { ShellMenu } from "../ui/ShellMenu";
 import {
   IconArrowLeft,
-  IconChevronDown,
   IconEyeOff,
   IconLock,
-  IconPlus,
   IconSidebar,
   IconTerminal,
 } from "../ui/Icon";
@@ -113,16 +113,6 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [deviceAddr, setDeviceAddr] = useState<string | null>(null);
   /** 窗口真实标题表（打开标签时从窗口列表反查，避免标签裸显句柄号）。 */
   const titleCacheRef = useRef<Map<string, string>>(new Map());
-  /** 「+ 终端」shell 选择下拉开关。 */
-  const [termMenuOpen, setTermMenuOpen] = useState(false);
-  /** 下拉容器（Esc/点外关闭协议，R11 D08——唯一出口 useDismiss）。 */
-  const termMenuRef = useRef<HTMLDivElement>(null);
-  useDismiss(
-    termMenuOpen,
-    termMenuRef,
-    useCallback(() => setTermMenuOpen(false), []),
-    { menu: true },
-  );
   /** 录制开始时刻（REC 常驻指示计时用；null = 未在录）。 */
   const [recordingSince, setRecordingSince] = useState<number | null>(null);
   /** 快捷键速查浮层（? 呼出）。 */
@@ -168,9 +158,12 @@ export function Session({ deviceId }: { deviceId: string }) {
     setToast(message);
     setToastError(isError);
     window.clearTimeout(toastTimerRef.current);
+    // 时长自适应（P2-②）：错误/失败文案含下一步指引需要更长阅读时间（8s），
+    // 成功回声 4s 够用——同一套 showToast，调用方零改动
+    const durationMs = isError ? 8000 : 4000;
     toastTimerRef.current = window.setTimeout(() => {
       setToast(null);
-    }, 5000);
+    }, durationMs);
   }, []);
 
   /** 打开窗口组标签（幂等）；store 随标签创建。 */
@@ -289,6 +282,10 @@ export function Session({ deviceId }: { deviceId: string }) {
   const activeTab =
     activeId !== null ? tabs.find((t) => t.id === activeId) ?? null : null;
   const activeWindow = activeTab?.kind === "window" ? activeTab : null;
+  /** 后台暂停收流的窗口标签数（P0-3：非激活标签降流，胶囊要可见）。 */
+  const pausedTabCount = tabs.filter(
+    (t) => t.kind === "window" && t.id !== activeId,
+  ).length;
   const snapshot: SessionSnapshot = useSyncExternalStore(
     activeWindow?.store.subscribe ?? subscribeNoop,
     activeWindow?.store.getSnapshot ?? getEmptySnapshot,
@@ -577,19 +574,22 @@ export function Session({ deviceId }: { deviceId: string }) {
       showToast(`按键没有送达：${errText(e)}`, true);
     }
   }
-  /** 画质档位（T-028 F5）：受控切换——先更新 UI 再下发，失败回滚。 */
+  /** 画质档位（T-028 F5）：受控切换——先更新 UI 再下发；成功才落盘
+   * localStorage（P2-①：原先乐观写入且失败不回滚持久化）。 */
   async function doQuality(preset: Quality) {
     const prev = quality;
     setQuality(preset); // 控件即时回声（受控）
-    window.localStorage.setItem("rd.quality", preset);
     try {
       const { setQuality } = await import("../api/session");
       await setQuality(deviceId, preset);
-      const label = { auto: "自动", high: "高清", medium: "均衡", low: "流畅" }[preset];
-      showToast(`画质：${label}`, false);
+      window.localStorage.setItem("rd.quality", preset);
+      showToast(`已切换为${QUALITY_LABEL[preset]}`, false);
     } catch (e) {
-      setQuality(prev);
-      showToast(`画质切换没有生效：${errText(e)}`, true);
+      setQuality(prev); // 下发失败：控件回滚到切换前档位（存储未写无需回滚）
+      showToast(
+        `画质切换没有生效，已保持「${QUALITY_LABEL[prev]}」：${errText(e)}`,
+        true,
+      );
     }
   }
   /** 安全屏待确认时刻（误触会让对方屏幕变黑，与锁屏同保护级别）。 */
@@ -783,39 +783,13 @@ export function Session({ deviceId }: { deviceId: string }) {
             />
           ),
         )}
-        <div className={styles.termMenuWrap} ref={termMenuRef}>
-          <button
-            type="button"
-            className={styles.toolBtn}
-            onClick={() => setTermMenuOpen((v) => !v)}
-            title="打开远端终端"
-            aria-haspopup="menu"
-            aria-expanded={termMenuOpen}
-          >
-            <IconPlus size={13} />
-            新建终端
-            <IconChevronDown size={12} className={styles.termCaret} />
-          </button>
-          {termMenuOpen && (
-            <div className={styles.termMenu} role="menu" aria-label="选择终端 shell">
-              {TERM_SHELLS.map((shell) => (
-                <button
-                  key={shell}
-                  type="button"
-                  className={styles.termMenuItem}
-                  role="menuitem"
-                  onClick={() => {
-                    setTermMenuOpen(false);
-                    openTermTab(shell);
-                  }}
-                >
-                  <IconTerminal size={13} />
-                  {shellLabel(shell)}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <ShellMenu
+          shells={TERM_SHELLS.map((shell) => ({
+            id: shell,
+            label: shellLabel(shell),
+          }))}
+          onPick={openTermTab}
+        />
         <button
           type="button"
           className={`${styles.toolBtn} ${styles.sidebarToggle}`}
@@ -871,6 +845,7 @@ export function Session({ deviceId }: { deviceId: string }) {
             onFiles={() => setShowFiles(true)}
             onToggleHud={() => setHudVisible((v) => !v)}
             hudVisible={hudVisible}
+            onShortcuts={() => setHelpOpen(true)}
             onSendText={(text) => void doSendText(text)}
             onSendCombo={(keys) => void doSendCombo(keys)}
           />
@@ -904,6 +879,15 @@ export function Session({ deviceId }: { deviceId: string }) {
               >
                 <span className={styles.healthDot} aria-hidden="true" />
                 延迟 {snapshot.stats.rttMs} ms
+              </span>
+            )}
+            {pausedTabCount > 0 && (
+              <span
+                className={styles.healthPill}
+                data-level="fair"
+                title={`后台 ${pausedTabCount} 个窗口标签已暂停收流解码（省 CPU；切回标签自动恢复画面）`}
+              >
+                后台暂停 ×{pausedTabCount}
               </span>
             )}
             {activeTab.kind === "term" &&
@@ -1062,9 +1046,9 @@ export function Session({ deviceId }: { deviceId: string }) {
         {/* 窗口标签保活（R13 交互#3）：全部挂载、非激活隐藏——切签不再
          * close/open 会话付全价黑屏重连；active 门控使 ref 注册/视口上报
          * 只属于激活标签。
-         * 带宽语义（如实披露，R14 交互终审）：隐藏标签仍全速率收流解码
-         * （跳帧会让解码器错过参考帧直到下一个 IDR，黑屏风险＞带宽代价），
-         * N 标签 = N 路流；画质为设备级无按签降档，多标签场景注意带宽。 */}
+         * 收流语义（P0-3）：非激活标签由 WindowGroupView 入口丢帧——不解码
+         * 不绘制（标签上「已暂停」徽标），切回自动恢复（等 keyframe，超时
+         * 兜底重开）；Agent 推流仍在（协议无 per-window 暂停，带宽跟进项）。 */}
         {tabs
           .filter((t) => t.kind === "window")
           .map((t) => (
@@ -1104,6 +1088,8 @@ interface TabButtonProps {
   title: string;
   closeLabel: string;
   active: boolean;
+  /** 后台暂停提示徽标（P0-3：非激活窗口标签已停止收流解码）。 */
+  pausedHint?: boolean;
   onSelect: () => void;
   onClose: () => void;
 }
@@ -1115,6 +1101,7 @@ function TabButton({
   title,
   closeLabel,
   active,
+  pausedHint,
   onSelect,
   onClose,
 }: TabButtonProps) {
@@ -1130,6 +1117,14 @@ function TabButton({
         onClick={onSelect}
       >
         <span className={styles.tabTitle}>{title}</span>
+        {pausedHint === true && (
+          <span
+            className={styles.tabPaused}
+            title="后台标签已暂停收流解码，点击切回自动恢复画面"
+          >
+            已暂停
+          </span>
+        )}
       </button>
       <button
         type="button"
@@ -1171,6 +1166,7 @@ function WindowTabButton({
       title={title}
       closeLabel={`关闭 ${title}`}
       active={active}
+      pausedHint={!active}
       onSelect={onSelect}
       onClose={onClose}
     />

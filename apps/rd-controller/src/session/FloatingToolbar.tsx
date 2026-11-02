@@ -27,10 +27,17 @@ import {
   IconRecord,
 } from "../ui/Icon";
 import styles from "./FloatingToolbar.module.css";
+import {
+  PHRASE_DEFAULTS,
+  PHRASES_MAX,
+  readCustomPhrases,
+  saveCustomPhrases,
+} from "./phrases";
 
 export type Quality = "auto" | "high" | "medium" | "low";
 
-const QUALITY_LABEL: Record<Quality, string> = {
+/** 画质档位中文名（P2-① 页面层 toast 与下拉共用一套词）。 */
+export const QUALITY_LABEL: Record<Quality, string> = {
   auto: "自动",
   high: "高清",
   medium: "均衡",
@@ -69,6 +76,8 @@ interface Props {
   onToggleHud: () => void;
   /** 当前 HUD 显隐（高亮 = 常显）。 */
   hudVisible: boolean;
+  /** 打开快捷键速查（P1-1：? 键的唯一可见入口；速查卡本体在页面层）。 */
+  onShortcuts: () => void;
   /** 激活标签是否为窗口组（R11 交互#5：终端标签下隐藏只看/截屏/录屏/
    * 剪贴板等窗口专属操作——可点但必错的假可用性）。 */
   windowActions: boolean;
@@ -322,8 +331,15 @@ function MorePanel(
       key: "fullscreen",
       icon: <IconExpand size={15} />,
       label: "全屏",
-      hint: "全屏切换（F11）",
+      hint: "全屏切换",
       on: props.onFullscreen,
+    },
+    {
+      key: "shortcuts",
+      icon: <IconKeyboard size={15} />,
+      label: "快捷键",
+      hint: "速查卡 · 也可随时按 ?",
+      on: props.onShortcuts,
     },
   ];
   return (
@@ -361,6 +377,38 @@ function MorePanel(
 }
 
 // ── 常用语面板 ──
+/** 自定义条目行：发送按钮 + 删除小钮（同级兄弟，避免嵌套可交互）。 */
+function CustomPhraseRow({
+  text,
+  onSend,
+  onRemove,
+}: {
+  text: string;
+  onSend: (t: string) => void;
+  onRemove: (t: string) => void;
+}) {
+  return (
+    <span className={styles.phraseRow} role="presentation">
+      <button
+        type="button"
+        className={styles.panelItem}
+        onClick={() => onSend(text)}
+      >
+        {text}
+      </button>
+      <button
+        type="button"
+        className={styles.phraseDel}
+        aria-label={`删除常用语「${text}」`}
+        title="删除该常用语"
+        onClick={() => onRemove(text)}
+      >
+        ×
+      </button>
+    </span>
+  );
+}
+
 function PhrasesPanel({
   onSend,
   onClose,
@@ -368,32 +416,32 @@ function PhrasesPanel({
   onSend: (t: string) => void;
   onClose: () => void;
 }) {
-  const DEFAULTS = ["你好", "请稍等", "我来看一下", "操作完成", "谢谢"];
-  const [custom, setCustom] = useState<string[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("rd-phrases") ?? "[]") as string[];
-    } catch {
-      return [];
-    }
-  });
+  const [custom, setCustom] = useState<readonly string[]>(readCustomPhrases);
   const [input, setInput] = useState("");
 
   const add = () => {
-    if (!input.trim()) {
+    const text = input.trim();
+    if (text.length === 0) {
       return;
     }
-    const next = [...custom, input.trim()].slice(-20);
+    const next = [...custom, text].slice(-PHRASES_MAX);
     setCustom(next);
-    localStorage.setItem("rd-phrases", JSON.stringify(next));
+    saveCustomPhrases(next);
     setInput("");
+  };
+
+  const remove = (text: string) => {
+    const next = custom.filter((p) => p !== text);
+    setCustom(next);
+    saveCustomPhrases(next);
   };
 
   return (
     <div className={styles.panel} role="menu" aria-label="常用语">
       <b className={styles.panelTitle}>常用语（点击发送到远端）</b>
-      {[...DEFAULTS, ...custom].map((text, i) => (
+      {PHRASE_DEFAULTS.map((text) => (
         <button
-          key={i}
+          key={text}
           type="button"
           className={styles.panelItem}
           onClick={() => {
@@ -403,6 +451,17 @@ function PhrasesPanel({
         >
           {text}
         </button>
+      ))}
+      {custom.map((text) => (
+        <CustomPhraseRow
+          key={text}
+          text={text}
+          onSend={(t) => {
+            onSend(t);
+            onClose();
+          }}
+          onRemove={remove}
+        />
       ))}
       <div className={styles.panelAdd}>
         <input
@@ -416,6 +475,9 @@ function PhrasesPanel({
           添加
         </button>
       </div>
+      <span className={styles.panelHint}>
+        内置 5 条不可删；自定义短语可点 × 删除（与设置页同步）
+      </span>
     </div>
   );
 }

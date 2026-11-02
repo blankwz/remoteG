@@ -101,6 +101,22 @@
   border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: var(--rd-fs-dim);
 }
 .panelAdd button:hover { background: var(--rd-accent-strong); }
+/* 自定义常用语行（发送钮 + 删除小钮，P1-3：面板内能删） */
+.phraseRow {
+  display: flex; align-items: center; gap: 2px;
+}
+.phraseRow .panelItem { flex: 1; }
+.phraseDel {
+  flex: none; width: 22px; height: 22px; margin-right: 4px;
+  border: none; border-radius: 50%;
+  background: transparent; color: var(--rd-text-faint);
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.phraseDel:hover { background: var(--rd-hover); color: var(--rd-err); }
+.panelHint {
+  display: block; margin-top: 6px; padding: 0 6px;
+  font-size: var(--rd-fs-micro); color: var(--rd-text-faint);
+}
 
 /* 更多菜单条目（图标+双行文字） */
 .moreItem {

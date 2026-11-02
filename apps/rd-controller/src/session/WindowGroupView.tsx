@@ -88,6 +88,10 @@ const VIEWPORT_DEBOUNCE_MS = 150;
 const RECONNECT_BACKOFF_MS = 800;
 /** 重连退避上限（D-013 包2：睡眠唤醒/Agent 重启场景持续重试直到恢复）。 */
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
+/** 后台标签恢复后的等帧窗口（P0-3）：超时未见新帧则重开会话兜底。FEC 模式
+ * Agent 每 120 帧（≈2s）出兜底 IDR，窗口内必然恢复；Stream 模式编码器无周期
+ * IDR，静态画面可能长期不来 keyframe——重开（open 首帧强制 IDR）保证恢复。 */
+const RESUME_FRAME_TIMEOUT_MS = 4000;
 
 /** 隐藏的键盘捕获 textarea（任务卡步骤 5）：1px 透明，不参与指针命中。 */
 const CAPTURE_STYLE: CSSProperties = {
@@ -109,8 +113,12 @@ const CAPTURE_STYLE: CSSProperties = {
 /** 会话阶段。 */
 type Phase = "connecting" | "open" | "reconnecting" | "failed";
 
-/** 单窗口的帧处理面（视频解码器 + 瓦片层 + 对应 canvas 引用）。 */
+/** 单窗口的帧处理面（视频解码器 + 瓦片层 + 对应 canvas 引用 + 暂停标记）。
+ * 不继承 FrameSink（那是 dispatchFrame 的最小结构视图）；结构兼容可直接
+ * 传入帧分发。 */
 interface SurfaceHandle {
+  /** 后台标签降流（P0-3）：true 时 dispatchFrame 在入口丢弃该窗口全部帧。 */
+  paused: boolean;
   decoder: H264Decoder | null;
   tile: TileLayer | null;
   videoCanvas: HTMLCanvasElement | null;
@@ -176,6 +184,9 @@ function goWindowsList(): void {
 
 /** 帧分发目标的最小结构（SurfaceHandle 结构兼容；测试可注入替身）。 */
 export interface FrameSink {
+  /** 暂停门控（P0-3）：true = 该窗口的帧在入口丢弃（解码/绘制全跳过）。
+   * 缺省（undefined）视为不暂停——测试替身与既有用例无需感知。 */
+  readonly paused?: boolean;
   decoder: { push(buf: ArrayBuffer): void } | null;
   tile: {
     handleTile(
@@ -207,6 +218,10 @@ export function registerSurface<H>(
 /**
  * 帧分发：首字节为类型，视频/瓦片帧头自偏移 1 起解析，按 window_id
  * 路由到对应窗口的处理面；未知窗口的帧安全忽略。
+ *
+ * 暂停门控（P0-3 后台标签降流）：sink.paused = true 的窗口在入口丢弃全部
+ * 帧（视频不解码、瓦片不绘制）。恢复由调用方负责：先 resetForKeyframe
+ * （参考链已断，等下个 keyframe），帧重新路由后画面续播。
  */
 export function dispatchFrame(
   surfaces: ReadonlyMap<string, FrameSink>,
@@ -221,18 +236,30 @@ export function dispatchFrame(
       return;
     }
     const header = parseVideoHeader(buf.slice(1));
-    surfaces.get(header.windowId.toString())?.decoder?.push(buf.slice(1));
+    const sink = surfaces.get(header.windowId.toString());
+    if (sink === undefined || sink.paused === true) {
+      return;
+    }
+    sink.decoder?.push(buf.slice(1));
   } else if (type === FRAME_TILE) {
     const header = parseTileHeader(buf, 1);
     const len = tilePayloadLen(header);
     if (buf.byteLength < 1 + TILE_HEADER_LEN + len) {
       return;
     }
+    const sink = surfaces.get(header.windowId.toString());
+    if (sink === undefined || sink.paused === true) {
+      return;
+    }
     const rgba = new Uint8ClampedArray(buf, 1 + TILE_HEADER_LEN, len);
-    surfaces.get(header.windowId.toString())?.tile?.handleTile(header, rgba);
+    sink.tile?.handleTile(header, rgba);
   } else if (type === FRAME_INVALIDATE) {
     const header = parseTileHeader(buf, 1);
-    surfaces.get(header.windowId.toString())?.tile?.handleInvalidate(header);
+    const sink = surfaces.get(header.windowId.toString());
+    if (sink === undefined || sink.paused === true) {
+      return;
+    }
+    sink.tile?.handleInvalidate(header);
   }
 }
 
@@ -282,6 +309,8 @@ function WindowSurface({
       return undefined;
     }
     const handle: SurfaceHandle = {
+      // paused 由 register 包装按当前 active 覆盖（挂载即降流对齐）
+      paused: false,
       decoder: null,
       tile: null,
       videoCanvas: video,
@@ -435,9 +464,21 @@ export function WindowGroupView({
     return () => window.clearTimeout(t);
   }, [rootStats, active, deviceName]);
 
-  /** 处理面注册表（子组件挂载注册、卸载注销）；条目只能经 registerSurface 增删。 */
+  /** active 的同步镜像：register 必须保持引用稳定（WindowSurface 注册
+   * effect 依赖它，变化会重建解码器），新注册的处理面据此继承暂停态。 */
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  });
+
+  /** 处理面注册表（子组件挂载注册、卸载注销）；条目只能经 registerSurface 增删。
+   * 注册时按当前 active 标注暂停态（P0-3：隐藏标签注册即降流）。 */
   const register = useCallback((id: string, handle: SurfaceHandle | null) => {
-    registerSurface(surfacesRef.current, id, handle);
+    registerSurface(
+      surfacesRef.current,
+      id,
+      handle === null ? null : { ...handle, paused: !activeRef.current },
+    );
   }, []);
 
   const onSurfaceStats = useCallback(
@@ -448,6 +489,60 @@ export function WindowGroupView({
     },
     [windowId],
   );
+
+  // ---- 后台标签降流（P0-3）----
+  // 非激活标签的组内全部处理面入口丢帧（视频不解码、瓦片不绘制）——曾 N 标签
+  // = N 路全速率收流解码。Agent 侧仍按连接推流（协议无 per-window 暂停指令，
+  // 带宽不变），省的是控制端逐标签解码/绘制的 CPU/GPU。协议跟进项：增加
+  // per-window pause/IDR 请求消息后把降流推到 Agent 侧，带宽同步节省。
+  useEffect(() => {
+    const pausedNext = !active;
+    const prev = surfacesRef.current;
+    let dirty = false;
+    const next = new Map<string, SurfaceHandle>();
+    for (const [id, handle] of prev) {
+      if (handle.paused === pausedNext) {
+        next.set(id, handle);
+        continue;
+      }
+      dirty = true;
+      if (!pausedNext) {
+        // 恢复：跳帧期间参考链已断，重置为等下个 keyframe 续播
+        handle.decoder?.resetForKeyframe();
+      }
+      next.set(id, { ...handle, paused: pausedNext });
+    }
+    if (dirty) {
+      surfacesRef.current = next;
+    }
+  }, [active]);
+
+  // 恢复兜底：切回标签后解码器等 keyframe，RESUME_FRAME_TIMEOUT_MS 内未见
+  // 新帧（rootStats 引用变化 = 有解码输出）说明编码器没有出新 IDR（Stream
+  // 模式静态画面），重开会话——open 首帧强制 IDR，画面必然恢复。
+  const resumeAwaitingRef = useRef(false);
+  const prevActiveRef = useRef(active);
+  useEffect(() => {
+    const resumed = active && !prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!resumed) {
+      return undefined;
+    }
+    resumeAwaitingRef.current = true;
+    const timer = window.setTimeout(() => {
+      if (resumeAwaitingRef.current) {
+        setEpoch((n) => n + 1);
+      }
+    }, RESUME_FRAME_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [active]);
+  const statsSeenRef = useRef<DecodeStats | null>(null);
+  useEffect(() => {
+    if (rootStats !== statsSeenRef.current) {
+      statsSeenRef.current = rootStats;
+      resumeAwaitingRef.current = false;
+    }
+  }, [rootStats]);
 
   // ---- 输入映射（T-022 挂载）----
 
@@ -1274,10 +1369,10 @@ export function WindowGroupView({
           码率 {bitrateText}
         </span>
         <span className={styles.hudItem} title="显示模式与缩放">
-          {fitLabel} ×{Math.round(snapshot.zoom * 100)}%
+          显示 {fitLabel} ×{Math.round(snapshot.zoom * 100)}%
         </span>
         <span className={styles.hudItem} title="被控端 rd-agent 版本">
-          v{hostVer ?? "?"}
+          被控端 v{hostVer ?? "?"}
         </span>
         <label className={styles.hudItem} title="macOS：Cmd 组合键映射为远端 Ctrl">
           <input

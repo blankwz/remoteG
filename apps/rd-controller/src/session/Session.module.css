@@ -644,52 +644,6 @@
 }
 
 /* 「+ 终端」下拉 */
-.termMenuWrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.termCaret {
-  opacity: 0.6;
-}
-
-.termMenu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  display: flex;
-  flex-direction: column;
-  min-width: 150px;
-  padding: 4px;
-  border: 1px solid var(--rd-border);
-  border-radius: var(--rd-radius);
-  background: var(--rd-panel);
-  box-shadow: var(--rd-shadow-pop);
-  z-index: 20;
-}
-
-.termMenuItem {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--rd-text-dim);
-  font-size: var(--rd-fs-body);
-  text-align: left;
-  cursor: pointer;
-  transition:
-    color 0.1s ease,
-    background-color 0.1s ease;
-}
-
-.termMenuItem:hover {
-  background: var(--rd-accent-soft);
-  color: var(--rd-accent-text);
-}
-
 /* 侧栏开关按钮（标签栏内，图标化） */
 .sidebarToggle {
   margin-left: auto;
@@ -1074,4 +1028,17 @@
   25% { opacity: 1; }
   70% { opacity: 1; }
   100% { opacity: 0; }
+}
+
+/* 标签「已暂停」小徽（P0-3：后台窗口标签已停止收流解码） */
+.tabPaused {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid rgb(240 180 60 / 40%);
+  border-radius: 999px;
+  background: rgb(240 180 60 / 12%);
+  color: rgb(255 214 130);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
 }

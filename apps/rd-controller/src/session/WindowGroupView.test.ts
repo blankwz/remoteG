@@ -141,3 +141,50 @@ describe("registerSurface（处理面注册表）", () => {
     expect(() => dispatchFrame(surfaces, videoFrame(100n))).not.toThrow();
   });
 });
+
+describe("dispatchFrame 后台暂停门控（P0-3 隐藏标签降流）", () => {
+  it("paused 的窗口：视频/瓦片/失效帧全部在入口丢弃（不解码不绘制）", () => {
+    const sink = { ...makeSink(), paused: true };
+    const surfaces = new Map<string, FrameSink>();
+    registerSurface(surfaces, "100", sink);
+
+    dispatchFrame(surfaces, videoFrame(100n, true));
+    dispatchFrame(surfaces, tileFrame(FRAME_TILE, 100n, 0, 0, 2, 2));
+    dispatchFrame(surfaces, tileFrame(FRAME_INVALIDATE, 100n, 1, 2, 8, 8));
+
+    expect(sink.decoder.push).not.toHaveBeenCalled();
+    expect(sink.tile.handleTile).not.toHaveBeenCalled();
+    expect(sink.tile.handleInvalidate).not.toHaveBeenCalled();
+  });
+
+  it("恢复（paused 移除）后帧重新路由；其余窗口不受影响", () => {
+    const pausedSink = { ...makeSink(), paused: true };
+    const liveSink = makeSink();
+    const surfaces = new Map<string, FrameSink>();
+    registerSurface(surfaces, "100", pausedSink);
+    registerSurface(surfaces, "200", liveSink);
+
+    // 暂停中的 100 丢帧，激活中的 200 正常路由
+    dispatchFrame(surfaces, videoFrame(100n));
+    dispatchFrame(surfaces, videoFrame(200n));
+    expect(pausedSink.decoder.push).not.toHaveBeenCalled();
+    expect(liveSink.decoder.push).toHaveBeenCalledTimes(1);
+
+    // 切回标签：以 paused=false 的新句柄覆盖（组件恢复路径同款）
+    const resumed = makeSink();
+    registerSurface(surfaces, "100", { ...resumed, paused: false });
+    dispatchFrame(surfaces, videoFrame(100n));
+    expect(resumed.decoder.push).toHaveBeenCalledTimes(1);
+    expect(liveSink.decoder.push).toHaveBeenCalledTimes(1);
+  });
+
+  it("paused 未设置（undefined）视为不暂停：既有替身无需感知该字段", () => {
+    const sink = makeSink(); // 无 paused 字段（FrameSink.paused 可选）
+    const surfaces = new Map<string, FrameSink>();
+    registerSurface(surfaces, "100", sink);
+    dispatchFrame(surfaces, videoFrame(100n));
+    dispatchFrame(surfaces, tileFrame(FRAME_TILE, 100n, 0, 0, 2, 2));
+    expect(sink.decoder.push).toHaveBeenCalledTimes(1);
+    expect(sink.tile.handleTile).toHaveBeenCalledTimes(1);
+  });
+});

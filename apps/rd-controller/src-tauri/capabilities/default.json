@@ -8,6 +8,7 @@
     "fs:default",
     "fs:allow-download-write-recursive",
     "dialog:default",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir"
   ]
 }

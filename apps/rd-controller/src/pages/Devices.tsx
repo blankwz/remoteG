@@ -33,12 +33,35 @@ import {
 import { call, listenStub } from "../api/bridge";
 import { useDismiss } from "../ui/useDismiss";
 
-import { IconLab, IconMore, IconPlus, IconScan } from "../ui/Icon";
+import { IconChevronDown, IconChevronUp, IconLab, IconMore, IconPlus, IconScan } from "../ui/Icon";
 import styles from "./Devices.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** 本机被控展开层记忆键（低频配置不占主线空间，默认收起）。 */
+const HOST_DETAILS_KEY = "rd.hostDetailsOpen";
+
+/** 读展开层记忆；存储不可用按收起处理。 */
+function readHostDetailsOpen(): boolean {
+  try {
+    return window.localStorage.getItem(HOST_DETAILS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 被控时长文案（秒 → 小时/分钟/秒，与原 peer 徽标口径一致）。 */
+function hostDuration(secs: number): string {
+  if (secs >= 3600) {
+    return `${Math.floor(secs / 3600)} 小时`;
+  }
+  if (secs >= 60) {
+    return `${Math.floor(secs / 60)} 分钟`;
+  }
+  return `${secs} 秒`;
 }
 
 /**
@@ -64,6 +87,8 @@ export function Devices() {
   const [mediaFec, setMediaFec] = useState(false);
   /** 本机被控状态（融合版：本机也是被控机）。 */
   const [host, setHost] = useState<HostStatusDto | null>(null);
+  /** 被控状态查询失败（P0-2②：整卡消失 ≠ 功能不存在，降级态要说明）。 */
+  const [hostDown, setHostDown] = useState(false);
   /** 配对码卡（null = 未生成）。 */
   const [pairCard, setPairCard] = useState<PairCodeDto | null>(null);
   /** 配对码剩余秒数（5 分钟有效；归零置灰提示重新生成）。 */
@@ -99,6 +124,20 @@ export function Devices() {
   }, [confirmRemoveId]);
   /** 连接帮助折叠显隐。 */
   const [helpOpen, setHelpOpen] = useState(false);
+  /** 本机被控展开层（默认收起，localStorage 记忆——低频配置不占主线空间）。 */
+  const [hostExpanded, setHostExpanded] = useState(readHostDetailsOpen);
+  /** 展开/收起 aria-live 播报（空串 = 无待播报内容）。 */
+  const [hostLiveMsg, setHostLiveMsg] = useState("");
+  const toggleHostExpanded = useCallback(() => {
+    const next = !hostExpanded;
+    setHostExpanded(next);
+    try {
+      window.localStorage.setItem(HOST_DETAILS_KEY, next ? "1" : "0");
+    } catch {
+      // 存储不可用：仅失去展开记忆，不影响功能
+    }
+    setHostLiveMsg(next ? "已展开本机被控详情" : "已收起本机被控详情");
+  }, [hostExpanded]);
   /** 设备搜索（>3 台时出现；IT 管理员 R4）。 */
   const [deviceQuery, setDeviceQuery] = useState("");
   // `/` 聚焦设备搜索（与窗口页对齐——快捷键体系一致性）
@@ -152,6 +191,20 @@ export function Devices() {
     }
   }, []);
 
+  /** 被控状态查询（2s 轮询 + 「重新检查」共用）；查不到 → 降级态。 */
+  const pollHost = useCallback(async () => {
+    try {
+      const status = await hostStatus();
+      setHost(status);
+      setHostDown(false);
+    } catch {
+      // 查询没有成功 = 被控服务不可用：不弹错误（页面其余功能不受影响），
+      // 用降级卡片说明功能存在与可能原因（P0-2②——曾整卡静默消失）
+      setHost(null);
+      setHostDown(true);
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
     // fec 开关回显（settings.json）；经 bridge call()（demo 模式给人话，R11 D06）
@@ -163,19 +216,15 @@ export function Devices() {
       void refresh();
     });
     // 被控状态 2s 轮询（地址/被谁连接/暂停态）
+    void pollHost();
     const hostTimer = window.setInterval(() => {
-      void hostStatus()
-        .then(setHost)
-        .catch(() => undefined);
+      void pollHost();
     }, 2000);
-    void hostStatus()
-      .then(setHost)
-      .catch(() => undefined);
     return () => {
       void unlisten.then((fn) => fn());
       window.clearInterval(hostTimer);
     };
-  }, [refresh]);
+  }, [refresh, pollHost]);
 
   /** 紧急切断：暂停本机被控共享（对方画面/输入/终端全部停止）。
    * 经 bridge call()（R11 D06——曾裸 invoke 绕过 mock 切换，demo 下报黑话）。 */
@@ -594,68 +643,77 @@ export function Devices() {
         />
       )}
 
-      {host !== null && (
-        <div className={styles.hostCard}>
+      {host === null && hostDown && (
+        <div className={styles.hostCard} role="status">
           <div className={styles.hostRow}>
             <strong>本机被控</strong>
-          <span className={styles.hostSub}>这台电脑也可被其他设备远程控制</span>
-            {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
-            <span className={styles.hostSpacer} />
-            <button type="button" className={styles.actionBtn} onClick={() => void onGenerateCode()}>
-              生成配对码
+            <span className={styles.hostDownTag}>被控服务不可用</span>
+          </div>
+          <p className={styles.hostDownHint}>
+            这台电脑也可以被其他设备远程控制，但现在查不到被控状态——被控功能可能没有成功启动。
+            常见原因：rd-agent 的被控服务没在运行（重启本应用试试）、本地端口被占用或被防火墙拦截。
+            该问题不影响你去控制别的电脑。
+          </p>
+          <div className={styles.hostRow}>
+            <button
+              type="button"
+              className={styles.actionBtn}
+              disabled={busyId !== null}
+              onClick={() => void pollHost()}
+            >
+              重新检查
             </button>
           </div>
-          {host.listenAddrs.length > 0 && (
-            <div className={styles.hostRow}>
-              <span className={styles.hostLabel}>本机地址：</span>
-              {host.listenAddrs.map((a) => (
-                <code key={a} className={styles.hostAddr}>
-                  <span className={styles.addrKind} data-tailscale={a.startsWith("100.")}>
-                    {a.startsWith("100.") ? "Tailscale" : "局域网"}
+        </div>
+      )}
+
+      {host !== null && (
+        <section className={styles.hostCard} aria-label="本机被控状态">
+          {/* 常驻一行状态条：空闲态=待命+一键出码直达；被控态=被谁控制多久+红色切断 */}
+          <div className={styles.hostBar}>
+            {host.peers.length === 0 ? (
+              <>
+                <span className={styles.hostStateIdle}>本机待命</span>
+                {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
+                <span className={styles.hostSpacer} />
+                <button type="button" className={styles.actionBtn} onClick={() => void onGenerateCode()}>
+                  生成配对码
+                </button>
+              </>
+            ) : (
+              <>
+                <span className={styles.hostStateBusy}>正在被控制</span>
+                {host.peers.map((p) => (
+                  <span key={p.name} className={styles.hostPeer} title="对方开始控制本机的时长">
+                    「{p.name}」· {hostDuration(p.sinceSecs)}
                   </span>
-                  {a}
-                </code>
-              ))}
-            </div>
-          )}
-          {host.peers.length > 0 && (
-            <div className={styles.hostRow}>
-              <span className={styles.hostLabel}>正在被控制：</span>
-              {host.peers.map((p) => (
-                <span key={p.name} className={styles.hostPeer} title="对方开始控制本机的时长">
-                  {p.name}
-                  {p.sinceSecs > 0 &&
-                    ` · ${p.sinceSecs >= 3600 ? `${Math.floor(p.sinceSecs / 3600)} 小时` : p.sinceSecs >= 60 ? `${Math.floor(p.sinceSecs / 60)} 分钟` : `${p.sinceSecs} 秒`}`}
-                </span>
-              ))}
-              <button
-                type="button"
-                className={styles.cutBtn}
-                title="立即断开对方的控制连接"
-                disabled={cutting}
-                onClick={() => void onCutPeers()}
-              >
-                {cutting ? "切断中…" : "切断"}
-              </button>
-            </div>
-          )}
-          <div className={styles.hostRow}>
-            <label className={styles.fecToggle} title="开启后信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效">
-              <input
-                type="checkbox"
-                className={styles.switchInput}
-                checked={mediaFec}
-                onChange={() => void onToggleMediaFec()}
-              />
-              <span className={styles.switchTrack} data-on={mediaFec} aria-hidden="true">
-                <span className={styles.switchThumb} />
-              </span>
-              <span className={styles.fecText}>
-                <span className={styles.fecTitle}>弱网纠错</span>
-                <span className={styles.fecSub}>信号差时更稳 · 下次连接生效</span>
-              </span>
-            </label>
+                ))}
+                <span className={styles.hostSpacer} />
+                <button
+                  type="button"
+                  className={styles.cutBtn}
+                  title="立即断开对方的控制连接"
+                  disabled={cutting}
+                  onClick={() => void onCutPeers()}
+                >
+                  {cutting ? "切断中…" : "切断"}
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className={styles.expandBtn}
+              aria-expanded={hostExpanded}
+              aria-label="本机被控详情"
+              title="监听地址 · 弱网纠错 · 指纹核对"
+              onClick={toggleHostExpanded}
+            >
+              {hostExpanded ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+            </button>
           </div>
+          {/* 展开/收起 aria-live 播报（文本变化即播报，无需额外入口） */}
+          <span className={styles.srOnly} role="status">{hostLiveMsg}</span>
+          {/* 配对码是一键出码的产物，直接显示在状态条下方（不收进展开层） */}
           {pairCard !== null && (
             <div className={styles.pairBlock} data-expired={pairRemainSecs === 0}>
               <div className={styles.pairMain}>
@@ -693,11 +751,46 @@ export function Devices() {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {linkTest !== null && (
-        <pre className={styles.linkTestOut}>{linkTest.text}</pre>
+          {hostExpanded && (
+            <div className={styles.hostDetails}>
+              {host.listenAddrs.length > 0 && (
+                <div className={styles.hostRow}>
+                  <span className={styles.hostLabel}>监听地址：</span>
+                  {host.listenAddrs.map((a) => (
+                    <code key={a} className={styles.hostAddr}>
+                      <span className={styles.addrKind} data-tailscale={a.startsWith("100.")}>
+                        {a.startsWith("100.") ? "Tailscale" : "局域网"}
+                      </span>
+                      {a}
+                    </code>
+                  ))}
+                </div>
+              )}
+              <div className={styles.hostRow}>
+                <label className={styles.fecToggle} title="开启后信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效">
+                  <input
+                    type="checkbox"
+                    className={styles.switchInput}
+                    checked={mediaFec}
+                    onChange={() => void onToggleMediaFec()}
+                  />
+                  <span className={styles.switchTrack} data-on={mediaFec} aria-hidden="true">
+                    <span className={styles.switchThumb} />
+                  </span>
+                  <span className={styles.fecText}>
+                    <span className={styles.fecTitle}>弱网纠错</span>
+                    <span className={styles.fecSub}>信号差时更稳 · 下次连接生效</span>
+                  </span>
+                </label>
+              </div>
+              <div className={styles.hostRow}>
+                <span className={styles.hostLabel}>
+                  安全核对：点设备卡右侧「⋯」菜单的「查看指纹」复制对方指纹，可与对方当面核对以防中间人。
+                </span>
+              </div>
+            </div>
+          )}
+        </section>
       )}
 
       {deviceQuery.trim().length > 0 && shownDevices.length === 0 && (
@@ -778,9 +871,13 @@ export function Devices() {
                         }
                       }}
                       disabled={busyId !== null || !confirmArmed}
-                      title={confirmArmed ? "此操作不可撤销" : "再按一次确认（防误触）"}
+                      data-armed={confirmArmed}
+                      title={confirmArmed ? "此操作不可撤销" : "防误触：进度条走完即可点击"}
                     >
                       确认删除
+                      {!confirmArmed && (
+                        <span className={styles.confirmProgress} aria-hidden="true" />
+                      )}
                     </button>
                     <button
                       type="button"
@@ -797,9 +894,57 @@ export function Devices() {
                   />
                 )}
               </div>
+              {/* 线路测试结果归位到触发它的卡片内（等宽保留，失败项 err 色标注） */}
+              {linkTest !== null && linkTest.id === d.id && (
+                <div className={styles.linkTestOut} data-failed={linkTest.text.includes("没有成功")}>
+                  {linkTest.text}
+                </div>
+              )}
             </li>
           ))}
         </ul>
+      )}
+
+      {/* 扫描反馈（P0-2①）：扫完 0 结果曾毫无反馈；加载态 + 结果播报走
+       * 同一 role=status 区（文本变化即播报，screen reader 无需额外入口） */}
+      {(scanning || discovered !== null) && (
+        <p className={styles.scanStatus} role="status" aria-live="polite">
+          {scanning
+            ? "正在扫描局域网（约需 2 秒）…"
+            : discovered !== null && discovered.length > 0
+              ? `扫描完成：发现 ${discovered.length} 台设备`
+              : "扫描完成：没有发现新设备"}
+        </p>
+      )}
+      {discovered !== null && discovered.length === 0 && !scanning && (
+        <div className={styles.scanEmpty} role="presentation">
+          <div className={styles.scanEmptyIcon} aria-hidden="true">
+            <IconScan size={26} />
+          </div>
+          <p className={styles.scanEmptyTitle}>没有发现新设备</p>
+          <p className={styles.scanEmptyHint}>
+            可能是两台电脑不在同一局域网/WiFi，或对方 rd-agent 没在运行（看对方任务栏托盘图标）。
+            两步排查：确认连的是同一个路由器 → 让对方重启 rd-agent 后再扫一次；
+            知道对方 IP 的话也可以直接手动添加。
+          </p>
+          <div className={styles.emptyActions}>
+            <button
+              type="button"
+              className={styles.addBtn}
+              onClick={() => openAddDialog()}
+            >
+              手动添加设备
+            </button>
+            <button
+              type="button"
+              className={styles.actionBtn}
+              onClick={() => void onScan()}
+              disabled={busyId !== null}
+            >
+              再扫一次
+            </button>
+          </div>
+        </div>
       )}
 
       {discovered !== null && discovered.length > 0 && (

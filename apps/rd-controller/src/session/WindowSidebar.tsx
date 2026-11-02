@@ -3,9 +3,10 @@
  * 向日葵同款交互——不用回到「窗口列表」页再开一次，会话中直接切换。
  *
  * 数据：5s 轮询 `list_windows`（协议与窗口列表页同源）；条目上标注
- * 「控制中/只看中/已打开」（激活标签按真实 viewOnly 态措辞，R11 D05——
- * 曾一律标「只看中」，与真实只看模式撞词且语义相反）；点击已打开条目 =
- * 切换标签，未打开 = 新开。搜索框过滤标题/进程名。
+ * 「控制中/只看中/已暂停」（激活标签按真实 viewOnly 态措辞，R11 D05——
+ * 曾一律标「只看中」，与真实只看模式撞词且语义相反；已打开未激活 = 已暂停
+ * 收流解码，P0-3）；点击已打开条目 = 切换标签，未打开 = 新开。
+ * 搜索框过滤标题/进程名。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listWindows, type WindowDto } from "../api/windows";
@@ -14,7 +15,7 @@ import styles from "./WindowSidebar.module.css";
 
 interface Props {
   deviceId: string;
-  /** 已打开的窗口标签 id（高亮 + 「已打开」标记）。 */
+  /** 已打开的窗口标签 id（高亮 + 「控制中/只看中/已暂停」标记）。 */
   openIds: ReadonlySet<string>;
   /** 当前激活标签（更强高亮）。 */
   activeId: string | null;
@@ -108,8 +109,9 @@ export function WindowSidebar({
           const opened = openIds.has(w.id);
           const active = activeId === w.id;
           // 徽标措辞与真实控制权一致（R11 D05）：
-          // 激活 + 只看态 → 「只看中」；激活 + 控制态 → 「控制中」；其余 → 「已打开」
-          const badge = active ? (viewOnly ? "只看中" : "控制中") : "已打开";
+          // 激活 + 只看态 → 「只看中」；激活 + 控制态 → 「控制中」；
+          // 已打开未激活 → 「已暂停」（P0-3：后台标签已停止收流解码）
+          const badge = active ? (viewOnly ? "只看中" : "控制中") : "已暂停";
           return (
             <div
               key={w.id}
@@ -135,7 +137,22 @@ export function WindowSidebar({
                   <span className={styles.proc}>{w.process}</span>
                 </span>
                 {w.minimized && <span className={styles.badge}>最小化</span>}
-                {opened && <span className={styles.badge}>{badge}</span>}
+                {opened && (
+                  <span
+                    className={
+                      active
+                        ? styles.badge
+                        : `${styles.badge} ${styles.badgePaused}`
+                    }
+                    title={
+                      active
+                        ? undefined
+                        : "后台标签已暂停收流解码，点击切回自动恢复画面"
+                    }
+                  >
+                    {badge}
+                  </span>
+                )}
               </button>
               {opened && !active && (
                 // 真 button 兄弟节点（R11 D15——button 内嵌 span[role=button]
