@@ -6,6 +6,7 @@
 //! - [`framing`]：控制流 `u32 LE + Envelope`；数据流帧头（05_api §3）。
 
 pub mod conn;
+pub mod direct;
 pub mod framing;
 pub mod identity;
 pub mod relay;
@@ -16,7 +17,11 @@ pub use conn::{
     client_config_for_test, connect, server_config_for_test, transport_config_for_test, Conn,
     ControlRx, ControlTx, DataRx, DataTx, Server, ALPN,
 };
+pub use direct::bind_udp_socket;
 pub use framing::{DataFrame, StreamKind, TileHeader, VideoHeader};
 pub use identity::{Fingerprint, Identity};
-pub use relay::{bind_via_relay, connect_via_relay, parse_relay_addr};
+pub use relay::{
+    bind_via_relay, bind_via_relay_ex, connect_via_relay, connect_via_relay_punch,
+    parse_relay_addr, punch_enabled, punch_respond, ConnPath, RelayServer,
+};
 pub use relay_ws::{bind_via_relay_ep, connect_via_relay_ep, parse_relay_endpoint, RelayEndpoint};

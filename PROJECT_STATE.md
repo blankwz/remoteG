@@ -1,8 +1,9 @@
 # PROJECT_STATE
 
-- 更新：2026-10-31（T-031 文件传输 + WOL 远程开机落地，UU 远控对标两项代码缺口补齐）
+- 更新：2026-11-02（T-034 打洞落地：rd-relay 升级为打洞协调者，双端探测 + 中继竞速）
 
 ## 当前状态
+- **T-034（2026-11-02）**：**打洞（去 Tailscale 依赖主线第一步）**——rd-relay 协议扩展（DIAL ACK 带被控端地址尾巴 + PUNCH_NOTIFY 下发）+ rd-transport 双端探测竞速（`connect_via_relay_punch`：中继路径与打洞直连谁先握手完成用谁）+ agent 探测响应（pump 从探测包源地址学控制端真实映射，直连 socket 回探测）+ 控制端中继回退自动带打洞。**兼容性**：旧中继/旧端自动退化纯中继，Tailscale 路径不动；**定制**：`RD_PUNCH=0` 关打洞。全链路 e2e（打洞直连命中 + 无响应回退中继）连跑 5 轮全稳，workspace 0 失败。遗留：真机跨网成功率待实测；STUN/UPnP/IPv6 为后续插件（pump 事件通道已预留）；详见 RUN_LOG 2026-11-02 行。
 - **T-032/T-033（2026-11-01）**：rd 原生中继 rd-relay 全链路（UDP 打标转发 crate + rd-transport 虚拟链路 + agent 一行配置 + 控制端自动回退与设置页「远程访问」）；WS 版（Cloudflare Workers 免费版 / Node+Docker 自动 HTTPS，参考 alma-relay）与三条路线部署套件（见 switchboard/deploy/rd-relay/）。经中继 e2e 标 ignore（握手挂起待查），协议基础由 rd-relay 单测锁定。总结见 13_handoff/UU对标与中继落地总结.md。
 - **T-031（2026-10-31）**：文件传输（proto tag 45~50 + agent file_handler + 控制端 files 命令 + 会话内 FilesPanel 浮层）与 WOL 远程开机（HelloAck.mac_addrs + wake_device + 设备卡片菜单）全链路落地；e2e t10（推送+拉取逐字节比对）+ 双端单测全绿。详见 RUN_LOG 2026-10-31 行与 05_api §7。已知限制：推送分片在分发循环落盘（大文件传输期输入延迟上升，v0.3 拆流）；WOL 仅同网段。code-review 修复轮闭环（2H+6M+5L，backlog 仅剩唤醒去抖——已顺手实现 3s 去抖）。手测项：09_test/手测清单.md 1.14（文件传输）/1.15（WOL）。
 - **M0**：完成（D-010 关卡结论：Tauri 2 + WebCodecs 维持；场景 D iPhone probe 已测，场景 A/B/C 延迟数据待用户补测）。

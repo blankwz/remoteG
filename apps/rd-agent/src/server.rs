@@ -87,11 +87,24 @@ fn is_private(v4: &Ipv4Addr) -> bool {
 }
 
 /// 在全部地址上绑定 QUIC 监听器。
-pub fn bind_servers(addrs: &[SocketAddr], identity: &Identity) -> anyhow::Result<Vec<Server>> {
-    addrs
-        .iter()
-        .map(|addr| Server::bind(*addr, identity).with_context(|| format!("监听 {addr} 失败")))
-        .collect()
+/// 绑定全部监听地址：裸 socket 先自己 bind 再包给 quinn（T-034 打洞配套），
+/// 返回 (服务端, 裸 socket)——打洞探测与 QUIC 共用同一个 socket/端口。
+/// 同步 bind std socket 后 `from_std` 注册到 tokio（调用方保证 runtime 上下文）。
+pub fn bind_servers(
+    addrs: &[SocketAddr],
+    identity: &Identity,
+) -> anyhow::Result<Vec<(Server, std::sync::Arc<tokio::net::UdpSocket>)>> {
+    let mut out = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let std_sock =
+            std::net::UdpSocket::bind(addr).with_context(|| format!("绑定 {addr} 失败"))?;
+        std_sock.set_nonblocking(true)?;
+        let sock = std::sync::Arc::new(tokio::net::UdpSocket::from_std(std_sock)?);
+        let server = Server::bind_socket(Arc::clone(&sock), identity)
+            .with_context(|| format!("监听 {addr} 失败"))?;
+        out.push((server, sock));
+    }
+    Ok(out)
 }
 
 /// 为每个监听器启动 accept 循环;每个连接交给 [`session::handle_conn`]。

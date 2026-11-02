@@ -583,7 +583,9 @@ impl DeviceConn {
         let conn = match connect(sock, identity, expected).await {
             Ok(c) => Arc::new(c),
             // 直连失败 → 原生中继回退（T-032）：DIAL 按指纹寻人，
-            // E2E 加密/配对校验与直连完全一致，中继只见密文
+            // E2E 加密/配对校验与直连完全一致，中继只见密文。
+            // 回退内含打洞竞速（T-034）：中继路径与打洞直连谁先握手完成用谁，
+            // RD_PUNCH=0 关闭打洞只走中继
             Err(direct_err) => {
                 let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
                     return Err(direct_err);
@@ -594,12 +596,13 @@ impl DeviceConn {
                 };
                 let relay_addr =
                     rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
-                tracing::info!(%relay_addr, "直连失败，回退原生中继");
-                Arc::new(
-                    rd_transport::connect_via_relay(relay_addr, target_fp, identity, expected)
-                        .await
-                        .context("经中继连接失败（被控端不在线或中继不可达）")?,
+                tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
+                let (_, conn) = rd_transport::connect_via_relay_punch(
+                    relay_addr, target_fp, identity, expected,
                 )
+                .await
+                .context("经中继连接失败（被控端不在线或中继不可达）")?;
+                Arc::new(conn)
             }
         };
         let peer_fp = conn.peer_fingerprint();

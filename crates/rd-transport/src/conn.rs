@@ -42,6 +42,7 @@ impl Server {
     }
 
     /// 经自定义 UDP socket（中继虚拟链路，T-032 见 relay.rs）建 QUIC 服务端。
+    /// agent 用 [`bind_socket`](Self::bind_socket) 把裸 socket 包进来。
     pub fn bind_over(socket: impl quinn::AsyncUdpSocket, id: &Identity) -> anyhow::Result<Self> {
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             EndpointConfig::default(),
@@ -50,6 +51,16 @@ impl Server {
             std::sync::Arc::new(quinn::TokioRuntime),
         )?;
         Ok(Self { endpoint })
+    }
+
+    /// 在已绑定的裸 UDP socket 上建 QUIC 服务端（T-034 打洞配套）：同一个
+    /// Arc socket 同时交给打洞探测任务发探测包，探测与 QUIC 共端口——控制端
+    /// 学到的映射就是这个端口。
+    pub fn bind_socket(
+        sock: std::sync::Arc<tokio::net::UdpSocket>,
+        id: &Identity,
+    ) -> anyhow::Result<Self> {
+        Self::bind_over(crate::direct::DirectUdpSocket::new(sock), id)
     }
 
     /// 接受一个完成握手（双向认证）的连接。

@@ -132,7 +132,10 @@ pub fn start(
     let _ = test_pair_code;
 
     let listen_addrs = server::resolve_listen_addrs(&state.config, cli_listen)?;
-    let servers = server::bind_servers(&listen_addrs, &state.identity)?;
+    let (servers, direct_socks): (Vec<_>, Vec<_>) =
+        server::bind_servers(&listen_addrs, &state.identity)?
+            .into_iter()
+            .unzip();
     let bound: Vec<SocketAddr> = servers.iter().map(|s| s.local_addr()).collect();
     tracing::info!(
         listen = ?bound,
@@ -163,14 +166,24 @@ pub fn start(
             .filter(|s| !s.trim().is_empty())
             .or_else(|| state.config.relay_addr.clone());
         if let Some(raw) = relay_raw {
+            // 打洞响应（T-034）：RD_PUNCH=0 关闭。收到 PUNCH_NOTIFY 后从直连
+            // socket（与 QUIC accept 同端口）向控制端发探测包，帮它开洞直连。
+            let punch_on = rd_transport::relay::punch_enabled();
+            let punch_socks = punch_on.then(|| direct_socks.clone());
             let state = Arc::clone(&state);
             tokio::spawn(async move {
                 match rd_transport::relay::parse_relay_addr(&raw) {
                     Ok(addr) => {
-                        match rd_transport::relay::bind_via_relay(addr, &state.identity).await {
-                            Ok(server) => {
+                        match rd_transport::relay::bind_via_relay_ex(addr, &state.identity).await {
+                            Ok(relay_server) => {
                                 tracing::info!(%addr, "原生中继监听就绪（跨网兜底入口）");
-                                server::serve_all(state, vec![server]).await;
+                                if let Some(socks) = punch_socks {
+                                    tokio::spawn(rd_transport::relay::punch_respond(
+                                        relay_server.punch_req,
+                                        socks,
+                                    ));
+                                }
+                                server::serve_all(state, vec![relay_server.server]).await;
                             }
                             Err(err) => {
                                 tracing::warn!(%addr, "中继注册失败（直连不受影响）: {err:#}")

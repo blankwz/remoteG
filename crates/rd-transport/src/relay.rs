@@ -12,11 +12,18 @@
 //!
 //! NAT 保活：quinn keep-alive 5s 持续出包，中继按最新来源地址回包，NAT
 //! 绑定自然维持；握手期 REG/DIAL 重试同样起保活作用。
+//!
+//! ## 打洞（T-034，relay 协调 + 双端探测 + 竞速）
+//! DIAL ACK 尾部携带被控端在中继处的 NAT 地址（旧中继没有尾巴 → 自动退化为
+//! 纯中继路径）。控制端据此与被控端互发探测包开洞，从被控端探测包的源地址
+//! 学到其直连 socket 的公网映射，再**用同一个探测 socket**（同端口=同 NAT
+//! 映射，兼容端口受限型 NAT）对它直接 QUIC；与中继 QUIC 路径竞速，谁先完成
+//! 握手用谁。配对/指纹钉扎/E2E 加密两条路完全一致。
 
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -24,15 +31,35 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 use crate::conn::{self, Conn};
+use crate::direct::DirectUdpSocket;
 use crate::identity::{Fingerprint, Identity};
-use rd_relay::{decode_control, decode_control_ack_tail, encode_control, DEFAULT_PORT};
+use rd_relay::{
+    decode_control, decode_control_ack_tail, decode_dial_ack_agent_addr, encode_control,
+    DEFAULT_PORT, PUNCH_PROBE,
+};
 
 /// 握手超时（覆盖「被控端还没注册」的等待窗口；REG/DIAL 每 500ms 重试一次）。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 握手重发间隔。
 const HANDSHAKE_RETRY: Duration = Duration::from_millis(500);
+/// 打洞窗口：等被控端探测包的最长时间（内含控制端侧持续探测保活）。
+#[cfg_attr(test, allow(dead_code))] // 测试用 punch_window() 缩短，常量仅生产构建引用
+const PUNCH_WINDOW: Duration = Duration::from_secs(10);
+/// 探测发包间隔（控制端侧，兼作 recv 轮询周期）。
+const PROBE_INTERVAL: Duration = Duration::from_millis(300);
+
+/// 打洞窗口（测试缩短到 800ms，免得回退路径用例等 10s）。
+#[cfg(test)]
+fn punch_window() -> Duration {
+    Duration::from_millis(800)
+}
+#[cfg(not(test))]
+fn punch_window() -> Duration {
+    PUNCH_WINDOW
+}
 
 /// 中继地址便捷补端口（`1.2.3.4` → `1.2.3.4:21118`）。
 pub fn parse_relay_addr(raw: &str) -> anyhow::Result<SocketAddr> {
@@ -46,6 +73,11 @@ pub fn parse_relay_addr(raw: &str) -> anyhow::Result<SocketAddr> {
         .map_err(|e| anyhow::anyhow!("中继地址格式错误（示例 1.2.3.4:21118）: {e}"))
 }
 
+/// 打洞总开关（`RD_PUNCH=0` 关闭；默认开）——专业定制的总闸。
+pub fn punch_enabled() -> bool {
+    std::env::var("RD_PUNCH").as_deref() != Ok("0")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
     /// agent：REG 注册（我是指纹为 X 的被控端）
@@ -54,14 +86,15 @@ enum Role {
     Controller,
 }
 
-/// 在 `sock` 上完成 REG/DIAL 握手，返回会话 tag。带重试与 NAT 保活语义。
+/// 在 `sock` 上完成 REG/DIAL 握手，返回 (会话 tag, 被控端中继处地址)。
+/// 地址仅 Controller 角色且中继支持打洞协调时为 Some。带重试与 NAT 保活语义。
 async fn relay_handshake(
     sock: &UdpSocket,
     relay: SocketAddr,
     fp: &Fingerprint,
     role: Role,
     timeout: Duration,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<(u64, Option<SocketAddr>)> {
     let (send_kind, ack_kind) = match role {
         Role::Agent => (rd_relay::TYPE_REG, rd_relay::TYPE_REG_ACK),
         Role::Controller => (rd_relay::TYPE_DIAL, rd_relay::TYPE_DIAL_ACK),
@@ -109,7 +142,14 @@ async fn relay_handshake(
                 continue;
             };
             match status {
-                rd_relay::STATUS_OK => return Ok(tag),
+                rd_relay::STATUS_OK => {
+                    // 打洞协调：DIAL ACK 尾巴的被控端地址（旧中继无尾巴 → None）
+                    let agent_addr = match role {
+                        Role::Controller => decode_dial_ack_agent_addr(&buf[..n]),
+                        Role::Agent => None,
+                    };
+                    return Ok((tag, agent_addr));
+                }
                 // 被控端还没注册上：继续等（重发 DIAL）
                 rd_relay::STATUS_NOT_FOUND => break,
                 rd_relay::STATUS_CONFLICT => anyhow::bail!(
@@ -123,14 +163,81 @@ async fn relay_handshake(
 }
 
 /// quinn 的 UDP socket 包装：中继打标链路（原理见模块注释）。
+///
+/// 收包经内部**泵任务**路由（T-034）：控制报（tag=0，来自中继）→ 打洞事件
+/// 通道；本会话数据报（tag 匹配）→ 数据通道供 [`AsyncUdpSocket::poll_recv`]。
+/// 泵任务在数据通道关闭（quinn endpoint drop）后自然退出。
 #[derive(Debug)]
 struct RelayUdpSocket {
     inner: Arc<tokio::net::UdpSocket>,
     tag: u64,
     relay: SocketAddr,
+    /// 泵路由出的本会话数据报（含 8 字节 tag 头，poll_recv 就地剥头）。
+    data_rx: Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
 
 impl RelayUdpSocket {
+    /// 组装 socket 并启动收包泵。`punch_tx` 为 Some 时（agent 侧），来自中继
+    /// 的 PUNCH_NOTIFY 携带的控制端地址被路由到该通道。
+    fn new(
+        inner: Arc<tokio::net::UdpSocket>,
+        tag: u64,
+        relay: SocketAddr,
+        punch_tx: Option<mpsc::UnboundedSender<SocketAddr>>,
+    ) -> Self {
+        let (data_tx, data_rx) = mpsc::unbounded_channel();
+        {
+            let inner = Arc::clone(&inner);
+            let events = punch_tx;
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; rd_relay::MAX_DATAGRAM + 64];
+                loop {
+                    let (n, from) = match inner.recv_from(&mut buf).await {
+                        Ok(x) => x,
+                        Err(_) => break, // socket 关闭 → 泵退出
+                    };
+                    if n < 8 {
+                        continue;
+                    }
+                    let pkt_tag = u64::from_le_bytes(buf[..8].try_into().expect("8 字节"));
+                    if from != relay {
+                        // 非中继来源：只可能是对端打洞探测包（T-034）——源地址
+                        // 就是对端探测 socket 的公网映射，交给打洞响应者回探测。
+                        // 其余非中继包一律丢弃（防伪造）。
+                        if &buf[..n] == PUNCH_PROBE {
+                            if let Some(tx) = &events {
+                                let _ = tx.send(from);
+                            }
+                        }
+                        continue;
+                    }
+                    if pkt_tag == rd_relay::TAG_CONTROL {
+                        // 控制报：只关心 PUNCH_NOTIFY（打洞协调），其余丢弃
+                        if let Some(tx) = &events {
+                            if let Some((_, initiator)) = rd_relay::decode_punch_notify(&buf[..n]) {
+                                let _ = tx.send(initiator);
+                            }
+                        }
+                        continue;
+                    }
+                    if pkt_tag != tag {
+                        continue; // 中继转发的其他会话：不归本端点
+                    }
+                    // 数据通道关闭（接收端 drop）→ 泵退出、释放 socket Arc
+                    if data_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Self {
+            inner,
+            tag,
+            relay,
+            data_rx: Mutex::new(data_rx),
+        }
+    }
+
     /// 组装 `[tag][quic 包]`。
     fn frame(&self, contents: &[u8]) -> Vec<u8> {
         let mut pkt = Vec::with_capacity(8 + contents.len());
@@ -174,27 +281,26 @@ impl AsyncUdpSocket for RelayUdpSocket {
         meta: &mut [RecvMeta],
     ) -> Poll<std::io::Result<usize>> {
         let mut got = 0usize;
+        let mut rx = self.data_rx.lock().expect("data_rx 锁中毒");
         while got < bufs.len() {
-            // 直接用 bufs[got] 做原始读，读完就地剥 tag（零拷贝）
-            let mut rb = tokio::io::ReadBuf::new(&mut bufs[got]);
-            let from = match self.inner.poll_recv_from(cx, &mut rb) {
-                Poll::Ready(Ok(addr)) => addr,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => break,
+            let Some(pkt) = (match rx.poll_recv(cx) {
+                Poll::Ready(Some(pkt)) => Some(pkt),
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "中继收包泵已退出",
+                    )))
+                }
+                Poll::Pending => None,
+            }) else {
+                break;
             };
-            let n = rb.filled().len();
-            if from != self.relay {
-                continue; // 只信中继来源（非中继包直接丢，防伪造）
-            }
-            if n < 8 {
+            let n = pkt.len();
+            if n <= 8 {
                 continue;
             }
-            let tag = u64::from_le_bytes(bufs[got][..8].try_into().expect("8 字节"));
-            if tag != self.tag {
-                continue; // 其他会话/控制报：不归本端点
-            }
             let payload_len = n - 8;
-            bufs[got].copy_within(8..n, 0);
+            bufs[got][..payload_len].copy_from_slice(&pkt[8..]);
             meta[got] = RecvMeta {
                 // quinn 眼中的对端地址恒为中继——连接身份稳定，NAT 换口无感
                 addr: self.relay,
@@ -221,6 +327,15 @@ impl AsyncUdpSocket for RelayUdpSocket {
     }
 }
 
+/// 竞速结果：命中路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnPath {
+    /// 经中继打标转发（打洞失败/不可用的兜底）。
+    Relay,
+    /// 打洞成功的直连（打洞竞速的优选）。
+    PunchDirect,
+}
+
 /// 控制端拨号：经中继连接指纹为 `target_fp` 的被控端（E2E 加密与直连一致）。
 pub async fn connect_via_relay(
     relay: SocketAddr,
@@ -228,8 +343,22 @@ pub async fn connect_via_relay(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<Conn> {
+    connect_via_relay_punch(relay, target_fp, id, expected)
+        .await
+        .map(|(_, conn)| conn)
+}
+
+/// 控制端拨号（打洞竞速版，T-034）：DIAL 拿到被控端中继处地址后，
+/// 中继 QUIC 与打洞直连**竞速**，谁先完成握手用谁；输者直接丢弃。
+/// 中继不支持打洞协调（旧版 relay / 无地址尾巴）时自动退化为纯中继。
+pub async fn connect_via_relay_punch(
+    relay: SocketAddr,
+    target_fp: Fingerprint,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<(ConnPath, Conn)> {
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let tag = relay_handshake(
+    let (tag, agent_addr) = relay_handshake(
         &sock,
         relay,
         &target_fp,
@@ -237,30 +366,165 @@ pub async fn connect_via_relay(
         HANDSHAKE_TIMEOUT,
     )
     .await?;
-    tracing::info!(%relay, tag, "中继握手完成（DIAL），开始 QUIC 握手");
-    let socket = RelayUdpSocket {
-        inner: Arc::new(sock),
-        tag,
-        relay,
+    tracing::info!(%relay, tag, "中继握手完成（DIAL），开始双路竞速");
+
+    // 路 A：中继打标转发（sock 已完成握手，直接交给虚拟 socket）
+    let relay_fut = connect_relay_session(sock, tag, relay, id, expected);
+    // 路 B：打洞直连（无地址尾巴 = 旧中继 → 立即失败，只剩路 A）
+    let punch_fut = async {
+        match agent_addr {
+            Some(agent_addr) => punch_direct_connect(relay, agent_addr, id, expected).await,
+            None => anyhow::bail!("中继不支持打洞协调（旧版），走纯中继"),
+        }
     };
-    // QUIC 的「远端地址」用中继地址占位：虚拟 socket 忽略目的地址、恒发中继
+
+    tokio::pin!(relay_fut, punch_fut);
+    let mut relay_err = None;
+    let mut punch_err = None;
+    let conn = loop {
+        tokio::select! {
+            r = &mut relay_fut, if relay_err.is_none() => match r {
+                Ok(conn) => break (ConnPath::Relay, conn),
+                Err(e) => relay_err = Some(e),
+            },
+            p = &mut punch_fut, if punch_err.is_none() => match p {
+                Ok(conn) => break (ConnPath::PunchDirect, conn),
+                Err(e) => {
+                    tracing::info!(err = %e, "打洞未成，等待中继路径");
+                    punch_err = Some(e);
+                }
+            },
+            else => {
+                // 两条路都失败：中继错误优先返回（诊断价值更高）
+                let e = relay_err
+                    .take()
+                    .or(punch_err.take())
+                    .expect("loop 退出必有错误");
+                return Err(e);
+            }
+        }
+    };
+    match conn.0 {
+        ConnPath::Relay => tracing::info!("竞速结果：走中继"),
+        ConnPath::PunchDirect => tracing::info!("竞速结果：打洞直连命中"),
+    }
+    Ok(conn)
+}
+
+/// 中继会话 QUIC：已握手的 sock 包成虚拟 socket 后连接（路 A）。
+/// QUIC 的「远端地址」用中继地址占位：虚拟 socket 忽略目的地址、恒发中继。
+async fn connect_relay_session(
+    sock: UdpSocket,
+    tag: u64,
+    relay: SocketAddr,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, None);
     conn::connect_over(socket, relay, id, expected).await
 }
 
-/// 被控端监听：向中继注册（REG），后续连接经中继进来。返回供 accept 循环
-/// 用的 [`Server`](crate::Server)（`local_addr` 为本机出口地址；对外语义上
-/// 监听的是中继）。
-pub async fn bind_via_relay(relay: SocketAddr, id: &Identity) -> anyhow::Result<crate::Server> {
+/// 打洞直连（路 B）：与被控端互发探测包开洞 → 从被控端探测包源地址学到其
+/// 直连 socket 的公网映射 → 用同一个 socket（同端口=同 NAT 映射，兼容端口
+/// 受限型 NAT）对它发起 QUIC。窗口 [`PUNCH_WINDOW`] 内学不到映射即失败。
+async fn punch_direct_connect(
+    relay: SocketAddr,
+    agent_relay_addr: SocketAddr,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    let sock = crate::direct::bind_udp_socket("0.0.0.0:0".parse().unwrap()).await?;
+    // 持续向被控端「在中继处的地址」发探测：目的只是让本侧 NAT 对被控端 IP
+    // 开洞（地址受限型 NAT 只看对端 IP），使被控端发来的探测包能进来。
+    // 被控端不回也无所谓——洞已开，它发的包照进。
+    let deadline = Instant::now() + punch_window();
+    let peer;
+    {
+        let mut buf = [0u8; 64];
+        loop {
+            if Instant::now() >= deadline {
+                anyhow::bail!("打洞窗口超时（{:?} 内未收到被控端探测包）", punch_window());
+            }
+            let _ = sock.send_to(PUNCH_PROBE, agent_relay_addr).await;
+            match tokio::time::timeout(PROBE_INTERVAL, sock.recv_from(&mut buf)).await {
+                Ok(Ok((n, from))) if from != relay && &buf[..n] == PUNCH_PROBE => {
+                    peer = from;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
+    tracing::info!(%peer, %agent_relay_addr, "打洞：学到被控端直连映射，QUIC 直连");
+    conn::connect_over(DirectUdpSocket::new(sock), peer, id, expected).await
+}
+
+/// 被控端的中继监听句柄：QUIC [`Server`](crate::Server) + 打洞请求通道。
+pub struct RelayServer {
+    pub server: crate::conn::Server,
+    /// 收到即「某控制端请求打洞」，值为该控制端在中继处的地址。
+    pub punch_req: mpsc::UnboundedReceiver<SocketAddr>,
+}
+
+/// 被控端监听（完整版）：向中继注册（REG），后续连接经中继进来；同时拿到
+/// 打洞请求通道——[`punch_respond`] 消费它向控制端发探测包开洞。
+pub async fn bind_via_relay_ex(relay: SocketAddr, id: &Identity) -> anyhow::Result<RelayServer> {
     let local_fp = id.fingerprint();
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let tag = relay_handshake(&sock, relay, &local_fp, Role::Agent, HANDSHAKE_TIMEOUT).await?;
+    let (tag, _) = relay_handshake(&sock, relay, &local_fp, Role::Agent, HANDSHAKE_TIMEOUT).await?;
     tracing::info!(%relay, tag, "中继握手完成（REG），QUIC 监听改走中继");
-    let socket = RelayUdpSocket {
-        inner: Arc::new(sock),
-        tag,
-        relay,
-    };
-    crate::conn::Server::bind_over(socket, id)
+    let (punch_tx, punch_req) = mpsc::unbounded_channel();
+    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, Some(punch_tx));
+    let server = crate::conn::Server::bind_over(socket, id)?;
+    Ok(RelayServer { server, punch_req })
+}
+
+/// 被控端监听（兼容版）：只要 QUIC Server，不要打洞通道。
+pub async fn bind_via_relay(
+    relay: SocketAddr,
+    id: &Identity,
+) -> anyhow::Result<crate::conn::Server> {
+    Ok(bind_via_relay_ex(relay, id).await?.server)
+}
+
+/// 被控端打洞响应：通道里的每个地址都从所有直连 QUIC socket（与 accept 共
+/// 端口——控制端学到的就是这个映射）回发探测包开洞。地址有两个来源：
+/// PUNCH_NOTIFY（控制端中继握手地址，尽力而为）与**探测包源地址**（对端
+/// 探测 socket 的真实映射，主路径——控制端监听的正是这个 socket）。
+/// 急发 6×500ms（打洞窗口内高命中）后转慢相 20s×1/2s（覆盖控制端稍后才
+/// 竞速的重连场景）。同一地址只响应一轮（重复通知不重复起任务）。
+pub async fn punch_respond(
+    mut rx: mpsc::UnboundedReceiver<SocketAddr>,
+    socks: Vec<Arc<UdpSocket>>,
+) {
+    let mut last: Option<SocketAddr> = None;
+    while let Some(ctrl_addr) = rx.recv().await {
+        if last == Some(ctrl_addr) {
+            continue;
+        }
+        last = Some(ctrl_addr);
+        tracing::info!(%ctrl_addr, "收到打洞请求，开始向控制端发探测包");
+        let socks = socks.clone();
+        tokio::spawn(async move {
+            let burst = async {
+                for _ in 0..6 {
+                    for s in &socks {
+                        let _ = s.send_to(PUNCH_PROBE, ctrl_addr).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            };
+            let slow = async {
+                for _ in 0..10 {
+                    for s in &socks {
+                        let _ = s.send_to(PUNCH_PROBE, ctrl_addr).await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            };
+            tokio::join!(burst, slow);
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -368,6 +632,82 @@ mod tests {
         // 读毕响应 → 主动关闭 → 服务端保活循环自然收尾
         conn.close(0, "e2e done");
         accepter.await??;
+        Ok(())
+    }
+
+    /// 打洞全链路（确定性，不经竞速）：REG → DIAL（ACK 带地址尾巴）→
+    /// 控制端向被控端发探测 → 被控端泵从探测包源地址学到控制端探测 socket →
+    /// punch_respond 从直连 socket 回探测 → 控制端学到映射并对它 QUIC 直连
+    /// （指纹钉扎断言）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 打洞_直连路径_学到映射并握手() -> anyhow::Result<()> {
+        let relay_addr = relay_spawn("127.0.0.1:0".parse()?).await?;
+        let server_id = Identity::generate("punch-server")?;
+        let client_id = Identity::generate("punch-client")?;
+        let server_fp = server_id.fingerprint();
+        let client_fp = client_id.fingerprint();
+
+        // 被控端：直连 QUIC server（探测与 accept 共端口）+ 中继注册 + 真实响应者
+        let direct_sock = crate::direct::bind_udp_socket("127.0.0.1:0".parse().unwrap()).await?;
+        let direct_server = crate::Server::bind_socket(Arc::clone(&direct_sock), &server_id)?;
+        let relay_server = bind_via_relay_ex(relay_addr, &server_id).await?;
+        tokio::spawn(punch_respond(
+            relay_server.punch_req,
+            vec![Arc::clone(&direct_sock)],
+        ));
+
+        // 控制端：完成中继握手，拿到被控端在中继处的地址
+        let ctrl_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let (_, agent_addr) = relay_handshake(
+            &ctrl_sock,
+            relay_addr,
+            &server_fp,
+            Role::Controller,
+            HANDSHAKE_TIMEOUT,
+        )
+        .await?;
+        let agent_addr = agent_addr.expect("新版中继 DIAL ACK 应带地址尾巴");
+
+        // 被控端 accept（指纹钉扎断言）
+        let accepter = tokio::spawn(async move {
+            let conn = direct_server.accept().await?;
+            assert_eq!(conn.peer_fingerprint(), client_fp, "E2E 指纹必须钉扎成功");
+            anyhow::Ok(())
+        });
+
+        // 控制端：打洞直连（路 B 单独驱动，不经竞速 → 结果确定）
+        let conn =
+            punch_direct_connect(relay_addr, agent_addr, &client_id, Some(server_fp)).await?;
+        assert_eq!(conn.peer_fingerprint(), server_fp, "E2E 指纹必须钉扎成功");
+        accepter.await??;
+        conn.close(0, "punch e2e done");
+        Ok(())
+    }
+
+    /// 竞速回退：被控端只注册中继、不响应打洞请求 → 打洞路在窗口内失败，
+    /// 竞速自动落在中继路径，连接仍然建成（自动化降级的兜底断言）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn 打洞_无响应时竞速回退中继() -> anyhow::Result<()> {
+        let relay_addr = relay_spawn("127.0.0.1:0".parse()?).await?;
+        let server_id = Identity::generate("punch-fallback-server")?;
+        let client_id = Identity::generate("punch-fallback-client")?;
+        let server_fp = server_id.fingerprint();
+        let client_fp = client_id.fingerprint();
+
+        // 被控端：只经中继监听，不消费 punch_req（= 不打洞）
+        let server = bind_via_relay(relay_addr, &server_id).await?;
+        let accepter = tokio::spawn(async move {
+            let conn = server.accept().await?;
+            assert_eq!(conn.peer_fingerprint(), client_fp);
+            anyhow::Ok(())
+        });
+
+        let (path, conn) =
+            connect_via_relay_punch(relay_addr, server_fp, &client_id, Some(server_fp)).await?;
+        assert_eq!(path, ConnPath::Relay, "打洞无响应应回退中继");
+        assert_eq!(conn.peer_fingerprint(), server_fp, "E2E 指纹必须钉扎成功");
+        accepter.await??;
+        conn.close(0, "fallback e2e done");
         Ok(())
     }
 }
