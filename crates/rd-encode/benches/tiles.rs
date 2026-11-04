@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rd_encode::dirty::BlockGrid;
-use rd_encode::frame::RawFrame;
+use rd_encode::frame::{RawFrame, YuvPlanes};
 use rd_encode::tiles::TileRefiner;
+use rd_encode::{create_best, EncoderConfig, PixelFormat};
 
 /// LCG 伪随机填充整帧。
 fn fill_pseudo(frame: &mut RawFrame, seed: u64) {
@@ -109,10 +110,56 @@ fn bench_tick_256_text(c: &mut Criterion) {
     });
 }
 
+/// 文本区 256×256：QOI 解码（控制端覆盖路径）。
+fn bench_qoi_decode_256(c: &mut Criterion) {
+    let frame = text_like_frame(256, 256);
+    let data = qoi::encode_to_vec(&frame.data, 256, 256).expect("qoi 编码");
+    c.bench_function("tiles/qoi_decode_256x256_text", |b| {
+        b.iter(|| black_box(qoi::decode_to_vec(black_box(&data))))
+    });
+}
+
+/// 色彩转换 BGRA→I420（每帧必走）：1080p 与 4K 吞吐。
+fn bench_conv_i420(c: &mut Criterion) {
+    for (name, w, h) in [("1080p", 1920u32, 1080u32), ("4k", 3840u32, 2160u32)] {
+        let frame = make_frame(w, h, 0xABCD);
+        let mut planes = YuvPlanes::new(w, h);
+        c.bench_function(
+            &format!("conv/bgra_to_i420_{name}"),
+            |b| b.iter(|| black_box(frame.bgra_to_i420_into(&mut planes))),
+        );
+    }
+}
+
+/// OpenH264 软编吞吐：不同分辨率下单帧编码时间（DoD 预算 20 ms）。
+/// 硬编探测不可复现（依赖驱动/设备），故固定 prefer_hw=false 走软编。
+fn bench_openh264_encode(c: &mut Criterion) {
+    for (name, w, h) in [("720p", 1280u32, 720u32), ("1080p", 1920u32, 1080u32)] {
+        let frame = make_frame(w, h, 0xFEED);
+        let cfg = EncoderConfig {
+            width: w,
+            height: h,
+            fps: 60,
+            bitrate_kbps: 4000,
+            prefer_hw: false,
+            pixel_format: PixelFormat::Yuv420,
+        };
+        let mut enc = create_best(&cfg).expect("软编应可用");
+        // 预热一帧（编码器内部缓冲/分配）。
+        enc.encode(&frame, true).expect("预热帧");
+        c.bench_function(&format!("encode/openh264_{name}"), |b| {
+            b.iter(|| black_box(enc.encode(&frame, false)))
+        });
+    }
+}
+
 criterion_group!(
     benches,
     bench_update_1080p,
     bench_qoi_encode_256,
-    bench_tick_256_text
+    bench_tick_256_text,
+    bench_qoi_decode_256,
+    bench_conv_i420,
+    bench_openh264_encode
 );
 criterion_main!(benches);

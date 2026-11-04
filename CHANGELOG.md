@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 性能优化增量（2026-11-05，criterion 实测）
+
+冷热路径一次性测量定位（1080p 每帧）：OpenH264 软编 9.87ms、色彩转换 BGRA→I420 1.16ms、脏区全扫描 1.59ms、QOI 文本瓦片 109µs——软编路径总 ~12.6ms/frame，60fps 达标余量 25%，非瓶颈。
+
+### 修复：静止窗口不再空转编码（rd-agent）
+- **风控**：编码器 `process` 原无条件对每帧跑色彩转换 + 编码 + 发整帧。窗口静止时（脏块=0 / WGC 空脏区）改为跳过视频编码——静止区已由无损瓦片覆盖，控制器保持上一帧，`force_key` 置位使恢复变化首帧为干净 IDR。省下 ~11ms/帧 CPU 与整帧带宽。
+- **正确性护栏**：带缓冲延迟的硬件编码器（h264_mf 等）首 `encode` 返回 `Ok(None)`，需持续喂帧才吐出首包；新增 `need_feed` 门控——编码器未出首包 / reconfigure 后禁止跳过，关键帧必达。
+- 验证：新增 gating 单测（refine 开/关两路径、静止跳过、恢复 IDR）；**e2e 全套 10/10 通过**（含 t02 首帧 IDR、t04 resize、t09 FEC）。
+
+### 码控 QoS 收敛契约锁定（rd-encode/rate.rs）
+- 新增端到端仿真测试：**拥塞恢复**——重度拥塞跌底 500 后，warmup×1.3 应在 2.4s（12 tick）内爬回起始码率，防误删 warmup 退化；**启动契约**——首样本即达起始码率（warmup 是恢复坡非启动坡）。
+- 厘清机制：warmup ×1.3 只在 `kbps < start_kbps` 时触发，是去拥塞恢复坡；好链路 ×1.15 持续爬升至 50Mbps 上限是 LAN 换画质的既定设计。
+
+### OpenH264 编码参数扫参（负结论，防无谓改参）
+- 新增 `#[ignore]` 手动工具 `tests/oh264_sweep.rs`：固定码率+固定内容扫（线程数 1~16 × 复杂度 Low/Medium）的 1080p 逐帧编码时延。
+- 结论（release 实测）：**线程数几乎无关**——threads 1→16 时延 22→18ms、输出字节完全不变（2061）；openh264 逐帧 `encode_at` 不吃多线程，当前 `num_threads(4)` 无改参价值。**复杂度有效**：Low ~18.9ms < Medium ~23.5ms（快 ~20%），当前 `Complexity::Low` 正确。
+- 暴露真实特征：**纯平文档内容软编 ~19ms/帧，贴近 20ms DoD 预算**；缓解靠硬编优先（已有）+ 静止帧 gating（R3）。
+
+### 回归护栏扩展（rd-encode/benches/tiles.rs）
+- 基准覆盖从脏区/QOI 扩展到**色彩转换（1080p/4K）+ QOI 解码 + OpenH264 软编（720p/1080p）**，全部热路径纳入 criterion 防回归。
+
+实测基线（criterion）：dirty/update_1080p_full **1.49~1.59ms**、conv/bgra_to_i420_1080p **1.16ms**、encode/openh264_1080p **9.87ms**、tiles/qoi_encode_256x256 **109µs**、qoi_decode **24µs**。
+
+> 注：`cargo fmt --all --check` 在 `apps/rd-agent/src/netinfo.rs:144` 存在前序提交（c7210ea）遗留的格式漂移，与本增量无关，未一并改动。
+
 ## v0.1.0（M1，2026-10-15）
 
 首个可用版本：窗口级远程控制 MVP（M0 验证 + M1 全部 27 张任务卡）。

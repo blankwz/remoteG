@@ -335,4 +335,67 @@ mod tests {
         }
         assert_eq!(rc.current_fps(), 60, "长干净期 → 帧率恢复");
     }
+
+    // ---- 端到端收敛仿真（无网络可测的关键 QoS 参数回归护栏）----
+    // 每条 tick 对应 200ms 反馈周期。把码控从「稳态干链路 → 拥塞 2s → 恢复」
+    // 全流程推演一遍，断言收敛到明确时间目标，防止改动破坏爬坡/恢复机制
+    // （如误删 warmup ×1.3，恢复将退化为 ×1.15、耗时翻倍以上）。
+
+    /// 稳态好样本：RTT 保持 20ms、零积压、零丢包。
+    fn good() -> RateInput {
+        RateInput {
+            rtt_ms: 20,
+            queued_bytes: 0,
+            lost_ratio: 0.0,
+        }
+    }
+
+    /// 拥塞坏样本：RTT 飙到 5×基线、高积压、5% 丢包（一次性触达各降级分支）。
+    fn congest() -> RateInput {
+        RateInput {
+            rtt_ms: 100,
+            queued_bytes: 1 << 20,
+            lost_ratio: 0.05,
+        }
+    }
+
+    #[test]
+    fn 拥塞恢复_warmup快速爬回起始码率() {
+        let start = 4000;
+        let mut rc = RateController::new(start, 60);
+        // 1) 先建 RTT 基线（20ms）。
+        rc.update(good());
+        // 2) 重度拥塞 20 tick（4s）：rtt 5×基线触发 ×0.5 严重路径，跌到下限 500。
+        for _ in 0..20 {
+            rc.update(congest());
+        }
+        assert_eq!(rc.update(congest()).kbps, 500, "拥塞应跌到下限 clamp");
+
+        // 3) 恢复：warmup ×1.3 从头爬到 start（约 8 tick），最多 12 tick（2.4s）
+        //    内应回到 start。该断言锁定「去拥塞后的快速爬坡」，若误删 warmup
+        //    （退化为 ×1.15）需 30 tick 才能回 4000，将立即被此用例抓住。
+        let mut ticks = 0;
+        let mut kbps = 0;
+        for _ in 0..12 {
+            kbps = rc.update(good()).kbps;
+            ticks += 1;
+            if kbps >= start {
+                break;
+            }
+        }
+        assert!(
+            kbps >= start,
+            "拥塞后 {ticks} tick({}ms)仍未爬回起始码率（kbps={kbps}）",
+            ticks * 200
+        );
+    }
+
+    #[test]
+    fn 启动即达起始码率_不先跌再爬() {
+        // 启动契约：创建码率即生效，首样本就 == start（不会从低位慢慢爬）。
+        // warmup×1.3 是「恢复到 start」的坡，不是启动坡；启动时 kbps==start，
+        // warmup 条件 kbps<start 恒假，直接走好样本稳态。
+        let mut rc = RateController::new(8000, 60);
+        assert_eq!(rc.update(good()).kbps, 8000, "首样本即起始码率");
+    }
 }

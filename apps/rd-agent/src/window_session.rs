@@ -1602,6 +1602,13 @@ struct FramePipeline {
     refiner: Option<TileRefiner>,
     last_size: Option<(u32, u32)>,
     force_key: bool,
+    /// 编码器是否尚需持续喂帧才能产出输出（首包 / reconfigure 后）。
+    ///
+    /// 带缓冲延迟的硬件编码器（h264_mf 等 MFT 类）首次 `encode` 可能返回
+    /// `Ok(None)`，需后续帧喂入才吐出首包；静态帧 gating 若在此时跳过，
+    /// 关键帧将永不产出（控制器收不到首帧）。故 gating 仅在编码器输出已
+    /// 流动（最近一次 `encode` 返回 `Some`）后启用。
+    need_feed: bool,
 }
 
 impl FramePipeline {
@@ -1616,6 +1623,7 @@ impl FramePipeline {
             refiner: None,
             last_size: None,
             force_key: true, // 首帧 IDR
+            need_feed: true, // 首包前禁止 gating
         }
     }
 
@@ -1674,6 +1682,7 @@ impl FramePipeline {
             }
             self.force_key = true;
             self.last_size = Some((raw.width, raw.height));
+            self.need_feed = true; // reconfigure 后编码器可能重新缓冲
             self.refiner = self
                 .refine
                 .then(|| TileRefiner::new(raw.width, raw.height, TILE_STILL_MS));
@@ -1684,15 +1693,37 @@ impl FramePipeline {
             );
         }
 
-        let invalidates = match self.refiner.as_mut() {
-            Some(r) => r.on_frame(raw, dirty, now),
-            None => Vec::new(),
+        // 静止判定：本帧是否有内容变化。refiner 存在时以其块网格为准
+        // （`on_frame` 无论 WGC 是否给 dirty hint 都算出精确变更块数）；
+        // refiner 关闭时退回 WGC 脏矩形判定（空 = 纯静止）。
+        let mut invalidates: Vec<TileOut> = Vec::new();
+        let changed = match self.refiner.as_mut() {
+            Some(r) => {
+                invalidates = r.on_frame(raw, dirty, now);
+                r.changed() > 0
+            }
+            None => !dirty.is_some_and(|d| d.is_empty()),
         };
+        // 静止帧跳过视频编码：窗口无内容变化（且编码器输出已流动）时不再跑
+        // 色彩转换 + 编码 + 发整帧（静止区已由无损瓦片覆盖，控制器保持上一帧）；
+        // 置 `force_key` 使恢复变化首帧为干净 IDR——长时间静止后不依赖编码器
+        // 对旧参考帧的依赖，画面无缝跳回。首帧 / 尺寸重建 / 编码器未出首包时恒编码
+        // （后者保证 h264_mf 类带缓冲编码器能被持续喂帧，直到吐出首包关键帧）。
+        if !changed && !size_changed && !self.need_feed {
+            self.force_key = true;
+            return Ok(FrameStep {
+                au: None,
+                invalidates,
+            });
+        }
         let enc = self
             .encoder
             .as_mut()
             .expect("encoder created on first frame");
         let au = enc.encode(raw, std::mem::take(&mut self.force_key))?;
+        // 输出已流动（返回 Some）则 gating 生效；仍为 None（编码器缓冲中）则
+        // 继续喂帧，禁止 gating。
+        self.need_feed = au.is_none();
         Ok(FrameStep { au, invalidates })
     }
 
@@ -2576,6 +2607,42 @@ mod tests {
         let au = step.au.expect("首帧应有 AU 输出");
         assert!(au.keyframe, "首帧必须为 IDR keyframe");
         assert_eq!(p.size(), Some((320, 240)));
+    }
+
+    #[test]
+    fn static_frame_skips_video_encode_refine_on() {
+        let mut p = pipe(); // refine=true
+        let t0 = Instant::now();
+        let f = frame(320, 240, 10, 0);
+        assert!(
+            p.process(&f, None, t0).expect("首帧").au.is_some(),
+            "首帧必须编码（IDR）"
+        );
+        // 相同内容静止帧：refine 全扫描变更块=0 → 跳过视频编码
+        let step = p.process(&f, None, t0).expect("静止帧处理成功");
+        assert!(step.au.is_none(), "静止帧不应产出视频 AU");
+        // 恢复变化：内容变 → 重新编码，且静止期 force_key 未消费仍是 IDR
+        let f2 = frame(320, 240, 50, 1);
+        let step = p.process(&f2, None, t0).expect("变化帧处理成功");
+        let au = step.au.expect("变化帧应产出 AU");
+        assert!(au.keyframe, "静止后恢复变化首帧应为 IDR");
+    }
+
+    #[test]
+    fn static_frame_skips_video_encode_refine_off() {
+        let mut p = FramePipeline::new(30, 4000, false, false, PixelFormat::Yuv420);
+        let t0 = Instant::now();
+        let f = frame(320, 240, 10, 0);
+        assert!(p.process(&f, None, t0).expect("首帧").au.is_some());
+        // refine 关闭：退回 WGC 脏矩形判定，空脏区 = 纯静止 → 跳过编码
+        let empty: Vec<DirtyRect> = Vec::new();
+        let step = p
+            .process(&f, Some(&empty), t0)
+            .expect("空脏区静止帧处理成功");
+        assert!(step.au.is_none(), "refine 关闭 + 空脏区 → 跳过视频编码");
+        // 无 dirty hint（全扫描兜底）→ 无法判定静止，保持原编码行为
+        let step = p.process(&f, None, t0).expect("无 hint 帧处理成功");
+        assert!(step.au.is_some(), "refine 关闭 + 无 hint → 保持编码");
     }
 
     #[test]

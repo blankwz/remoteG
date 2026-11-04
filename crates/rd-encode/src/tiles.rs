@@ -103,6 +103,15 @@ impl TileRefiner {
         (self.grid.cols() * BLOCK, self.grid.rows() * BLOCK)
     }
 
+    /// 最近一次 [`on_frame`](Self::on_frame) 中发生变化的块数。
+    ///
+    /// 供上层做「静止帧 gating」：=0 表示本帧画面静止，可跳过视频帧编码
+    /// （静止区由无损瓦片覆盖，控制器保持上一帧）。无论 WGC 是否提供
+    /// dirty hint，`on_frame` 都已算出精确变更块数。
+    pub fn changed(&self) -> usize {
+        self.grid.changed_blocks().len()
+    }
+
     /// 喂一帧：比对脏块，回收"已精修又变化"区域的失效标记。
     ///
     /// 返回 `fmt = 255` 的失效瓦片（矩形按行内合并，`data` 为空）。
