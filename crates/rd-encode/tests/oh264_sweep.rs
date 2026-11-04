@@ -13,10 +13,17 @@
 //!   （2061）——openh264 逐帧 `encode_at` 不吃多线程，4 线程既不增也不减
 //!   单帧延迟。当前 `num_threads(4)` 无改参价值。
 //! - **复杂度是有用杠杆**：Low ~18.9ms < Medium ~23.5ms（快约 20%），
-//!   当前选择 `Complexity::Low` 正确（pag1 低延迟/低字节取向）。
+//!   当前选择 `Complexity::Low` 正确（低延迟/低字节取向）。
 //! - 真实特征：**纯平文档内容软编 ~19ms/帧，贴近 20ms DoD 预算**；混合/噪声
 //!   内容更低。软件兜底在超大纯平窗口下单帧延迟逼近预算——缓解靠硬编优先
 //!   （已有）与静止帧 gating（R3，静止跳过编码）。
+//!
+//! ## 硬编 vs 软编（`bench_hardware_path`，用 `create_best` 生产接口）
+//! - **硬编 h264_mf（本机生产路径）：7.2ms/帧；静止内容 P 帧仅 ~18B**
+//!   （字节样本 `[100425, 3365, 18, 18, …]` = IDR→首 P→全跳过）。
+//!   快且省字节，1080p60 余量充足，无码率超发。
+//! - **软编 openh264：~23-31ms/帧；对相同静止内容仍发 3-17KB/帧**（不积极
+//!   跳过）——4 倍慢且浪费带宽，更印证静止帧 gating（R3）对软编价值更大。
 
 use std::time::Instant;
 
@@ -27,6 +34,7 @@ use openh264::encoder::{
 use openh264::OpenH264API;
 use openh264::Timestamp;
 use rd_encode::frame::{RawFrame, YuvPlanes};
+use rd_encode::{create_best, EncoderConfig, PixelFormat};
 
 /// 1080p 拟真"文档"帧：白底灰字形带 + 抗锯齿边缘 + 顶部彩色头带 + 噪声，
 /// 同时覆盖平面与纹理区（贴近真实窗口内容对软编的负载）。
@@ -128,5 +136,63 @@ fn sweep_openh264_threads_complexity() {
                 last_bytes
             );
         }
+    }
+}
+
+/// `create_best` 生产选路路径的每帧延迟（本机硬编会落到 h264_mf；无硬编即
+/// OpenH264 软编）。这才是真正跑在产线的路径——衡量硬编优先是否兑现低延迟。
+#[test]
+#[ignore]
+fn bench_hardware_path() {
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    const KBPS: u32 = 4000;
+    const FRAMES: u32 = 16;
+
+    let raw = doc_frame(W, H);
+    for prefer_hw in [true, false] {
+        let cfg = EncoderConfig {
+            width: W,
+            height: H,
+            fps: 60,
+            bitrate_kbps: KBPS,
+            prefer_hw,
+            pixel_format: PixelFormat::Yuv420,
+        };
+        let mut enc = create_best(&cfg).expect("创建编码器");
+        let info = enc.info();
+        let _ = enc.encode(&raw, true).expect("IDR 预热");
+
+        // 硬编带缓冲延迟，前几帧返回 Ok(None) 属正常（生产循环同样容忍
+        // au=None）。只对真正产出 AU 的帧计时。
+        let mut t_acc = 0.0f64;
+        let mut n = 0.0f64;
+        let mut produced = 0u32;
+        let mut i = 0u32;
+        let mut bytes_samples: Vec<usize> = Vec::new();
+        while produced < FRAMES {
+            let t0 = Instant::now();
+            let au = enc.encode(&raw, false).expect("编码");
+            let dt = t0.elapsed().as_secs_f64() * 1000.0;
+            if let Some(au) = au {
+                produced += 1;
+                if bytes_samples.len() < 10 {
+                    bytes_samples.push(au.data.len());
+                }
+                if produced > 4 {
+                    t_acc += dt;
+                    n += 1.0;
+                }
+            }
+            i += 1;
+            if i > 200 {
+                panic!("编码器长时间不产出 AU（{info:?} 仍未流动）");
+            }
+        }
+        let avg = t_acc / n.max(1.0);
+        println!(
+            "[create_best] prefer_hw={prefer_hw:<5} → {}（hardware={}）: {avg:>7.3}ms/帧  字节样本(mid10)={bytes_samples:?}",
+            info.name, info.hardware
+        );
     }
 }
