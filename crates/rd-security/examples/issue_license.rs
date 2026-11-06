@@ -2,13 +2,16 @@
 //!
 //! 用法：
 //! ```text
-//! # 开发/演示（内置开发种子，与代码内公钥配对）：
+//! # 开发/演示（内置开发种子；debug 构建可验签，**发布版会拒收**）：
 //! cargo run -p rd-security --example issue_license -- --name "张三" --plan pro --devices 99
 //!
-//! # 正式签发（随机正式种子，公钥需同步替换 LICENSE_PUBKEY_HEX 后重新发版）：
-//! export RD_LICENSE_SEED=$(openssl rand -hex 32)
+//! # 正式签发（正式种子，2026-11-06 轮换后的唯一发布版可用种子）：
+//! export RD_LICENSE_SEED=<正式种子 hex 64>   # 存密码管理器，绝不进仓库
 //! cargo run -p rd-security --example issue_license -- --name "客户A" --plan pro --expires-days 365
 //! ```
+//!
+//! 自验规则：debug 构建下开发种子码可通过自验（dev 验签兜底）；release 构建
+//! 下自验失败即说明种子与内嵌正式公钥不配对——**发正式码务必用正式种子**。
 //!
 //! 输出授权码文本 → 存为 `<被控机 config_dir>/license.key`（默认
 //! `%LOCALAPPDATA%\rd\license.key`），重启 Agent 生效。

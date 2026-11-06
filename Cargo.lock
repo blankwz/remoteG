@@ -855,7 +855,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clarity-bench"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "png 0.17.16",
@@ -4271,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "rd-agent"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4307,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "rd-capture-win"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "rd-controller"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "rd-encode"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "rd-input-win"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "windows",
@@ -4381,7 +4381,7 @@ dependencies = [
 
 [[package]]
 name = "rd-proto"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "rd-relay"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -4403,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "rd-security"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "rd-switch"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4438,7 +4438,7 @@ dependencies = [
 
 [[package]]
 name = "rd-term"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4449,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "rd-transport"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4472,7 +4472,7 @@ dependencies = [
 
 [[package]]
 name = "rd-window-win"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",

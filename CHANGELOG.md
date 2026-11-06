@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## T-036 正式授权密钥轮换 + 版本基线 0.3.0（2026-11-06）
+
+商业化底座收口（上线检查清单第 1 条）：
+
+### 密钥轮换（rd-security）
+- `LICENSE_PUBKEY_HEX` 替换为**随机正式种子**派生公钥；种子绝不进仓库（存密码管理器）。
+- **验签规则**：正式公钥为唯一锚点；debug 构建（dev/e2e）保留开发种子验签兜底，release 构建编译期剔除——**发布版拒收一切开发码**。
+- 新增 `pubkey_hex_from_seed()` 与 `examples/show_pubkey.rs`（种子→公钥派生，密钥 SOP 工具）。
+- 测试重构为双档位锚定：debug 断言开发码可验 + dev/正式公钥不同；release 断言开发码被拒（`dev_roundtrip_and_guards`）。
+- 签发工具（`examples/issue_license.rs`）文档同步：正式签发必须 `RD_LICENSE_SEED` 指向正式种子。
+
+### 版本基线
+- workspace / src-tauri / tauri.conf.json / package.json：0.1.0 → **0.3.0**。
+
+### 兼容性说明
+- 旧版产物（0.1.0，内嵌开发公钥）签发的开发码在新版**全部失效**——发布 0.3.0 前用正式种子重签。
+- 验证：rd-security debug/release 双档位 9/9；workspace 55 组全绿；e2e 串行 10/10；clippy -D warnings 零警告。
+
 ## 性能优化增量（2026-11-05，criterion 实测）
 
 冷热路径一次性测量定位（1080p 每帧）：OpenH264 软编 9.87ms、色彩转换 BGRA→I420 1.16ms、脏区全扫描 1.59ms、QOI 文本瓦片 109µs——软编路径总 ~12.6ms/frame，60fps 达标余量 25%，非瓶颈。
