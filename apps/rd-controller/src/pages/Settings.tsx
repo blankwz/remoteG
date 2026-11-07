@@ -35,6 +35,13 @@ import {
 import { Switch } from "../ui/Switch";
 import { getRelayAddr, setRelayAddr } from "../api/devices";
 import { useUpdater } from "../ui/useUpdater";
+import {
+  crashClear,
+  crashDumps,
+  crashReportUrl,
+  type CrashEntry,
+} from "../api/crash";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import styles from "./Settings.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
@@ -105,6 +112,8 @@ export function Settings() {
   const [relayError, setRelayError] = useState<string | null>(null);
   /** 应用更新（T-038）：手动检查/下载/重启共用状态机（静默检查在 App 横幅）。 */
   const updater = useUpdater();
+  /** 崩溃报告（T-040）：本地 dump 列表；null=读取中/读取失败（按钮禁用）。 */
+  const [crashes, setCrashes] = useState<CrashEntry[] | null>(null);
 
   void call<boolean>("get_media_fec")
     .then(setFec)
@@ -141,6 +150,31 @@ export function Settings() {
     void getRelayAddr()
       .then((v) => setRelayAddrState(v ?? ""))
       .catch(() => setRelayReadFailed(true)); // 读取失败独立提示，不再混进 relayMsg
+  }, []);
+
+  // 崩溃记录（挂载一次；读取失败保持 null，按钮禁用）
+  useEffect(() => {
+    void crashDumps()
+      .then((v) => setCrashes(v ?? []))
+      .catch(() => setCrashes(null));
+  }, []);
+
+  const onReportCrash = useCallback(async () => {
+    try {
+      const url = await crashReportUrl();
+      await openUrl(url);
+    } catch {
+      // 打开失败静默：记录仍在本地，用户可再试
+    }
+  }, []);
+
+  const onClearCrash = useCallback(async () => {
+    try {
+      await crashClear();
+      setCrashes([]);
+    } catch {
+      // 清空失败保持原列表
+    }
   }, []);
 
   const onSaveRelay = useCallback(async () => {
@@ -374,6 +408,38 @@ export function Settings() {
               onClick={() => void updater.checkNow()}
             >
               {updater.state.phase === "checking" ? "检查中…" : "检查更新"}
+            </button>
+          </span>
+        </li>
+        <li className={styles.section}>崩溃报告</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>本机崩溃记录</b>
+            <span className={styles.hint}>
+              {crashes === null
+                ? "读取失败（被控服务未启动）"
+                : crashes.length === 0
+                  ? "无崩溃记录。"
+                  : `共 ${crashes.length} 条（只含元数据：时间/线程/出错位置，无任何屏幕或输入内容）。最新：${crashes[0]?.message ?? ""}`}
+              上报 = 打开浏览器预填 Issue，内容可先检查再提交。
+            </span>
+          </span>
+          <span className={styles.relayEdit}>
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={crashes === null || crashes.length === 0}
+              onClick={() => void onReportCrash()}
+            >
+              在浏览器上报
+            </button>
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={crashes === null || crashes.length === 0}
+              onClick={() => void onClearCrash()}
+            >
+              清除记录
             </button>
           </span>
         </li>

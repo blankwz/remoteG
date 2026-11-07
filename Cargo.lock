@@ -4397,6 +4397,7 @@ dependencies = [
  "if-addrs",
  "igd",
  "rd-capture-win",
+ "rd-crash",
  "rd-encode",
  "rd-input-win",
  "rd-proto",
@@ -4444,6 +4445,7 @@ dependencies = [
  "if-addrs",
  "qoi",
  "rd-agent",
+ "rd-crash",
  "rd-proto",
  "rd-security",
  "rd-switch",
@@ -4469,6 +4471,16 @@ dependencies = [
  "windows",
  "winreg 0.10.1",
  "zstd",
+]
+
+[[package]]
+name = "rd-crash"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -42,8 +42,9 @@ mod imp {
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
     use windows::core::HSTRING;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MessageBoxW, SetTimer, TranslateMessage, MB_ICONINFORMATION,
-        MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MSG, WM_TIMER,
+        DispatchMessageW, GetMessageW, MessageBoxW, SetTimer, TranslateMessage, IDYES,
+        MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MSG,
+        WM_TIMER,
     };
 
     use rd_agent::session::AgentState;
@@ -63,6 +64,7 @@ mod imp {
     const ID_PAUSE: &str = "pause";
     const ID_AUTOSTART: &str = "autostart";
     const ID_OPEN_LOGS: &str = "open-logs";
+    const ID_REPORT_CRASH: &str = "report-crash";
     const ID_LICENSE: &str = "license";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
@@ -113,6 +115,7 @@ mod imp {
             CheckMenuItem::with_id(ID_AUTOSTART, "开机自启", true, autostart_enabled(), None);
         let trust = Submenu::with_id("trust", "信任设备", true);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
+        let report_crash_item = MenuItem::with_id(ID_REPORT_CRASH, "上报崩溃…", true, None);
         let license_item = MenuItem::with_id(ID_LICENSE, "授权…", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
@@ -127,6 +130,7 @@ mod imp {
         let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&open_logs);
+        let _ = menu.append(&report_crash_item);
         let _ = menu.append(&license_item);
         let _ = menu.append(&quit_item);
 
@@ -263,6 +267,7 @@ mod imp {
                 }
             }
             ID_OPEN_LOGS => open_log_dir(),
+            ID_REPORT_CRASH => report_crash(),
             ID_LICENSE => {
                 // 授权状态弹窗（T-029）：当前档位 + 升级操作说明（大白话）
                 show_pair_code_dialog(license_dialog_text(&state));
@@ -550,6 +555,57 @@ mod imp {
             Ok(_) => tracing::info!(dir = %dir.display(), "打开日志目录"),
             Err(err) => tracing::warn!(dir = %dir.display(), "打开日志目录失败: {err}"),
         }
+    }
+
+    /// 崩溃上报（T-040）：预览本地 dump（元数据）→ 用户确认 → 系统浏览器
+    /// 打开预填 Issue。dump 目录与 main.rs panic hook 写入处同源
+    /// （`default_config_dir()/logs/crash`；`--config-dir` 覆盖场景与
+    /// 「打开日志目录」同款不可见限制）。
+    fn report_crash() {
+        let dir = rd_agent::default_config_dir()
+            .join("logs")
+            .join("crash");
+        let dumps = rd_crash::list_dumps(&dir);
+        if dumps.is_empty() {
+            show_pair_code_dialog("没有崩溃记录，无需上报。".to_string());
+            return;
+        }
+        let url = rd_crash::issue_new_url(&dumps, 4000);
+        let mut preview = format!(
+            "共 {} 条崩溃记录（只含元数据，无内存内容）：\n\n",
+            dumps.len()
+        );
+        for d in dumps.iter().take(5) {
+            preview.push_str(&format!(
+                "· {} v{} @ {} | {}\n  {} ({})\n",
+                d.app, d.version, d.time_unix, d.thread, d.message, d.location
+            ));
+        }
+        preview.push_str("\n点「是」在浏览器打开上报页面（内容可先检查再提交）；点「否」取消。");
+        std::thread::spawn(move || {
+            let text = HSTRING::from(preview);
+            let title = HSTRING::from("rd 远程控制 · 崩溃上报");
+            let confirmed = unsafe {
+                MessageBoxW(
+                    None,
+                    &text,
+                    &title,
+                    MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+                ) == IDYES
+            };
+            if confirmed {
+                // start 需要空标题占位；URL 交给默认浏览器
+                match std::process::Command::new("cmd")
+                    .args(["/C", "start", "", &url])
+                    .spawn()
+                {
+                    Ok(_) => tracing::info!("已打开崩溃上报页面"),
+                    Err(err) => tracing::warn!("打开崩溃上报页面失败: {err}"),
+                }
+            } else {
+                tracing::info!("用户取消崩溃上报（dump 保留本地）");
+            }
+        });
     }
 
     /// SessionState.Kind 原始值(v0.1,proto SessionState::Kind;AGENT_CLOSING=1

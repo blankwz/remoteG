@@ -23,6 +23,7 @@ if-addrs = "0.13"
 switchboard-daemon = { path = "../../../switchboard/sdk/rust/switchboard-daemon" }
 qoi = "0.4"
 rd-agent = { path = "../../../apps/rd-agent" }
+rd-crash = { path = "../../../crates/rd-crash" }
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }
 rd-transport = { path = "../../../crates/rd-transport" }

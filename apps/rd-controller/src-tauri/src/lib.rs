@@ -20,6 +20,16 @@ pub fn run() {
     // guard 必须存活至进程结束（run 的 event loop 不返回，局部绑定即可）。
     let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = {
         let log_dir = rd_agent::default_config_dir().join("app").join("logs");
+        // 崩溃上报（T-040）：panic hook → logs/crash/*.json（元数据，无内存转储）
+        rd_crash::install_panic_hook(
+            "rd-controller",
+            env!("CARGO_PKG_VERSION"),
+            rd_crash::crash_dir(&log_dir),
+        );
+        // 人为崩溃测试开关（T-040 验收）：RD_TEST_CRASH=1 验证 dump 落盘
+        if std::env::var("RD_TEST_CRASH").as_deref() == Ok("1") {
+            panic!("RD_TEST_CRASH 触发的测试崩溃（验证 dump 落盘）");
+        }
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
         match std::fs::create_dir_all(&log_dir).ok().and_then(|()| {
@@ -117,6 +127,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // T-040：崩溃报告
+            commands::crash::crash_dumps,
+            commands::crash::crash_clear,
+            commands::crash::crash_report_url,
             // T-005：视频链路 spike（真实实现）
             commands::spike::spike_connect,
             // T-019：设备

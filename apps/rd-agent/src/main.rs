@@ -87,7 +87,19 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or_else(rd_agent::default_config_dir);
     // guard 必须存活到进程结束,否则非阻塞日志线程停摆
     let _log_guard = init_logging(&config_dir.join("logs"));
+    // 崩溃上报（T-040）：panic hook → logs/crash/*.json（元数据，无内存转储）
+    rd_crash::install_panic_hook(
+        "rd-agent",
+        env!("CARGO_PKG_VERSION"),
+        rd_crash::crash_dir(&config_dir.join("logs")),
+    );
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "rd-agent 启动");
+
+    // 人为崩溃测试开关（T-040 验收）：RD_TEST_CRASH=1 时在 hook 安装后立即 panic，
+    // 供验证 dump 落盘与托盘上报入口（生产环境无人设置，等价死代码路径）
+    if std::env::var("RD_TEST_CRASH").as_deref() == Ok("1") {
+        panic!("RD_TEST_CRASH 触发的测试崩溃（验证 dump 落盘）");
+    }
 
     // tokio 跑在后台线程,主线程留给托盘/信号等待;
     // quinn Endpoint 的创建依赖 runtime 上下文,绑定须在 runtime 就绪后进行

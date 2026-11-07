@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## T-040 崩溃上报（2026-11-07）
+
+信任底线补强：panic 不静默丢——本地留痕 + 用户预览确认后才上报：
+
+### 新 crate `crates/rd-crash`
+- `install_panic_hook`：包装默认 hook，崩溃落 JSON dump（**只记元数据**：端/版本/时间/线程/panic 消息/源码位置——**无内存转储**，规避隐私争议）
+- `list_dumps`/`clear_dumps`/`prune_dumps`（保留上限 10 条防崩溃风暴撑爆磁盘）+ `issue_new_url`（dump 摘要 → 预填 GitHub Issue 链接，body 截断防 URL 超长）
+- 内部绝不 panic（hook 内失败只丢记录不升级）；损坏 dump 跳过不阻塞
+- 6 项单测（读写往返/倒序+损坏跳过/剪枝/清空/URL 编码截断/hook 实写）
+
+### 两端接入
+- **rd-agent**：`run_app` 安装 hook（logs/crash/）；托盘新增「上报崩溃…」——预览记录 → Yes/No 确认 → 浏览器打开预填 Issue（提交与否在用户手里）
+- **rd-controller**：`run()` 安装 hook；新命令 `crash_dumps/crash_clear/crash_report_url`；设置页新增「崩溃报告」节（计数 + 最新摘要 + 在浏览器上报 + 清除记录）
+- 两端均有 `RD_TEST_CRASH=1` 人为崩溃开关（hook 安装后立即 panic，验收 dump 落盘）
+- 上报仓库地址为产品级占位（`ISSUE_NEW_URL_BASE`），仓库远端就绪（T-039）时替换
+
+### 验证
+- rd-crash 6/6；workspace 57 组全绿；clippy -D warnings 零警告；tsc + 前端 194/194；浏览器预览实证设置页渲染正常
+- e2e 注：t05/t06（真实点击注入类）在全套跑时受物理桌面占用干扰偶发失败——单独复跑均过（非回归）；全套 e2e 复测待桌面空闲时执行
+
+
 ## T-038 自动更新接入（Tauri updater，2026-11-07）
 
 「分发底线」第 2 条闭环——没有自动更新就没有第二次机会：
