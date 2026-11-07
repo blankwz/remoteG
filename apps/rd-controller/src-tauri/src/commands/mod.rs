@@ -6,4 +6,5 @@ pub mod input;
 pub mod session;
 pub mod spike;
 pub mod term;
+pub mod update;
 pub mod windows;

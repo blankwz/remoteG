@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## T-038 自动更新接入（Tauri updater，2026-11-07）
+
+「分发底线」第 2 条闭环——没有自动更新就没有第二次机会：
+
+### Rust / 配置
+- `tauri-plugin-updater` 接入（src-tauri）：插件注册 + capability `updater:default`
+- `tauri.conf.json`：`bundle.createUpdaterArtifacts: true` + `plugins.updater`（验签公钥内嵌、端点占位 `https://github.com/OWNER/rd/releases/latest.json` 待 T-039 仓库就绪后替换、Windows passive 安装模式）
+- 新命令 `restart_app`（passive 模式装完不自动退出，前端显式重启收尾）
+
+### 前端
+- `api/update.ts`：checkForUpdate/install（进度聚合）/restartApp 封装 + 24h 静默检查节流（`shouldCheckNow` 纯函数）；浏览器 demo 环境全 no-op
+- `ui/useUpdater.ts`：状态机 hook（idle→checking→available→downloading→ready/error），静默与手动共用
+- `ui/UpdateBanner.tsx`：发现新版本顶栏横幅，下载/安装/重启内联完成；错误态不打扰（设置页可见）
+- Settings 页新增「应用更新」节：手动检查不受节流限制
+
+### CI（release.yml）
+- 两个 controller 构建作业接 updater 签名环境变量（secrets 待 T-039 配置，缺密钥时构建明确失败属预期护栏）；产物上传补 `.sig`
+- **修复遗留路径 bug**：F-2 合并 workspace 后产物在根 `target/`，release.yml 上传路径仍是旧 `apps/rd-controller/src-tauri/target/`（会传空）——已改根路径
+
+### 密钥治理
+- 更新签名密钥对（minisign）已生成：公钥进 conf，私钥 `C:\Users\blank\.rd-secrets\rd-updater.key`（与授权种子同规则：绝不进仓库，待转密码管理器）；**公钥一经发版不可更换**
+
+### 验证
+- 前端 194/194 + tsc 干净（新增 update 模块 7 用例 + 状态机 6 用例）；clippy -D warnings 零警告
+- 本地 release 构建全链路实证：0.3.0 NSIS/MSI + `.sig` 签名产物出齐（曾踩两坑：签名环境变量名须为 `TAURI_SIGNING_PRIVATE_KEY`；conf pubkey 须为 `.pub` 文件整行 base64 而非内层键串）
+- 全链路升级模拟（check→download→install）待远端仓库托管 latest.json，归 T-039
+
 ## T-036 正式授权密钥轮换 + 版本基线 0.3.0（2026-11-06）
 
 商业化底座收口（上线检查清单第 1 条）：

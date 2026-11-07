@@ -5,11 +5,7 @@
  * #/devices / #/windows/:id / #/session/:id。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  getLastDeviceId,
-  probeDecodeCaps,
-  setDecodeCaps,
-} from "./api/devices";
+import { getLastDeviceId, probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
 import { Devices } from "./pages/Devices";
@@ -20,6 +16,7 @@ import type { DecodeStats } from "./video/decoder";
 import { H264Decoder } from "./video/decoder";
 import { VideoCanvas } from "./video/VideoCanvas";
 import { IconGear } from "./ui/Icon";
+import { UpdateBanner } from "./ui/UpdateBanner";
 import styles from "./App.module.css";
 
 type Route =
@@ -130,7 +127,9 @@ function SpikePage() {
 }
 
 export default function App() {
-  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  const [route, setRoute] = useState<Route>(() =>
+    parseRoute(window.location.hash),
+  );
 
   useEffect(() => {
     const onHashChange = () => setRoute(parseRoute(window.location.hash));
@@ -148,6 +147,7 @@ export default function App() {
   return (
     <div className={styles.app}>
       <Nav active={route.page} />
+      <UpdateBanner />
       {route.page === "spike" && <SpikePage />}
       {route.page === "devices" && <Devices />}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
@@ -161,7 +161,9 @@ export default function App() {
 function Nav({ active }: { active: Route["page"] }) {
   const lastDeviceId = getLastDeviceId();
   const linkClass = (page: Route["page"]): string =>
-    active === page ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink;
+    active === page
+      ? `${styles.navLink} ${styles.navLinkActive}`
+      : styles.navLink;
   return (
     <nav className={styles.nav}>
       <a className={styles.brand} href="#/devices" title="返回设备页">
@@ -183,10 +185,16 @@ function Nav({ active }: { active: Route["page"] }) {
         </a>
         {active === "devices" && lastDeviceId !== null && (
           <>
-            <a className={linkClass("windows")} href={`#/windows/${lastDeviceId}`}>
+            <a
+              className={linkClass("windows")}
+              href={`#/windows/${lastDeviceId}`}
+            >
               窗口列表
             </a>
-            <a className={linkClass("session")} href={`#/session/${lastDeviceId}`}>
+            <a
+              className={linkClass("session")}
+              href={`#/session/${lastDeviceId}`}
+            >
               会话
             </a>
           </>

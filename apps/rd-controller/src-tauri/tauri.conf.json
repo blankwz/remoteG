@@ -23,9 +23,21 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3ODg2Qjg3NjQxRTJDRjkKUldUNUxCNWtoMnVJbHhnODVpTWZZV0xxQW1aWXV5MlVZVW9wdGZMUFNwdmt4L0krTjFFSW4yeDQK",
+      "endpoints": [
+        "https://github.com/OWNER/rd/releases/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "ffmpeg-bin/*": "./",
       "../../../switchboard/studio/dist": "studio/dist"

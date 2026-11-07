@@ -310,3 +310,28 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* T-038 更新横幅：导航栏下常驻一条，token 配色过对比度门禁 */
+.updateBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--rd-accent-soft);
+  border-bottom: 1px solid var(--rd-accent-strong);
+  color: var(--rd-accent-text);
+  font-size: 13px;
+}
+.updateBtn {
+  border: 1px solid var(--rd-accent-strong);
+  background: transparent;
+  color: var(--rd-accent-text);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.updateBtn:hover {
+  background: var(--rd-accent-soft);
+}

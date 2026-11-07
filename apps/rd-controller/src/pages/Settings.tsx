@@ -34,6 +34,7 @@ import {
 } from "../ui/uiScale";
 import { Switch } from "../ui/Switch";
 import { getRelayAddr, setRelayAddr } from "../api/devices";
+import { useUpdater } from "../ui/useUpdater";
 import styles from "./Settings.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
@@ -53,7 +54,7 @@ export function relayAddrError(raw: string): string | null {
     return null;
   }
   if (/^(https?|wss?):\/\//i.test(v)) {
-    return v.split("://")[1]?.length ?? 0
+    return (v.split("://")[1]?.length ?? 0)
       ? null
       : "缺主机名：示例 https://xxx.workers.dev";
   }
@@ -72,7 +73,9 @@ const QUALITY_LABEL: Record<Quality, string> = {
 };
 function readQuality(): Quality {
   const saved = window.localStorage.getItem(QUALITY_KEY);
-  return saved === "high" || saved === "medium" || saved === "low" ? saved : "auto";
+  return saved === "high" || saved === "medium" || saved === "low"
+    ? saved
+    : "auto";
 }
 
 /** macOS 才显示 Cmd→Ctrl 行（Windows 上是无条件噪音）。 */
@@ -100,6 +103,8 @@ export function Settings() {
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
   /** 中继地址保存前的格式错误（P1-2；有错不写入）。 */
   const [relayError, setRelayError] = useState<string | null>(null);
+  /** 应用更新（T-038）：手动检查/下载/重启共用状态机（静默检查在 App 横幅）。 */
+  const updater = useUpdater();
 
   void call<boolean>("get_media_fec")
     .then(setFec)
@@ -161,11 +166,17 @@ export function Settings() {
     saveUiScale(s);
   }, []);
 
-  const onFont = useCallback((delta: number) => {
-    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, fontPx + delta));
-    setFontPx(next);
-    saveFontSize(next);
-  }, [fontPx]);
+  const onFont = useCallback(
+    (delta: number) => {
+      const next = Math.min(
+        FONT_SIZE_MAX,
+        Math.max(FONT_SIZE_MIN, fontPx + delta),
+      );
+      setFontPx(next);
+      saveFontSize(next);
+    },
+    [fontPx],
+  );
 
   const removePhrase = useCallback((text: string) => {
     const next = readCustomPhrases().filter((p) => p !== text);
@@ -209,7 +220,9 @@ export function Settings() {
             className={styles.select}
             value={uiScale}
             aria-label="界面缩放"
-            onChange={(e) => onUiScale(Number(e.currentTarget.value) as UiScale)}
+            onChange={(e) =>
+              onUiScale(Number(e.currentTarget.value) as UiScale)
+            }
           >
             {UI_SCALES.map((s) => (
               <option key={s} value={s}>
@@ -222,7 +235,9 @@ export function Settings() {
         <li className={styles.row}>
           <span className={styles.label}>
             <b>新连接默认画质</b>
-            <span className={styles.hint}>会话内可随时切换；此处决定下次连接的初始档位</span>
+            <span className={styles.hint}>
+              会话内可随时切换；此处决定下次连接的初始档位
+            </span>
           </span>
           <select
             className={styles.select}
@@ -237,21 +252,21 @@ export function Settings() {
             ))}
           </select>
         </li>
+        {IS_MAC && <li className={styles.section}>输入映射</li>}
         {IS_MAC && (
-        <li className={styles.section}>输入映射</li>
-        )}
-        {IS_MAC && (
-        <li className={styles.row}>
-          <label className={styles.label}>
-            <b>macOS：Cmd 组合键映射为远端 Ctrl</b>
-            <span className={styles.hint}>与会话内画面信息面板的开关保持同步</span>
-          </label>
-          <Switch
-            checked={cmdToCtrl}
-            onChange={onCmdToCtrl}
-            label="Cmd 组合键映射为远端 Ctrl"
-          />
-        </li>
+          <li className={styles.row}>
+            <label className={styles.label}>
+              <b>macOS：Cmd 组合键映射为远端 Ctrl</b>
+              <span className={styles.hint}>
+                与会话内画面信息面板的开关保持同步
+              </span>
+            </label>
+            <Switch
+              checked={cmdToCtrl}
+              onChange={onCmdToCtrl}
+              label="Cmd 组合键映射为远端 Ctrl"
+            />
+          </li>
         )}
         <li className={styles.section}>网络</li>
         <li className={styles.row}>
@@ -314,18 +329,78 @@ export function Settings() {
             </button>
           </span>
         </li>
+        <li className={styles.section}>应用更新</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>检查更新</b>
+            <span className={styles.hint}>
+              应用启动时会静默检查（每天最多一次）；此处手动检查不受限制。
+              {updater.state.phase === "idle" && " 当前已是最新。"}
+              {updater.state.phase === "available" &&
+                ` 发现新版本 v${updater.state.pending.info.version}。`}
+              {updater.state.phase === "downloading" &&
+                updater.state.pct !== null &&
+                ` 正在下载（${updater.state.pct}%）…`}
+              {updater.state.phase === "error" &&
+                ` 检查失败：${updater.state.message}`}
+            </span>
+          </span>
+          <span className={styles.relayEdit}>
+            {updater.state.phase === "available" && (
+              <button
+                type="button"
+                className={styles.stepBtn}
+                onClick={() => void updater.install()}
+              >
+                下载并安装
+              </button>
+            )}
+            {updater.state.phase === "ready" && (
+              <button
+                type="button"
+                className={styles.stepBtn}
+                onClick={updater.restart}
+              >
+                重启应用
+              </button>
+            )}
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={
+                updater.state.phase === "checking" ||
+                updater.state.phase === "downloading"
+              }
+              onClick={() => void updater.checkNow()}
+            >
+              {updater.state.phase === "checking" ? "检查中…" : "检查更新"}
+            </button>
+          </span>
+        </li>
         <li className={styles.section}>终端与常用语</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>终端默认字号</b>
-            <span className={styles.hint}>终端内也可 Ctrl+= / Ctrl+- 调整（{FONT_SIZE_MIN}~{FONT_SIZE_MAX}）</span>
+            <span className={styles.hint}>
+              终端内也可 Ctrl+= / Ctrl+- 调整（{FONT_SIZE_MIN}~{FONT_SIZE_MAX}）
+            </span>
           </span>
           <span className={styles.stepper}>
-            <button type="button" className={styles.stepBtn} aria-label="减小字号" onClick={() => onFont(-1)}>
+            <button
+              type="button"
+              className={styles.stepBtn}
+              aria-label="减小字号"
+              onClick={() => onFont(-1)}
+            >
               −
             </button>
             <span className={styles.stepValue}>{fontPx}px</span>
-            <button type="button" className={styles.stepBtn} aria-label="增大字号" onClick={() => onFont(1)}>
+            <button
+              type="button"
+              className={styles.stepBtn}
+              aria-label="增大字号"
+              onClick={() => onFont(1)}
+            >
               +
             </button>
           </span>
@@ -334,11 +409,14 @@ export function Settings() {
           <span className={styles.label}>
             <b>自定义常用语</b>
             <span className={styles.hint}>
-              本页可直接新增与删除，与悬浮工具栏「常用语」面板同一份（内置 5 条不可删）
+              本页可直接新增与删除，与悬浮工具栏「常用语」面板同一份（内置 5
+              条不可删）
             </span>
           </span>
           <span className={styles.phrases}>
-            {phrases.length === 0 && <span className={styles.hint}>暂无自定义短语</span>}
+            {phrases.length === 0 && (
+              <span className={styles.hint}>暂无自定义短语</span>
+            )}
             {phrases.map((p) => (
               <span key={p} className={styles.phrase}>
                 {p}
@@ -365,7 +443,11 @@ export function Settings() {
                   }
                 }}
               />
-              <button type="button" className={styles.phraseAddBtn} onClick={addPhrase}>
+              <button
+                type="button"
+                className={styles.phraseAddBtn}
+                onClick={addPhrase}
+              >
                 添加
               </button>
             </span>

@@ -82,6 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .setup(|app| {
             // 被控核心启动（F-2）：融合身份目录独立于 bin 版（K3，干净起步）
@@ -168,6 +169,8 @@ pub fn run() {
             commands::term::open_terminal,
             commands::term::term_input,
             commands::term::term_resize,
+            // T-038：更新
+            commands::update::restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
