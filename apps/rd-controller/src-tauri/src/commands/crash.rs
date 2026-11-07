@@ -25,7 +25,8 @@ pub fn crash_clear(_state: State<'_, ConnManager>) -> usize {
 }
 
 /// 组装「在浏览器上报」的预填 Issue 链接（用户可在浏览器里检查后再提交）。
+/// body 上限 1500 字符（中文 urlencode 膨胀 ~9 倍后仍在浏览器安全范围）。
 #[tauri::command]
 pub fn crash_report_url(_state: State<'_, ConnManager>) -> String {
-    rd_crash::issue_new_url(&rd_crash::list_dumps(&crash_dir()), 4000)
+    rd_crash::issue_new_url(&rd_crash::list_dumps(&crash_dir()), 1500)
 }

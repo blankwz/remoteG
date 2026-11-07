@@ -105,6 +105,39 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      - name: Generate updater latest.json（M-3：updater 查询端点）
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $base = "${{ github.server_url }}/${{ github.repository }}/releases/download/$tag"
+          $latest = [ordered]@{
+            version = $version
+            notes = "rd $tag"
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            platforms = [ordered]@{}
+          }
+          $setup = Get-ChildItem dist -Filter "rd-controller_*_x64-setup.exe" |
+            Select-Object -First 1
+          if ($setup) {
+            $sig = (Get-Content "$($setup.FullName).sig" -Raw).Trim()
+            $latest.platforms["windows-x86_64"] = [ordered]@{
+              signature = $sig
+              url = "$base/$($setup.Name)"
+            }
+          }
+          $appTar = Get-ChildItem dist -Filter "*.app.tar.gz" |
+            Select-Object -First 1
+          if ($appTar) {
+            $sig = (Get-Content "$($appTar.FullName).sig" -Raw).Trim()
+            $latest.platforms["darwin-aarch64"] = [ordered]@{
+              signature = $sig
+              url = "$base/$($appTar.Name)"
+            }
+          }
+          $latest | ConvertTo-Json -Depth 5 |
+            Set-Content dist/latest.json -Encoding utf8
+          Write-Host "latest.json: v$version, platforms=$($latest.platforms.Keys -join ',')"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

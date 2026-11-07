@@ -75,9 +75,11 @@ export async function checkForUpdate(): Promise<PendingUpdate | null> {
   if (!isTauriRuntime()) {
     return null;
   }
-  markChecked();
   const mod = await import("@tauri-apps/plugin-updater");
+  // 先查后记：失败（网络断/端点 404）不写节流戳，24h 短路会漏掉恢复窗口
+  // （code-review H-2）
   const update = await mod.check();
+  markChecked();
   if (update === null) {
     return null;
   }

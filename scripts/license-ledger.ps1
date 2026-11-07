@@ -48,7 +48,8 @@ if ($seed -notmatch '^[0-9a-fA-F]{64}$') {
 
 # ---- 签发（issue_license 自带「签发即验」：种子与内嵌公钥不配对会当场失败）--
 $repo = Split-Path -Parent $PSScriptRoot
-$env:RD_LICENSE_SEED = $seed
+# M-1（code-review）：种子只进子进程环境，签发完（含失败路径）立即清除，
+# 不残留当前会话被后续子进程继承
 $issueArgs = @(
   "run", "-q", "-p", "rd-security", "--example", "issue_license", "--",
   "--name", $Name, "--plan", $Plan, "--devices", "$Devices"
@@ -60,7 +61,12 @@ Write-Host "签发中…（issue_license 内置签发后自验）"
 # PS 5.1 下 stderr 重定向（2>&1）+ Stop 偏好会把 cargo 的 stderr 输出
 # （✓ 自验行）误判为终止错误——此处临时放宽，靠 RD1./plan= 匹配判定成败
 $ErrorActionPreference = "Continue"
-$output = & cargo @issueArgs 2>&1
+try {
+  $env:RD_LICENSE_SEED = $seed
+  $output = & cargo @issueArgs 2>&1
+} finally {
+  Remove-Item Env:RD_LICENSE_SEED -ErrorAction SilentlyContinue
+}
 $ErrorActionPreference = "Stop"
 $code = ($output | Where-Object { $_ -like "RD1.*" } | Select-Object -First 1)
 $okLine = ($output | Where-Object { $_ -like "*plan=*" } | Select-Object -First 1)
@@ -75,8 +81,18 @@ if (-not $Ledger) {
   $Ledger = Join-Path $env:USERPROFILE ".rd-secrets\licenses.csv"
 }
 $expiresText = if ($ExpiresDays -gt 0) { (Get-Date).AddDays($ExpiresDays).ToString("yyyy-MM-dd") } else { "permanent" }
+# M-2（code-review）：CSV 注入防护——双引号翻倍转义防破列；
+# 公式前导字符（=+-@）加 ' 前缀防 Excel 打开时按公式执行
+function ConvertTo-CsvSafe([string]$v) {
+  $v = $v.Replace('"', '""')
+  if ($v -match '^[=+\-@]') { $v = "'" + $v }
+  return $v
+}
 $row = '"{0}","{1}","{2}","{3}","{4}",{5},"{6}","{7}"' -f `
-  (Get-Date -Format "yyyy-MM-dd HH:mm"), $Order, $Email, $Name, $Plan, $Devices, $expiresText, $code
+  (Get-Date -Format "yyyy-MM-dd HH:mm"),
+  (ConvertTo-CsvSafe $Order), (ConvertTo-CsvSafe $Email),
+  (ConvertTo-CsvSafe $Name), (ConvertTo-CsvSafe $Plan),
+  $Devices, (ConvertTo-CsvSafe $expiresText), (ConvertTo-CsvSafe $code)
 Add-Content -Path $Ledger -Value $row -Encoding utf8
 
 # ---- 回邮草稿 + 剪贴板 -----------------------------------------------------

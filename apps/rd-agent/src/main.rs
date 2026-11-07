@@ -96,7 +96,9 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "rd-agent 启动");
 
     // 人为崩溃测试开关（T-040 验收）：RD_TEST_CRASH=1 时在 hook 安装后立即 panic，
-    // 供验证 dump 落盘与托盘上报入口（生产环境无人设置，等价死代码路径）
+    // 供验证 dump 落盘与托盘上报入口。仅 debug 构建可达（code-review LOW：
+    // release 收紧，不留自伤性开关）
+    #[cfg(debug_assertions)]
     if std::env::var("RD_TEST_CRASH").as_deref() == Ok("1") {
         panic!("RD_TEST_CRASH 触发的测试崩溃（验证 dump 落盘）");
     }

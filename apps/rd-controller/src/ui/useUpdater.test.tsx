@@ -1,12 +1,13 @@
 /**
- * T-038 useUpdater 状态机测试（jsdom + mock api/update）：
- * 静默命中 / 节流拦截 / 手动检查→available→ready 全链路 + 错误路径。
+ * T-038/R2 useUpdater 单例 store 测试（jsdom + mock api/update）：
+ * 静默命中 / 节流拦截 / 手动检查→available→ready 全链路 / 错误路径 /
+ * H-1 回归锁定：两个消费者共享同一状态（横幅与设置页不分家）。
  * @vitest-environment jsdom
  */
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type PendingUpdate } from "../api/update";
-import { useUpdater } from "./useUpdater";
+import { __resetUpdaterStoreForTests, useUpdater } from "./useUpdater";
 
 /* ---- mock ../api/update：默认节流拦截（挂载自检默认不触发） ---- */
 vi.mock("../api/update", () => {
@@ -28,15 +29,15 @@ function fakePending(): PendingUpdate {
   };
 }
 
-/** 放行挂载自检（仅本测试文件内；beforeEach 的 resetAllMocks 会复原）。 */
+/** 放行挂载自检（resetAllMocks 会复原为默认 false）。 */
 function allowAutoCheck(): void {
   vi.mocked(shouldCheckNow).mockReturnValue(true);
 }
 
-describe("useUpdater", () => {
+describe("useUpdater（模块级单例）", () => {
   beforeEach(() => {
+    __resetUpdaterStoreForTests();
     vi.resetAllMocks();
-    // resetAllMocks 会把工厂里 vi.fn() 的默认实现也清掉，补回：
     vi.mocked(restartApp).mockResolvedValue(undefined);
   });
 
@@ -56,7 +57,7 @@ describe("useUpdater", () => {
     });
   });
 
-  it("静默检查失败：状态机如实记 error（横幅渲染层吞掉不打扰，见 UpdateBanner）", async () => {
+  it("静默检查失败：状态机如实记 error（横幅渲染层吞掉不打扰）", async () => {
     allowAutoCheck();
     vi.mocked(checkForUpdate).mockRejectedValue(new Error("网络不可达"));
     const { result } = renderHook(() => useUpdater());
@@ -107,5 +108,18 @@ describe("useUpdater", () => {
     expect((result.current.state as { message: string }).message).toContain(
       "签名校验失败",
     );
+  });
+
+  it("H-1 回归：两个消费者共享同一状态（A 处检查，B 处可见）", async () => {
+    vi.mocked(checkForUpdate).mockResolvedValue(fakePending());
+    const a = renderHook(() => useUpdater());
+    const b = renderHook(() => useUpdater());
+    expect(b.result.current.state.phase).toBe("idle");
+    await act(async () => {
+      await a.result.current.checkNow();
+    });
+    expect(b.result.current.state.phase).toBe("available");
+    // 静默检查进程级只跑一次：A、B 两次挂载只触发一次 checkForUpdate
+    await waitFor(() => expect(checkForUpdate).toHaveBeenCalledTimes(1));
   });
 });

@@ -26,7 +26,9 @@ pub fn run() {
             env!("CARGO_PKG_VERSION"),
             rd_crash::crash_dir(&log_dir),
         );
-        // 人为崩溃测试开关（T-040 验收）：RD_TEST_CRASH=1 验证 dump 落盘
+        // 人为崩溃测试开关（T-040 验收）：RD_TEST_CRASH=1 验证 dump 落盘。
+        // 仅 debug 构建可达（code-review LOW：release 收紧）
+        #[cfg(debug_assertions)]
         if std::env::var("RD_TEST_CRASH").as_deref() == Ok("1") {
             panic!("RD_TEST_CRASH 触发的测试崩溃（验证 dump 落盘）");
         }

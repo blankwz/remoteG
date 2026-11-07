@@ -557,10 +557,14 @@ mod imp {
         }
     }
 
-    /// 崩溃上报（T-040）：预览本地 dump（元数据）→ 用户确认 → 系统浏览器
-    /// 打开预填 Issue。dump 目录与 main.rs panic hook 写入处同源
+    /// 崩溃上报（T-040 / R2 修复 C-1）：预览本地 dump（元数据）→ 用户确认
+    /// → 系统浏览器打开预填 Issue。dump 目录与 main.rs panic hook 写入处同源
     /// （`default_config_dir()/logs/crash`；`--config-dir` 覆盖场景与
     /// 「打开日志目录」同款不可见限制）。
+    ///
+    /// C-1：URL 含字面 `&`，`cmd /C start` 会把它当命令分隔符拆断、且中文
+    /// urlencode 后易超 cmd 8191 字符上限——改用 `explorer <url>`（不经
+    /// shell 解析，交默认浏览器）；body 上限同步收紧（M-4：预览=全量上报）。
     fn report_crash() {
         let dir = rd_agent::default_config_dir()
             .join("logs")
@@ -570,12 +574,13 @@ mod imp {
             show_pair_code_dialog("没有崩溃记录，无需上报。".to_string());
             return;
         }
-        let url = rd_crash::issue_new_url(&dumps, 4000);
+        let url = rd_crash::issue_new_url(&dumps, 1500);
         let mut preview = format!(
             "共 {} 条崩溃记录（只含元数据，无内存内容）：\n\n",
             dumps.len()
         );
-        for d in dumps.iter().take(5) {
+        // M-4：预览列出全部将上报的条目（条数=URL 实际携带数，所见即所发）
+        for d in &dumps {
             preview.push_str(&format!(
                 "· {} v{} @ {} | {}\n  {} ({})\n",
                 d.app, d.version, d.time_unix, d.thread, d.message, d.location
@@ -594,11 +599,8 @@ mod imp {
                 ) == IDYES
             };
             if confirmed {
-                // start 需要空标题占位；URL 交给默认浏览器
-                match std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &url])
-                    .spawn()
-                {
+                // explorer 不经 shell 解析 URL（无 & 拆断/长度上限问题）
+                match std::process::Command::new("explorer").arg(&url).spawn() {
                     Ok(_) => tracing::info!("已打开崩溃上报页面"),
                     Err(err) => tracing::warn!("打开崩溃上报页面失败: {err}"),
                 }
