@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="rd 远程控制：窗口级远控——只共享出问题的那个窗口，家人隐私不裸奔。免安装到对方，不限速。"
+    />
+    <title>rd 远程控制 · 只看出问题的那个窗口</title>
+    <style>
+      /* 设计基线：与控制端一致的深色 + accent；间距从宽、字号对比拉满 */
+      :root {
+        --bg: #0d1117;
+        --surface: #151b23;
+        --border: #232b35;
+        --text: #e6edf3;
+        --text-dim: #8b98a5;
+        --accent: #3269e6;
+        --accent-strong: #5b8aff;
+        --ok: #3fb26f;
+        --radius: 12px;
+        --max: 960px;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          "PingFang SC",
+          "Microsoft YaHei UI",
+          "Microsoft YaHei",
+          system-ui,
+          -apple-system,
+          sans-serif;
+        line-height: 1.7;
+      }
+      section {
+        padding: 72px 24px;
+      }
+      .wrap {
+        max-width: var(--max);
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: clamp(30px, 5vw, 46px);
+        line-height: 1.25;
+        letter-spacing: 0.5px;
+        font-weight: 700;
+      }
+      h2 {
+        font-size: clamp(22px, 3.4vw, 30px);
+        margin-bottom: 12px;
+        font-weight: 700;
+      }
+      .dim {
+        color: var(--text-dim);
+      }
+      .accent {
+        color: var(--accent-strong);
+      }
+
+      /* 顶栏 */
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: rgba(13, 17, 23, 0.85);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--border);
+      }
+      .nav {
+        max-width: var(--max);
+        margin: 0 auto;
+        padding: 14px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .brand {
+        font-weight: 700;
+        font-size: 17px;
+        text-decoration: none;
+        color: var(--text);
+      }
+      .brand::before {
+        content: "● ";
+        color: var(--accent-strong);
+      }
+      nav a.link {
+        color: var(--text-dim);
+        text-decoration: none;
+        margin-left: 22px;
+        font-size: 14px;
+      }
+      nav a.link:hover {
+        color: var(--text);
+      }
+
+      /* Hero：三句话定位 */
+      .hero {
+        padding: 96px 24px 72px;
+        text-align: left;
+      }
+      .hero .tagline {
+        font-size: clamp(18px, 2.6vw, 24px);
+        margin-top: 18px;
+        max-width: 640px;
+      }
+      .hero .cta-row {
+        margin-top: 36px;
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        display: inline-block;
+        padding: 12px 26px;
+        border-radius: var(--radius);
+        font-size: 16px;
+        font-weight: 600;
+        text-decoration: none;
+        border: 1px solid transparent;
+        cursor: pointer;
+      }
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+      }
+      .btn-primary:hover {
+        background: var(--accent-strong);
+      }
+      .btn-ghost {
+        border-color: var(--border);
+        color: var(--text);
+      }
+      .btn-ghost:hover {
+        border-color: var(--accent-strong);
+        color: var(--accent-strong);
+      }
+
+      /* 特性四宫格 */
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 18px;
+        margin-top: 36px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 22px;
+      }
+      .card b {
+        display: block;
+        font-size: 16px;
+        margin-bottom: 8px;
+      }
+      .card p {
+        font-size: 14px;
+        color: var(--text-dim);
+      }
+
+      /* 下载区 */
+      .dl {
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+      }
+      .dl-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 0;
+        border-bottom: 1px dashed var(--border);
+        flex-wrap: wrap;
+      }
+      .dl-item:last-child {
+        border-bottom: none;
+      }
+      .dl-name b {
+        font-size: 16px;
+      }
+      .dl-name span {
+        display: block;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+      .dl-note {
+        margin-top: 16px;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+      #dl-status {
+        font-size: 13px;
+        color: var(--text-dim);
+        margin-top: 8px;
+        min-height: 1.2em;
+      }
+
+      /* 隐私政策 */
+      .privacy h3 {
+        font-size: 16px;
+        margin: 20px 0 6px;
+      }
+      .privacy p,
+      .privacy li {
+        font-size: 14px;
+        color: var(--text-dim);
+      }
+      .privacy ul {
+        padding-left: 20px;
+      }
+
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 28px 24px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+      footer a {
+        color: var(--text-dim);
+      }
+      @media (max-width: 560px) {
+        section {
+          padding: 52px 18px;
+        }
+        .hero {
+          padding: 64px 18px 48px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="nav">
+        <a class="brand" href="#top">rd 远程控制</a>
+        <nav>
+          <a class="link" href="#features">特点</a>
+          <a class="link" href="#download">下载</a>
+          <a class="link" href="#privacy">隐私</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- 三句话定位 -->
+      <section class="hero wrap">
+        <h1>只看出问题的那个窗口。</h1>
+        <p class="tagline">
+          帮家人修电脑，不用看整个屏幕——<span class="accent">窗口级共享</span>，其他窗口他们看不见；
+          对方<span class="accent">免安装</span>，双击一个 exe、念 6 位码就能连；<span class="accent">不限速</span>，画质自动适配网络。
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#download">下载使用</a>
+          <a class="btn btn-ghost" href="#privacy">它收集什么数据？</a>
+        </div>
+      </section>
+
+      <!-- 特点 -->
+      <section id="features" class="wrap">
+        <h2>为什么是 rd</h2>
+        <div class="grid">
+          <div class="card">
+            <b>窗口级共享</b>
+            <p>只共享一个窗口，桌面、聊天记录、其他软件统统不在画面里。帮人修电脑，也守住边界。</p>
+          </div>
+          <div class="card">
+            <b>对方免安装</b>
+            <p>被控端是便携 exe，双击就跑；6 位配对码 + 指纹校验，连错了连不上。</p>
+          </div>
+          <div class="card">
+            <b>不限速</b>
+            <p>免费版不限画质速率（限设备数）；文字逐像素清晰，专用无损通道补细节。</p>
+          </div>
+          <div class="card">
+            <b>被控端全程知情</b>
+            <p>连接要确认、托盘常显绿色状态、操作留审计日志；可随时一键暂停共享。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 下载 -->
+      <section id="download" class="dl">
+        <div class="wrap">
+          <h2>下载</h2>
+          <div class="dl-item">
+            <div class="dl-name">
+              <b>rd-controller（控制端）Windows</b>
+              <span>安装版：装在你操作的这台电脑上</span>
+            </div>
+            <a
+              class="btn btn-primary"
+              data-release-asset="x64-setup.exe"
+              href="https://github.com/OWNER/rd/releases/latest"
+              >下载 Windows 安装包</a
+            >
+          </div>
+          <div class="dl-item">
+            <div class="dl-name">
+              <b>rd-controller（控制端）macOS</b>
+              <span>未签名 dmg：首次打开请右键 → 打开</span>
+            </div>
+            <a
+              class="btn btn-ghost"
+              data-release-asset=".dmg"
+              href="https://github.com/OWNER/rd/releases/latest"
+              >下载 macOS dmg</a
+            >
+          </div>
+          <div class="dl-item">
+            <div class="dl-name">
+              <b>rd-agent（被控端）Windows</b>
+              <span>便携 zip：解压后双击 rd-agent.exe 放到需要被帮的电脑上</span>
+            </div>
+            <a
+              class="btn btn-ghost"
+              data-release-asset="win64.zip"
+              href="https://github.com/OWNER/rd/releases/latest"
+              >下载 Windows 便携包</a
+            >
+          </div>
+          <div id="dl-status"></div>
+          <p class="dl-note">
+            校验：每个 Release 附 <code>checksums.sha256</code>，下载后可比对 SHA256。
+            免费版可用全部核心功能（限 2 台信任设备、1 路并发连接）。
+          </p>
+        </div>
+      </section>
+
+      <!-- 隐私政策 -->
+      <section id="privacy" class="privacy wrap">
+        <h2>数据与隐私（大白话版）</h2>
+        <p>
+          rd 没有账号系统、没有遥测、没有后台服务器收你的数据。三类本地数据的去向一次说清：
+        </p>
+        <h3>1. 操作审计（audit.jsonl）</h3>
+        <p>
+          被控端把「谁在什么时候连入、开了哪个窗口、用了终端/剪贴板」这类<b>事件元数据</b>
+          记在被控电脑本地，只记事件、不记内容。这是为了被控端全程知情，防「被偷控」。
+        </p>
+        <h3>2. 崩溃记录（logs/crash/）</h3>
+        <p>
+          程序崩溃时在本地留一条记录：版本、时间、线程、出错位置。<b>不含内存内容、不含屏幕或输入</b>。
+          只有你在设置页点了「上报」，浏览器才会打开预填的反馈页——内容先给你看过，提不提交由你决定。
+        </p>
+        <h3>3. 信任与授权数据</h3>
+        <p>
+          配对过的设备指纹、授权码存在本机配置目录，换电脑不跟随（没有云端同步，也就没有云端泄露面）。
+          卸载时可选择一并清除。
+        </p>
+        <h3>4. 连接通道</h3>
+        <p>
+          直连优先（P2P 打洞）；跨网时经中继转发，中继只见加密流量。传输走 QUIC/TLS 双向证书校验。
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <p>rd 远程控制 · 窗口级远控，帮家人修电脑起步</p>
+      <p>
+        下载与版本：
+        <a href="https://github.com/OWNER/rd/releases">GitHub Releases</a>
+      </p>
+    </footer>
+
+    <script>
+      // Release 下载链接动态解析：仓库公开后按 GitHub API 找最新 Release 资产；
+      // 占位仓库（OWNER 未替换）或接口失败时保持静态 releases/latest 链接兜底。
+      (function () {
+        var status = document.getElementById("dl-status");
+        var base = "https://github.com/OWNER/rd";
+        if (base.indexOf("OWNER") >= 0) {
+          status.textContent = "（下载地址待仓库就绪后自动指向最新 Release）";
+          return;
+        }
+        fetch(base + "/releases/latest", {
+          headers: { Accept: "application/vnd.github+json" },
+        })
+          .then(function (r) {
+            return r.ok ? r.json() : Promise.reject(r.status);
+          })
+          .then(function (rel) {
+            var assets = rel.assets || [];
+            document.querySelectorAll("[data-release-asset]").forEach(function (a) {
+              var suffix = a.getAttribute("data-release-asset");
+              var hit = assets.find(function (x) {
+                return x.name.endsWith(suffix);
+              });
+              if (hit) a.href = hit.browser_download_url;
+            });
+            if (rel.tag_name) {
+              status.textContent = "最新版本：" + rel.tag_name + "（发布于 " +
+                new Date(rel.published_at).toLocaleDateString("zh-CN") + "）";
+            }
+          })
+          .catch(function () {
+            status.textContent = "未能获取最新版本信息，请前往 Releases 页下载。";
+          });
+      })();
+    </script>
+  </body>
+</html>

@@ -4,20 +4,52 @@
     {
       "name": "switchboard-daemon",
       "runtimeExecutable": "cargo",
-      "runtimeArgs": ["run", "--manifest-path", "switchboard/sdk/rust/Cargo.toml", "-p", "switchboard-daemon", "--", "--port", "7500", "--bench-dir", "switchboard/registry/bench"],
+      "runtimeArgs": [
+        "run",
+        "--manifest-path",
+        "switchboard/sdk/rust/Cargo.toml",
+        "-p",
+        "switchboard-daemon",
+        "--",
+        "--port",
+        "7500",
+        "--bench-dir",
+        "switchboard/registry/bench"
+      ],
       "port": 7500
     },
     {
       "name": "switchboard-studio",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["-C", "switchboard/studio", "dev"],
+      "runtimeArgs": [
+        "-C",
+        "switchboard/studio",
+        "dev"
+      ],
       "port": 5173
     },
     {
       "name": "rd-controller",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["-C", "apps/rd-controller", "dev"],
+      "runtimeArgs": [
+        "-C",
+        "apps/rd-controller",
+        "dev"
+      ],
       "port": 1420
+    },
+    {
+      "name": "website",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-I",
+        "-m",
+        "http.server",
+        "8090",
+        "--directory",
+        "website"
+      ],
+      "port": 8090
     }
   ]
 }

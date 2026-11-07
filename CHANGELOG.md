@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## T-042 官网下载页 + T-041 发码台账与 SOP（2026-11-07）
+
+### T-042 官网（website/）
+- 单页静态站（纯 `index.html` 无构建）：三句话定位 hero、四特性卡、下载区（Windows 安装包/macOS dmg/agent 便携包）、大白话隐私政策（审计/崩溃/信任授权/连接通道四类数据去向——覆盖 T-040 崩溃上报条款）
+- 下载链接动态解析：JS 拉 GitHub API 最新 Release 资产按后缀匹配；OWNER 占位未替换或接口失败时兜底 releases/latest 页（占位守卫已实测）
+- `.github/workflows/deploy-pages.yml`：GitHub Pages 自动发布（仓库远端就绪后 Settings → Pages → GitHub Actions 即可）
+- 预览实证：页面结构完整渲染、占位提示正确、零控制台错误
+
+### T-041 发码（脚本部分；收款开户为外部阻塞）
+- `scripts/license-ledger.ps1`：半自动发码一单到位——读正式种子（env 或 `.rd-secrets\license-seed.txt`，**拒绝开发种子发正式码**）→ issue_license 签发（签发即自验）→ 台账 CSV 追加（默认 `%USERPROFILE%\.rd-secrets\licenses.csv`，仓库外）→ 授权码进剪贴板 → 打印回邮草稿
+- `10_product/发码SOP.md`：日常三步流程、买家排查、**撤销/泄露预案**（诚实版：无单码撤销，分级应对；大面积泄露=轮换种子发新版+凭台账重发）、上线前检查清单
+- `.gitignore` 补 `licenses.csv`（任何位置不入库）
+- **端到端验收**：正式种子实发一单（Pro/99 台/365 天）——签发自验通过、台账落行、草稿生成
+
+### 踩坑记录
+- PS 5.1 读无 BOM UTF-8 脚本按 GBK 解析中文注释直接报语法错——`.ps1` 必须 UTF-8 with BOM
+- PS 5.1 下 `2>&1` + `$ErrorActionPreference=Stop` 会把原生命令的 stderr 输出（issue_license 的 ✓ 自验行走 stderr）误判为终止错误——调用处临时放宽，靠输出匹配判定成败
+
+
 ## T-040 崩溃上报（2026-11-07）
 
 信任底线补强：panic 不静默丢——本地留痕 + 用户预览确认后才上报：

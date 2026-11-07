@@ -28,3 +28,6 @@ switchboard/studio/dist/
 switchboard/.claude/
 .quickbash/
 switchboard/studio/.claude/
+
+# T-041 发码台账（敏感业务数据，任何位置都不入库）
+licenses.csv
