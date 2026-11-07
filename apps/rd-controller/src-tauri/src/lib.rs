@@ -153,6 +153,8 @@ pub fn run() {
             commands::devices::get_media_fec,
             commands::devices::get_relay_addr,
             commands::devices::set_relay_addr,
+            commands::devices::get_easytier,
+            commands::devices::set_easytier,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
             commands::devices::set_host_paused,

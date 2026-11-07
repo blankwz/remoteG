@@ -1,8 +1,9 @@
 # PROJECT_STATE
 
-- 更新：2026-11-07（**V0.3 批次 1 代码全部完成**：T-036 密钥轮换 ✅、T-038 自动更新 ✅、T-040 崩溃上报 ✅、T-042 官网 ✅（OWNER 占位待远端）、T-041 发码脚本 ✅（收款开户待外部）；批次 2（T-039/T-041 收款/T-043）等外部资源）
+- 更新：2026-11-07（**T-043 EasyTier 组网接入完成**：switchboard 编排器模块 sb.easytier.mesh（process 绑定）+ rd 双端托管与转发候选接线，双 workspace 测试/clippy/前端全绿；V0.3 批次 1（T-036/T-038/T-040/T-042/T-041）此前已全部完成；批次 2（T-039/T-041 收款）等外部资源）
 
 ## 当前状态
+- **T-043（2026-11-07）**：**EasyTier 组网接入**——第四种跨网路径（mesh 内置打洞/中继/多协议回退）。批次1 编排器：新 crate `switchboard/sdk/rust/switchboard-mod-easytier`（sb.easytier.mesh，process 绑定不引 easytier 依赖：TOML 配置生成 + easytier-core 进程托管含 Windows Job Object 孤儿防护 + cli route 发现 camel/snake 双兼容）+ SourceKind::Mesh + registry/spec07/原理卡/USAGE 注册；批次2 agent：agent.toml `[easytier]` 节（no_tun 默认 true 免管理员）+ 托管降级 + 虚拟 IP 进直连候选（relay 竞速零改动）；批次3 controller：融合版自动继承托管 + 转发候选接线（DeviceConn::connect extra_addrs，默认路径不变）+ 设置页 EasyTier 节。验证：rd workspace 297+52+67 测试、switchboard 60 测试、前端 198 测试、双 workspace clippy 零 error；e2e t04/t05/t09 失败为前台注入类测试环境性失败（memory 警告），待空闲复跑。待外部：easytier 二进制真机双机实测（09_test/手测清单.md 1.16）。详见 RUN_LOG 2026-11-07 行。
 - **T-042/T-041（2026-11-07）**：**官网下载页**（website/ 单页静态站+隐私政策+Pages 工作流，OWNER 占位待仓库远端）与**发码台账**（license-ledger.ps1 半自动发码+发码SOP.md 含撤销泄露预案；正式种子实发一单验收通过）。批次 1 至此代码全部落地，详见 RUN_LOG 2026-11-07 行。
 
 ## 当前状态

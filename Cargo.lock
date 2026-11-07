@@ -4410,6 +4410,7 @@ dependencies = [
  "serde",
  "serde_json",
  "switchboard-core",
+ "switchboard-mod-easytier",
  "switchboard-mod-fec-rs",
  "tempfile",
  "tokio",
@@ -5531,6 +5532,21 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "switchboard-mod-easytier"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "switchboard-core",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+ "windows",
 ]
 
 [[package]]

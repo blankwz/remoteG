@@ -252,11 +252,7 @@ fn spawn_driver(
                 side.stats.bytes_sent.fetch_add(frame.len() as u64, Ordering::Relaxed);
             }
             // 3) kcp 收 → 分帧分发
-            loop {
-                let size = match kcp.peeksize() {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
+            while let Ok(size) = kcp.peeksize() {
                 if size > buf.len() {
                     buf.resize(size, 0);
                 }

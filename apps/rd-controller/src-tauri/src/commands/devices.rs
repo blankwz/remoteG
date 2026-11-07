@@ -542,6 +542,7 @@ pub async fn pair_device(
         None,
         crate::commands::devices::media_fec_setting(state.data_dir()),
         None,
+        Vec::new(),
     )
     .await
     .map_err(|e| describe_connect_error(&e))?;
@@ -585,10 +586,13 @@ pub async fn connect_device(
             .ok_or_else(|| "设备不存在".to_string())?
     };
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
+    // EasyTier 转发入口（T-043，no_tun 组网）：本机节点配置了转发规则时，
+    // 直连失败快试 127.0.0.1:转发端口 → mesh → 对端 rd
+    let extra_addrs = easytier_forward_addrs();
     // 握手超时（D-013 包2）：纯直连 3s 快速失败让退避节奏生效；配置了
-    // 原生中继时放宽到 30s——直连失败后还要走中继 DIAL 握手（≤15s）
+    // 原生中继或 EasyTier 转发时放宽到 30s——直连失败后还要走这些兜底
     let has_relay = entry.relay.as_deref().is_some_and(|s| !s.trim().is_empty());
-    let secs = if has_relay { 30 } else { 3 };
+    let secs = if has_relay || !extra_addrs.is_empty() { 30 } else { 3 };
     let conn = tokio::time::timeout(
         Duration::from_secs(secs),
         DeviceConn::connect(
@@ -598,6 +602,7 @@ pub async fn connect_device(
             Some(fp),
             crate::commands::devices::media_fec_setting(state.data_dir()),
             entry.relay.clone(),
+            extra_addrs,
         ),
     )
     .await
@@ -793,6 +798,7 @@ pub async fn probe_device(id: String, state: State<'_, ConnManager>) -> Result<b
             Some(fp),
             crate::commands::devices::media_fec_setting(state.data_dir()),
             None,
+            easytier_forward_addrs(),
         ),
     )
     .await
@@ -1156,6 +1162,163 @@ pub fn set_relay_addr(relay: String) -> Result<(), String> {
         } else {
             table.insert("relay_addr".into(), toml::Value::String(trimmed));
         }
+    }
+    let body = toml::to_string_pretty(&value).map_err(|e| format!("序列化配置失败：{e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, body).map_err(|e| format!("写入配置失败：{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置失败：{e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// EasyTier 组网（T-043）：设置页「EasyTier」——写入 agent.toml 的 [easytier]
+// 节（融合版 rd-agent 托管本机节点，重启 rd 后生效）。与 relay_addr 同模式。
+// ---------------------------------------------------------------------------
+
+/// EasyTier 设置 DTO（前端往返；secret 原文回传，本机文件本就含它）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EasyTierSettingsDto {
+    pub enabled: bool,
+    pub binary_path: String,
+    pub cli_path: String,
+    pub network_name: String,
+    pub network_secret: String,
+    pub peer_urls: Vec<String>,
+    pub virtual_ip: String,
+    pub no_tun: bool,
+    pub forwards: Vec<String>,
+}
+
+impl Default for EasyTierSettingsDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary_path: String::new(),
+            cli_path: String::new(),
+            network_name: String::new(),
+            network_secret: String::new(),
+            peer_urls: Vec::new(),
+            virtual_ip: String::new(),
+            no_tun: true,
+            forwards: Vec::new(),
+        }
+    }
+}
+
+/// 读 agent.toml 的 [easytier] 节（缺文件/缺节 = 默认关闭）。
+pub fn load_easytier_settings() -> EasyTierSettingsDto {
+    let Some(cfg) = read_agent_config() else {
+        return EasyTierSettingsDto::default();
+    };
+    EasyTierSettingsDto {
+        enabled: cfg.easytier.enabled,
+        binary_path: cfg.easytier.binary_path.clone(),
+        cli_path: cfg.easytier.cli_path.clone(),
+        network_name: cfg.easytier.network_name.clone(),
+        network_secret: cfg.easytier.network_secret.clone(),
+        peer_urls: cfg.easytier.peer_urls.clone(),
+        virtual_ip: cfg.easytier.virtual_ip.clone(),
+        no_tun: cfg.easytier.no_tun,
+        forwards: cfg.easytier.forwards.clone(),
+    }
+}
+
+/// 读当前 EasyTier 设置。
+#[tauri::command]
+pub fn get_easytier() -> Result<EasyTierSettingsDto, String> {
+    Ok(load_easytier_settings())
+}
+
+/// 写 EasyTier 设置（整体替换 [easytier] 节）；转发规则格式即时校验。
+/// 重启 rd 后生效（rd-agent 托管节点在 start 时读取）。
+#[tauri::command]
+pub fn set_easytier(settings: EasyTierSettingsDto) -> Result<(), String> {
+    if settings.enabled {
+        if settings.network_name.trim().is_empty() {
+            return Err("启用 EasyTier 必须填网络名".into());
+        }
+        if settings.binary_path.trim().is_empty() {
+            return Err("启用 EasyTier 必须填 easytier-core 路径".into());
+        }
+        for f in &settings.forwards {
+            if rd_agent::easytier::parse_forward_rule(f).is_none() {
+                return Err(format!(
+                    "转发规则格式错误：{f}（应为 \"对端虚拟IP:端口@本地端口\"，如 10.126.126.3:21118@21130）"
+                ));
+            }
+        }
+    }
+    write_agent_config(|table| {
+        if settings.enabled {
+            let mut sec = toml::value::Table::new();
+            sec.insert("enabled".into(), toml::Value::Boolean(true));
+            sec.insert("binary_path".into(), toml::Value::String(settings.binary_path.clone()));
+            sec.insert("cli_path".into(), toml::Value::String(settings.cli_path.clone()));
+            sec.insert("network_name".into(), toml::Value::String(settings.network_name.clone()));
+            sec.insert("network_secret".into(), toml::Value::String(settings.network_secret.clone()));
+            sec.insert(
+                "peer_urls".into(),
+                toml::Value::Array(
+                    settings
+                        .peer_urls
+                        .iter()
+                        .map(|s| toml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            sec.insert("virtual_ip".into(), toml::Value::String(settings.virtual_ip.clone()));
+            sec.insert("no_tun".into(), toml::Value::Boolean(settings.no_tun));
+            sec.insert(
+                "forwards".into(),
+                toml::Value::Array(
+                    settings
+                        .forwards
+                        .iter()
+                        .map(|s| toml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            table.insert("easytier".into(), toml::Value::Table(sec));
+        } else {
+            table.remove("easytier");
+        }
+    })
+}
+
+/// EasyTier 转发入口地址（连接候选用）：[easytier] enabled 且有 forwards
+/// 时返回 127.0.0.1:port 列表；未启用/读失败返回空（零影响）。
+pub fn easytier_forward_addrs() -> Vec<std::net::SocketAddr> {
+    let Some(cfg) = read_agent_config() else {
+        return Vec::new();
+    };
+    if !cfg.easytier.enabled {
+        return Vec::new();
+    }
+    rd_agent::easytier::forward_bind_addrs(&cfg.easytier)
+}
+
+/// 读 agent.toml（缺文件 = None；解析失败 = None，降级）。
+fn read_agent_config() -> Option<rd_agent::Config> {
+    let path = agent_config_file();
+    let raw = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+/// 原子改写 agent.toml（读现有内容 → `edit` 闭包改根表 → tmp+rename 提交）。
+fn write_agent_config(edit: impl FnOnce(&mut toml::value::Table)) -> Result<(), String> {
+    let path = agent_config_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
+    }
+    let mut value: toml::Value = if path.exists() {
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| format!("读取 agent.toml 失败：{e}"))?;
+        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    } else {
+        toml::Value::Table(Default::default())
+    };
+    if let Some(table) = value.as_table_mut() {
+        edit(table);
     }
     let body = toml::to_string_pretty(&value).map_err(|e| format!("序列化配置失败：{e}"))?;
     let tmp = path.with_extension("toml.tmp");

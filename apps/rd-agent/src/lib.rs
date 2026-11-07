@@ -11,6 +11,7 @@ pub mod audit;
 pub mod clipboard;
 pub mod config;
 pub mod discover;
+pub mod easytier;
 pub mod file_handler;
 pub mod host_activity;
 pub mod input_handler;
@@ -124,6 +125,20 @@ pub fn start(
         listen_addrs: Mutex::new(Vec::new()),
     });
 
+    // EasyTier 组网托管（可选）：[easytier] enabled=true 才真正启动；未启用/
+    // 失败仅降级——直连与中继路径完全不受影响。控制端可经 mesh 直拨本机
+    // 虚拟 IP（TUN 模式），故宿主必须在 relay 块之外无条件托管。
+    let easytier_host =
+        match easytier::start(&state.config.easytier, &config_dir.join("easytier")) {
+            Ok(host) => host,
+            Err(e) => {
+                tracing::warn!(err = %e, "EasyTier 托管启动失败（降级：仅直连/中继路径）");
+                easytier::EasyTierHost {
+                    virtual_ip: Arc::new(Mutex::new(None)),
+                }
+            }
+        };
+
     #[cfg(debug_assertions)]
     if let Some(code) = &test_pair_code {
         force_test_pair_code(&state, code)?;
@@ -171,12 +186,18 @@ pub fn start(
             // socket（与 QUIC accept 同端口）向控制端发探测包，帮它开洞直连。
             let punch_on = rd_transport::relay::punch_enabled();
             let punch_socks = punch_on.then(|| direct_socks.clone());
-            // 直连候选（T-035）：本机网卡地址 + UPnP 外部映射，随 REG 上报
+            // 直连候选（T-035）：本机网卡地址 + EasyTier 虚拟 IP + UPnP 外部
+            // 映射，随 REG 上报；EasyTier 未就绪最多等 20s（mesh 收敛慢于
+            // relay 注册，但 relay 本就是兜底路径，不抢直连时效）
             let listen_port = bound.first().map(|a| a.port()).unwrap_or(21118);
             let state = Arc::clone(&state);
             tokio::spawn(async move {
                 let candidates = if punch_on {
-                    punch_candidates::collect(listen_port).await
+                    let et_ip = easytier_host.wait_ready(Duration::from_secs(20)).await;
+                    if let Some(ip) = et_ip {
+                        tracing::info!(%ip, "EasyTier 虚拟 IP 纳入直连候选");
+                    }
+                    punch_candidates::collect(listen_port, et_ip).await
                 } else {
                     Vec::new()
                 };

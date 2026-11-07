@@ -397,6 +397,38 @@
       },
       "principles_card": null,
       "license": "MPL-2.0"
+    },
+    {
+      "id": "sb.easytier.mesh",
+      "version": "0.1.0",
+      "stage": "discovery",
+      "stages": [
+        "discovery",
+        "punch",
+        "relay"
+      ],
+      "binding": "process",
+      "provides": {
+        "scope": "tailnet",
+        "zero_conf": false,
+        "candidate_source": [
+          "port-forward (no_tun)",
+          "virtual-ip (tun)"
+        ],
+        "transport_note": "传输复用 sb.quinn.quic-rd（指纹钉扎不变）；punch/relay 由 mesh 内部承担"
+      },
+      "telemetry": "switchboard/telemetry-v1",
+      "compliance": "L-A",
+      "bench_note": "暂无 bench 剖面；双节点 route 互见 e2e 见 tests/e2e_two_nodes.rs（#[ignore]，需 easytier 二进制）",
+      "origin": {
+        "adapted_from": "EasyTier 2.7（外部进程 easytier-core/easytier-cli，process 绑定）",
+        "upstream_ref": [
+          "https://github.com/EasyTier/EasyTier",
+          "本地源码 G:\\AICODE\\0NiceProject\\EasyTier-main（easytier/src/easytier-cli.rs route --json；easytier-core config/toml.rs 配置格式）"
+        ]
+      },
+      "principles_card": "docs/cards/easytier-mesh.md",
+      "license": "MIT"
     }
   ]
 }

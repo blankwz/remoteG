@@ -486,14 +486,11 @@ async fn run_pass(cfg: &BenchCfg, pass: PassParams, run: usize) -> serde_json::V
     let mut w1_lats: Vec<f32> = Vec::new();
     for r in &w1_recs {
         chars_total += glyph_count as f32;
-        match (r.ok, &r.payload) {
-            (true, Some(d)) => {
-                chars_ok += recognize_text_frame(d, glyph_count);
-                if r.lat_ms < f32::MAX {
-                    w1_lats.push(r.lat_ms);
-                }
+        if let (true, Some(d)) = (r.ok, &r.payload) {
+            chars_ok += recognize_text_frame(d, glyph_count);
+            if r.lat_ms < f32::MAX {
+                w1_lats.push(r.lat_ms);
             }
-            _ => {}
         }
     }
     w1_lats.sort_by(|a, b| a.partial_cmp(b).unwrap());

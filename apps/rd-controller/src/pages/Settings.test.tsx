@@ -22,6 +22,18 @@ function mockReply(cmd: string): unknown {
       return false;
     case "get_relay_addr":
       return null;
+    case "get_easytier":
+      return {
+        enabled: false,
+        binaryPath: "",
+        cliPath: "",
+        networkName: "",
+        networkSecret: "",
+        peerUrls: [],
+        virtualIp: "",
+        noTun: true,
+        forwards: [],
+      };
     default:
       return true;
   }
@@ -64,7 +76,7 @@ describe("中继地址保存（P1-2）", () => {
     render(<Settings />);
     const input = await screen.findByLabelText("原生中继地址");
     fireEvent.change(input, { target: { value: "随便填的地址" } });
-    fireEvent.click(screen.getByText("保存"));
+    fireEvent.click(screen.getAllByText("保存")[0]);
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("格式不对");
     expect(
@@ -76,7 +88,7 @@ describe("中继地址保存（P1-2）", () => {
     render(<Settings />);
     const input = await screen.findByLabelText("原生中继地址");
     fireEvent.change(input, { target: { value: "https://xxx.workers.dev" } });
-    fireEvent.click(screen.getByText("保存"));
+    fireEvent.click(screen.getAllByText("保存")[0]);
     await vi.waitFor(() => {
       expect(
         callMock.mock.calls.some(
@@ -143,5 +155,74 @@ describe("全局 UI 缩放（P1-4）", () => {
     render(<Settings />);
     const select = screen.getByLabelText("界面缩放") as HTMLSelectElement;
     expect(select.value).toBe("1.25");
+  });
+});
+
+describe("EasyTier 组网设置（T-043）", () => {
+  it("启用但未填网络名：错误提示且不写入后端", async () => {
+    render(<Settings />);
+    const sw = await screen.findByRole("switch", { name: "启用 EasyTier 组网" });
+    fireEvent.click(sw);
+    fireEvent.click(screen.getByRole("button", { name: "保存 EasyTier 设置" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("网络名");
+    expect(
+      callMock.mock.calls.some(([cmd]) => cmd === "set_easytier"),
+    ).toBe(false);
+  });
+
+  it("完整配置：snake_case 载荷写入后端，成功文案写明重启生效", async () => {
+    render(<Settings />);
+    const sw = await screen.findByRole("switch", { name: "启用 EasyTier 组网" });
+    fireEvent.click(sw);
+    fireEvent.change(await screen.findByLabelText("EasyTier 网络名"), {
+      target: { value: "rd-mesh" },
+    });
+    fireEvent.change(await screen.findByLabelText("easytier-core 路径"), {
+      target: { value: "C:\tools\et\easytier-core.exe" },
+    });
+    fireEvent.change(await screen.findByLabelText("EasyTier 转发规则"), {
+      target: { value: "10.126.126.3:21118@21130" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 EasyTier 设置" }));
+    await vi.waitFor(() => {
+      expect(
+        callMock.mock.calls.some(([cmd, args]) => {
+          if (cmd !== "set_easytier") {
+            return false;
+          }
+          const s = args?.settings;
+          return (
+            s?.enabled === true &&
+            s?.network_name === "rd-mesh" &&
+            s?.no_tun === true &&
+            Array.isArray(s?.forwards) &&
+            s.forwards[0] === "10.126.126.3:21118@21130"
+          );
+        }),
+      ).toBe(true);
+    });
+    expect(await screen.findByText(/重启 rd 后生效/)).toBeTruthy();
+  });
+
+  it("转发规则格式错误：错误提示且不写入后端", async () => {
+    render(<Settings />);
+    const sw = await screen.findByRole("switch", { name: "启用 EasyTier 组网" });
+    fireEvent.click(sw);
+    fireEvent.change(await screen.findByLabelText("EasyTier 网络名"), {
+      target: { value: "rd-mesh" },
+    });
+    fireEvent.change(await screen.findByLabelText("easytier-core 路径"), {
+      target: { value: "C:\tools\et\easytier-core.exe" },
+    });
+    fireEvent.change(await screen.findByLabelText("EasyTier 转发规则"), {
+      target: { value: "坏的规则" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存 EasyTier 设置" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("转发规则格式错误");
+    expect(
+      callMock.mock.calls.some(([cmd]) => cmd === "set_easytier"),
+    ).toBe(false);
   });
 });

@@ -1,0 +1,25 @@
+[package]
+name = "switchboard-mod-easytier"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "sb.easytier.mesh（process）：EasyTier 组网适配器——easytier-core 进程托管 + mesh 路由发现（spec 01 S1）"
+
+[dependencies]
+switchboard-core = { path = "../switchboard-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Job Object 孤儿防护：父进程崩溃/托盘 process::exit(0) 时由内核收割子进程
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

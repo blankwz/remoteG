@@ -176,3 +176,18 @@ pnpm -C switchboard/studio build                  # tsc + vite
 - ✅ 单机回环 + 真实协议栈：全部 36+52 测试与 7 份 bench.json 覆盖（QUIC/KCP/STUN/FEC 均为真实协议互通，非 mock）；
 - ❌ 跨机真实网络（LAN 真机广播、WAN 真打洞、DERP 中继、实网 T3/T4 跑分）：需第二台机器与 VPS，代码与套件就绪；
 - ⚠️ quinn 指纹为 SHA-256（密码学合规）；`sb.stun.punch-v2` 需要 Rendezvous 通道注入（宿主接口已留）。
+
+## 9. EasyTier 组网模块（`sb.easytier.mesh`，process）
+
+EasyTier（去中心化 mesh）作为第四种跨网路径接入：mesh 内部自带打洞/中继/多协议回退，编排器只做 **easytier-core 进程托管 + route 表发现**，传输仍是 `sb.quinn.quic-rd`（证书指纹钉扎不变）。
+
+```bash
+# 模块单测 + 双节点 e2e（需 easytier 二进制，从官方 release 或本地源码 build）
+cd switchboard/sdk/rust
+cargo test -p switchboard-mod-easytier
+SB_ET_CORE=path/to/easytier-core.exe SB_ET_CLI=path/to/easytier-cli.exe \
+  cargo test -p switchboard-mod-easytier --test e2e_two_nodes -- --ignored --nocapture
+```
+
+- **两种模式**：默认 `no_tun` + UDP 端口转发（免管理员，候选=`127.0.0.1:转发端口`）；TUN 模式（管理员）直拨对端虚拟 IP（route 表发现）。
+- **rd 接入**：agent.toml `[easytier]` 节（agent 托管被控端节点）；控制端设置页「EasyTier 组网」托管本机节点。原理与源码出处见 `docs/cards/easytier-mesh.md`。

@@ -1,10 +1,12 @@
-//! 直连候选采集（T-035）：本机网卡地址 + UPnP 路由器开门。
+//! 直连候选采集（T-035）：本机网卡地址 + EasyTier 虚拟 IP + UPnP 路由器开门。
 //!
 //! 候选随 REG 上报给中继 → DIAL ACK 下发 → 控制端对每个候选直接发起 QUIC
 //! 竞速（[`rd_transport::connect_via_relay_punch`]）。候选 = 「对端可能可达
 //! 的直连入口」，与反射打洞互补：
 //! - **本机网卡地址**（v4 局域网 / v6 全局）：同网段秒连；双端都有公网 IPv6
 //!   时免打洞直连（国内宽带已普遍分配 v6）；
+//! - **EasyTier 虚拟 IP**（TUN 模式）：控制端同在 mesh 内时可直拨（mesh
+//!   内部自管打洞/中继）；no_tun 模式本机不可直拨，由控制端侧转发，不产出；
 //! - **UPnP 外部映射**：路由器开门后，控制端直连「路由器公网 IP:21118」，
 //!   对被控端 NAT 是最硬的可达入口（家庭路由器支持率不低）。
 //!
@@ -23,13 +25,20 @@ const UPNP_LEASE_SECS: u32 = 1800;
 /// 续租间隔（租期的 1/3，连续两次续租失败映射才可能过期）。
 const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(600);
 
-/// 采集直连候选（顺序即优先级：v4 局域网 → v6 全局 → UPnP 外部映射），
-/// 上限 [`MAX_CANDIDATES`]（超出截断）。`listen_port` 为 QUIC 监听端口。
-pub async fn collect(listen_port: u16) -> Vec<SocketAddr> {
+/// 采集直连候选（顺序即优先级：v4 局域网 → v6 全局 → EasyTier 虚拟 IP →
+/// UPnP 外部映射），上限 [`MAX_CANDIDATES`]（超出截断）。
+/// `listen_port` 为 QUIC 监听端口；`easytier_ip` 为本机 mesh 虚拟 IP
+/// （TUN 模式；no_tun/未启用传 None）。
+pub async fn collect(listen_port: u16, easytier_ip: Option<IpAddr>) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = crate::netinfo::local_ip_addrs()
         .into_iter()
         .map(|ip| SocketAddr::new(ip, listen_port))
         .collect();
+
+    if let Some(ip) = easytier_ip {
+        tracing::info!(%ip, "EasyTier 虚拟 IP 纳入直连候选");
+        out.push(SocketAddr::new(ip, listen_port));
+    }
 
     if std::env::var("RD_PUNCH_UPNP").as_deref() != Ok("0") {
         if let Some(ext) = upnp_external_addr(listen_port).await {

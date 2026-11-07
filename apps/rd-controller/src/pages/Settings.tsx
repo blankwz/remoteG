@@ -33,7 +33,7 @@ import {
   type UiScale,
 } from "../ui/uiScale";
 import { Switch } from "../ui/Switch";
-import { getRelayAddr, setRelayAddr } from "../api/devices";
+import { getRelayAddr, setRelayAddr, getEasytier, setEasytier, type EasyTierSettings } from "../api/devices";
 import { useUpdater } from "../ui/useUpdater";
 import {
   crashClear,
@@ -45,6 +45,26 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import styles from "./Settings.module.css";
 
 /** 把 Error/unknown 统一成消息文本。 */
+/** 后端返回归一化（桥接层历史 mock/异常值兜底：字段缺失时取默认，不崩渲染）。 */
+function normalizeEasytier(v: unknown): EasyTierSettings {
+  const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  const str = (k: string): string => (typeof o[k] === "string" ? (o[k] as string) : "");
+  const bool = (k: string): boolean => o[k] === true;
+  const strs = (k: string): string[] =>
+    Array.isArray(o[k]) ? (o[k] as unknown[]).filter((x): x is string => typeof x === "string") : [];
+  return {
+    enabled: bool("enabled"),
+    binaryPath: str("binaryPath"),
+    cliPath: str("cliPath"),
+    networkName: str("networkName"),
+    networkSecret: str("networkSecret"),
+    peerUrls: strs("peerUrls"),
+    virtualIp: str("virtualIp"),
+    noTun: o["noTun"] === undefined ? true : bool("noTun"),
+    forwards: strs("forwards"),
+  };
+}
+
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -106,6 +126,11 @@ export function Settings() {
   /** 中继挂载期读取失败（R16：从 relayMsg 独立出来，不再混进保存类反馈）。 */
   const [relayReadFailed, setRelayReadFailed] = useState(false);
   const [fecError, setFecError] = useState<string | null>(null);
+  /** EasyTier 组网（T-043）：设置 → EasyTier 组网；null = 挂载期读取中/失败。 */
+  const [et, setEt] = useState<EasyTierSettings | null>(null);
+  const [etMsg, setEtMsg] = useState<string | null>(null);
+  const [etDirty, setEtDirty] = useState(false);
+  const [etError, setEtError] = useState<string | null>(null);
   /** 全局 UI 缩放（P1-4；切换即时生效并持久化）。 */
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
   /** 中继地址保存前的格式错误（P1-2；有错不写入）。 */
@@ -158,6 +183,42 @@ export function Settings() {
       .then((v) => setCrashes(v ?? []))
       .catch(() => setCrashes(null));
   }, []);
+
+  // EasyTier 设置（挂载一次；读取失败保持 null，仅提示不阻塞其他节）
+  useEffect(() => {
+    void getEasytier()
+      .then((v) => setEt(normalizeEasytier(v)))
+      .catch(() => setEt(null));
+  }, []);
+
+  /** 保存 EasyTier：启用时网络名/二进制路径必填；转发规则逐行格式校验。 */
+  const onSaveEasytier = useCallback(async () => {
+    if (et === null) {
+      return;
+    }
+    setEtError(null);
+    if (et.enabled && et.networkName.trim() === "") {
+      setEtError("启用 EasyTier 必须填网络名");
+      return;
+    }
+    if (et.enabled && et.binaryPath.trim() === "") {
+      setEtError("启用 EasyTier 必须填 easytier-core 路径");
+      return;
+    }
+    for (const f of et.forwards) {
+      if (!/^\s*\d{1,3}(\.\d{1,3}){3}:\d+\@\d+\s*$/.test(f)) {
+        setEtError(`转发规则格式错误：${f}（应为 对端虚拟IP:端口@本地端口，如 10.126.126.3:21118@21130）`);
+        return;
+      }
+    }
+    try {
+      await setEasytier(et);
+      setEtMsg("已保存：重启 rd 后生效");
+      setEtDirty(false);
+    } catch (e) {
+      setEtMsg(`保存失败：${errText(e)}`);
+    }
+  }, [et]);
 
   const onReportCrash = useCallback(async () => {
     try {
@@ -363,6 +424,203 @@ export function Settings() {
             </button>
           </span>
         </li>
+        <li className={styles.section}>EasyTier 组网（跨网 mesh）</li>
+        {et === null ? (
+          <li className={styles.row}>
+            <span className={styles.label}>
+              <span className={styles.hint}>EasyTier 设置读取中（或被控服务未启动——保存不受影响）</span>
+            </span>
+          </li>
+        ) : (
+          <>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>启用 EasyTier 组网</b>
+                <span className={styles.hint}>
+                  两端加入同一 EasyTier 网络（去中心化 mesh，内置打洞/中继/多协议回退）后，
+                  控制端可经 mesh 直拨被控端虚拟 IP。需安装 EasyTier（不随 rd 分发）；
+                  重启 rd 后生效。免管理员模式默认开（不建虚拟网卡）。
+                  {etMsg !== null && ` · ${etMsg}`}
+                </span>
+                {etError !== null && (
+                  <span className={styles.hintError} role="alert">
+                    {etError}
+                  </span>
+                )}
+              </span>
+              <Switch
+                checked={et.enabled}
+                onChange={(v) => {
+                  setEt({ ...et, enabled: v });
+                  setEtDirty(true);
+                  setEtError(null);
+                }}
+                label="启用 EasyTier 组网"
+              />
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>网络名</b>
+                <span className={styles.hint}>同一网络名的节点互相可见（ rd 专用网络名即可）。</span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={et.networkName}
+                  placeholder="rd-mesh"
+                  spellCheck={false}
+                  aria-label="EasyTier 网络名"
+                  onChange={(e) => {
+                    setEt({ ...et, networkName: e.currentTarget.value });
+                    setEtDirty(true);
+                  }}
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>网络密钥</b>
+                <span className={styles.hint}>同网络名 + 同密钥才可入网（防陌生人蹭网）。</span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  type="password"
+                  value={et.networkSecret}
+                  placeholder="随意但两端一致"
+                  spellCheck={false}
+                  aria-label="EasyTier 网络密钥"
+                  onChange={(e) => {
+                    setEt({ ...et, networkSecret: e.currentTarget.value });
+                    setEtDirty(true);
+                  }}
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>easytier-core 路径</b>
+                <span className={styles.hint}>
+                  EasyTier 可执行文件目录中的 easytier-core(.exe)；easytier-cli
+                  同目录时虚拟 IP 自动发现，否则请填「cli 路径」。
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={et.binaryPath}
+                  placeholder="C:\\tools\\easytier\\easytier-core.exe"
+                  spellCheck={false}
+                  aria-label="easytier-core 路径"
+                  onChange={(e) => {
+                    setEt({ ...et, binaryPath: e.currentTarget.value });
+                    setEtDirty(true);
+                  }}
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>引导节点（可选）</b>
+                <span className={styles.hint}>
+                  逗号分隔的 peer 地址（如 tcp://public.easytier.top:11010 或自建节点）；
+                  留空 = 仅同网段局域网内组网。
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={et.peerUrls.join(",")}
+                  placeholder="tcp://public.easytier.top:11010"
+                  spellCheck={false}
+                  aria-label="EasyTier 引导节点"
+                  onChange={(e) => {
+                    const urls = e.currentTarget.value
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter((s) => s.length > 0);
+                    setEt({ ...et, peerUrls: urls });
+                    setEtDirty(true);
+                  }}
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>静态虚拟 IP（可选）</b>
+                <span className={styles.hint}>
+                  如 10.126.126.2/24；留空 = 自动分配。两端约定不同地址，设备地址直接填对端虚拟
+                  IP 即可经 mesh 连接（免管理员模式不适用，见转发规则）。
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={et.virtualIp}
+                  placeholder="10.126.126.2/24"
+                  spellCheck={false}
+                  aria-label="EasyTier 静态虚拟 IP"
+                  onChange={(e) => {
+                    setEt({ ...et, virtualIp: e.currentTarget.value });
+                    setEtDirty(true);
+                  }
+                  }
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>免管理员模式</b>
+                <span className={styles.hint}>
+                  不建虚拟网卡（无需管理员权限）。控制端此时不能直拨虚拟 IP，
+                  用下方「转发规则」把本机端口映射到对端 rd。
+                </span>
+              </span>
+              <Switch
+                checked={et.noTun}
+                onChange={(v) => {
+                  setEt({ ...et, noTun: v });
+                  setEtDirty(true);
+                }}
+                label="免管理员模式"
+              />
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>转发规则（免管理员模式用）</b>
+                <span className={styles.hint}>
+                  每行一条「对端虚拟IP:rd端口@本地端口」，如 10.126.126.3:21118@21130：
+                  本机 127.0.0.1:21130 经 mesh 转发到对端 rd；连接时自动作为候选。
+                  仅控制端机器需要配置。
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <textarea
+                  className={styles.relayInput}
+                  value={et.forwards.join("\n")}
+                  placeholder={"10.126.126.3:21118@21130"}
+                  rows={2}
+                  spellCheck={false}
+                  aria-label="EasyTier 转发规则"
+                  onChange={(e) => {
+                    const lines = e.currentTarget.value.split(/\r?\n/).filter((s) => s.trim().length > 0);
+                    setEt({ ...et, forwards: lines });
+                    setEtDirty(true);
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.stepBtn}
+                  disabled={!etDirty}
+                  aria-label="保存 EasyTier 设置"
+                  onClick={() => void onSaveEasytier()}
+                >
+                  保存
+                </button>
+                </span>
+            </li>
+          </>
+        )}
         <li className={styles.section}>应用更新</li>
         <li className={styles.row}>
           <span className={styles.label}>

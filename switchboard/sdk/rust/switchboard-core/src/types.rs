@@ -25,6 +25,8 @@ pub enum SourceKind {
     Stun,
     /// DNS/MagicDNS。
     Dns,
+    /// 组网工具（EasyTier/Tailscale tailnet 型 mesh 的对端虚拟地址）。
+    Mesh,
     /// 用户手填。
     UserManual,
 }

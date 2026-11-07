@@ -539,7 +539,8 @@ pub struct DeviceConn {
 
 impl DeviceConn {
     /// 连接 `host[:port]` 设备：解析地址 → QUIC 直连（`expected` 校验对端指纹）
-    /// → 失败且配置了 `relay`（原生中继，T-032）时自动回退 → open_control →
+    /// → 失败则逐个快试 `extra_addrs`（EasyTier 转发入口，本机回环，T-043）
+    /// → 仍失败且配置了 `relay`（原生中继，T-032）时自动回退 → open_control →
     /// 启动后台读循环与数据流 accept 循环。
     /// 不发 Hello（见 [`DeviceConn::handshake`]；配对流程需要区分 `Error{1}`）。
     pub async fn connect(
@@ -549,6 +550,7 @@ impl DeviceConn {
         expected: Option<Fingerprint>,
         media_fec: bool,
         relay: Option<String>,
+        extra_addrs: Vec<SocketAddr>,
     ) -> anyhow::Result<Arc<Self>> {
         // M2 #4 切入点（默认关闭）：设置 RD_PLAN 环境变量时走 Switchboard Plan
         // 执行器选路（LAN 发现/回退语义，spec/02），传输仍是 rd 原生 QUIC。
@@ -587,22 +589,45 @@ impl DeviceConn {
             // 回退内含打洞竞速（T-034）：中继路径与打洞直连谁先握手完成用谁，
             // RD_PUNCH=0 关闭打洞只走中继
             Err(direct_err) => {
-                let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
-                    return Err(direct_err);
-                };
-                let Some(target_fp) = expected else {
-                    // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
-                    return Err(direct_err);
-                };
-                let relay_addr =
-                    rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
-                tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
-                let (_, conn) = rd_transport::connect_via_relay_punch(
-                    relay_addr, target_fp, identity, expected,
-                )
-                .await
-                .context("经中继连接失败（被控端不在线或中继不可达）")?;
-                Arc::new(conn)
+                // EasyTier 转发候选（T-043，no_tun 组网）：本机回环入口
+                // （127.0.0.1:转发端口 → mesh → 对端虚拟 IP:rd 端口）。回环
+                // 连接失败立即返回，逐个快试代价低；任一命中即用。
+                let mut extra_err = None;
+                let mut conn_opt: Option<Arc<Conn>> = None;
+                for extra in &extra_addrs {
+                    match connect(*extra, identity, expected).await {
+                        Ok(c) => {
+                            tracing::info!(%extra, "EasyTier 转发地址连接成功");
+                            conn_opt = Some(Arc::new(c));
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::debug!(addr = %extra, err = %e, "转发地址连接失败");
+                            extra_err = Some(e);
+                        }
+                    }
+                }
+                if let Some(conn) = conn_opt {
+                    conn
+                } else {
+                    let direct_err = extra_err.unwrap_or(direct_err);
+                    let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
+                        return Err(direct_err);
+                    };
+                    let Some(target_fp) = expected else {
+                        // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
+                        return Err(direct_err);
+                    };
+                    let relay_addr =
+                        rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+                    tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
+                    let (_, conn) = rd_transport::connect_via_relay_punch(
+                        relay_addr, target_fp, identity, expected,
+                    )
+                    .await
+                    .context("经中继连接失败（被控端不在线或中继不可达）")?;
+                    Arc::new(conn)
+                }
             }
         };
         let peer_fp = conn.peer_fingerprint();

@@ -84,6 +84,41 @@ export function setRelayAddr(relay: string): Promise<void> {
   return call("set_relay_addr", { relay });
 }
 
+/** EasyTier 组网设置（T-043；对应 agent.toml 的 [easytier] 节）。 */
+export interface EasyTierSettings {
+  enabled: boolean;
+  binaryPath: string;
+  cliPath: string;
+  networkName: string;
+  networkSecret: string;
+  peerUrls: string[];
+  virtualIp: string;
+  noTun: boolean;
+  forwards: string[];
+}
+
+/** 读 EasyTier 设置（未配置 = 全默认、enabled=false）。 */
+export function getEasytier(): Promise<EasyTierSettings> {
+  return call("get_easytier");
+}
+
+/** 写 EasyTier 设置（整体替换 [easytier] 节）；重启 rd 后生效。 */
+export function setEasytier(settings: EasyTierSettings): Promise<void> {
+  return call("set_easytier", {
+    settings: {
+      enabled: settings.enabled,
+      binary_path: settings.binaryPath,
+      cli_path: settings.cliPath,
+      network_name: settings.networkName,
+      network_secret: settings.networkSecret,
+      peer_urls: settings.peerUrls,
+      virtual_ip: settings.virtualIp,
+      no_tun: settings.noTun,
+      forwards: settings.forwards,
+    },
+  });
+}
+
 /** connect_device 返回的对端能力。 */
 export interface HelloAckDto {
   protoVer: number;

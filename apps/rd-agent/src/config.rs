@@ -42,6 +42,57 @@ pub struct Config {
     /// 原生中继地址(T-032,如 "1.2.3.4:21118");配置后额外经中继接受连接,
     /// 直连路径不受影响。环境变量 RD_RELAY 优先。跨网打洞失败的兜底通道。
     pub relay_addr: Option<String>,
+    /// EasyTier 组网(可选,默认关闭):agent 托管 easytier-core 进程,
+    /// 加入 mesh 后本机虚拟 IP 作为直连候选上报(随 REG → DIAL ACK 竞速)。
+    /// 失败仅降级告警,不影响直连/中继路径。
+    #[serde(default)]
+    pub easytier: EasyTierAgentConfig,
+}
+
+/// agent.toml `[easytier]` 节(全部字段有默认,旧配置文件零改动兼容)。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EasyTierAgentConfig {
+    /// 总开关(false = 完全不碰 EasyTier)。
+    pub enabled: bool,
+    /// easytier-core.exe 路径(rd 不捆绑分发,由用户安装后指向)。
+    pub binary_path: String,
+    /// easytier-cli 路径(虚拟 IP 自查用);留空 = binary_path 同目录的
+    /// easytier-cli(.exe)——发行包两者同目录。
+    pub cli_path: String,
+    /// 网络名(同网互见;空 = 未配置,enabled 无效)。
+    pub network_name: String,
+    /// 网络密钥。
+    pub network_secret: String,
+    /// 引导 peer(官方公共节点或自建中继,如 "tcp://1.2.3.4:11010")。
+    pub peer_urls: Vec<String>,
+    /// 静态虚拟 IP(如 "10.126.126.2/24");留空 = DHCP。
+    pub virtual_ip: String,
+    /// 不建虚拟网卡(免管理员,默认 true);TUN 模式需管理员但控制端可直拨本机虚拟 IP。
+    pub no_tun: bool,
+    /// no_tun 模式的 UDP 转发规则(格式 "对端虚拟IP:端口@本地端口",如
+    /// "10.126.126.3:21118@21130"):本机节点在 127.0.0.1:21130 开 UDP 入口,
+    /// 经 mesh 转发到对端 rd。被控端通常不配;控制端(融合版)配置后连接
+    /// 自动把 127.0.0.1:21130 作为候选。
+    pub forwards: Vec<String>,
+}
+
+// 手写 Default:no_tun 语义默认必须是 true(免管理员);
+// derive(Default) 会给 bool 填 false,而缺 [easytier] 节时正是走 Default 路径。
+impl Default for EasyTierAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary_path: String::new(),
+            cli_path: String::new(),
+            network_name: String::new(),
+            network_secret: String::new(),
+            peer_urls: Vec::new(),
+            virtual_ip: String::new(),
+            no_tun: true,
+            forwards: Vec::new(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -56,6 +107,7 @@ impl Default for Config {
             max_fps: 120,
             start_kbps: 8000,
             relay_addr: None,
+            easytier: EasyTierAgentConfig::default(),
         }
     }
 }
@@ -78,5 +130,42 @@ impl Config {
         let cfg: Config =
             toml::from_str(&raw).with_context(|| format!("解析配置失败:{}", path.display()))?;
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧版 agent.toml（无 [easytier] 节）零改动兼容：默认关闭。
+    #[test]
+    fn 旧配置_无easytier节_默认关闭() {
+        let cfg: Config =
+            toml::from_str("listen_port = 21118\nrelay_addr = \"1.2.3.4:21118\"\n").unwrap();
+        assert!(!cfg.easytier.enabled);
+        assert_eq!(cfg.easytier.network_name, "");
+        assert!(cfg.easytier.no_tun); // 默认 no_tun（免管理员）
+    }
+
+    /// [easytier] 节完整解析。
+    #[test]
+    fn easytier节_完整解析() {
+        let raw = r#"
+[easytier]
+enabled = true
+binary_path = "C:\\tools\\easytier-core.exe"
+network_name = "rd-mesh"
+network_secret = "s3cret"
+peer_urls = ["tcp://1.2.3.4:11010"]
+virtual_ip = "10.126.126.2/24"
+no_tun = false
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.easytier.enabled);
+        assert_eq!(cfg.easytier.network_name, "rd-mesh");
+        assert_eq!(cfg.easytier.network_secret, "s3cret");
+        assert_eq!(cfg.easytier.peer_urls, vec!["tcp://1.2.3.4:11010"]);
+        assert_eq!(cfg.easytier.virtual_ip, "10.126.126.2/24");
+        assert!(!cfg.easytier.no_tun);
     }
 }
