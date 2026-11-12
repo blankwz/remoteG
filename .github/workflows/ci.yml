@@ -14,9 +14,9 @@ jobs:
       # - LIBCLANG_PATH：ffmpeg-sys-next 的 bindgen 需要 libclang
       FFMPEG_DIR: ${{ github.workspace }}\ffmpeg-btbn
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
-      # ffmpeg-sys-next 构建脚本（bindgen 解析 FFmpeg 头文件）在 CI 全新环境
-      # 下栈溢出（STATUS_STACK_OVERFLOW，同 F-2 注释记录的问题），加大线程栈。
-      RUST_MIN_STACK: 16777216
+      # ffmpeg-sys-next 构建脚本（bindgen 解析 FFmpeg 大头部）会在默认 1MB
+      # 主线程栈上溢出。修在仓库 .cargo/config.toml：链接器 /STACK 加大到
+      # 16MB（主线程栈由 PE 头决定，RUST_MIN_STACK 管不到，勿再用它）。
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

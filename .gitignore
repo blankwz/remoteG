@@ -15,7 +15,8 @@ coverage/
 .DS_Store
 Thumbs.db
 *.log
-/.cargo/
+/.cargo/*
+!/.cargo/config.toml
 apps/rd-controller/src-tauri/ffmpeg-bin/
 
 # Switchboard（构建产物和依赖）

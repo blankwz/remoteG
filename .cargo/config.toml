@@ -1,0 +1,6 @@
+# ffmpeg-sys-next 的 bindgen(libclang)解析 ffmpeg 大头部时,在 build script
+# 默认 1MB 主线程栈上溢出(STATUS_STACK_OVERFLOW,仅 Windows;D-013 F-2 融合
+# 集成时暴露)。主线程栈由 PE 头决定,RUST_MIN_STACK 无效——经链接器
+# /STACK 加大到 16MB。对 exe 主线程生效(无害),lib/dll 忽略。
+[target.'cfg(windows)']
+rustflags = ["-C", "link-args=/STACK:16777216"]
