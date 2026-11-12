@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const KEEP_MAX: usize = 10;
 
 /// GitHub Issue 新建页基址（产品级占位；T-039 仓库远端就绪时替换）。
-pub const ISSUE_NEW_URL_BASE: &str = "https://github.com/OWNER/rd/issues/new";
+pub const ISSUE_NEW_URL_BASE: &str = "https://github.com/blankwz/remoteG/issues/new";
 
 /// 单条崩溃记录（dump 文件的 JSON 结构，也是列表/预览的视图）。
 #[derive(Debug, Clone, Serialize, Deserialize)]

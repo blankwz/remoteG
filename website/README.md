@@ -14,7 +14,7 @@ python -I -m http.server 8090 --directory website
 
 仓库远端就绪（T-039）后：
 
-1. **替换 OWNER 占位**：`index.html` 里所有 `github.com/OWNER/rd` → 实际仓库
+1. **替换 OWNER 占位**：`index.html` 里所有 `github.com/blankwz/remoteG` → 实际仓库
    （3 处：JS 下载解析、3 个下载按钮 href、页脚）。替换后 JS 会自动拉最新
    Release 资产填下载链接，失败时兜底 releases/latest 页。
 2. 推送后启用 Pages（Settings → Pages → Source: GitHub Actions），
