@@ -24,15 +24,47 @@ use rd_transport::{DataFrame, StreamKind};
 use common::Client;
 
 /// WGC 不可用时跳过依赖捕获的用例（打印原因，不静默通过）。
+///
+/// 两级判据：
+/// 1. `is_supported()`——API 层可用（Win10 1903+ 且未被策略禁用）；
+/// 2. 真出帧探测——CI 虚拟机（无 GPU/无桌面合成会话）上 API 层报可用，
+///    但捕获会话建立后永远不出帧，用例只会超时失败。这里对 testwin 起
+///    一个独立捕获会话，8s 内拿到首帧才认定环境可捕获（进程内只探一次）。
 fn skip_if_no_wgc() -> bool {
-    if rd_capture_win::is_supported() {
-        return false;
+    if !rd_capture_win::is_supported() {
+        println!(
+            "SKIP: Windows.Graphics.Capture 不可用（需 Windows 10 1903+ 且未被策略禁用），\
+             跳过本用例"
+        );
+        return true;
     }
-    println!(
-        "SKIP: Windows.Graphics.Capture 不可用（需 Windows 10 1903+ 且未被策略禁用），\
-         跳过本用例"
-    );
-    true
+    static CAN_CAPTURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*CAN_CAPTURE.get_or_init(probe_first_frame) {
+        println!("SKIP: WGC 会话可建立但环境不产出帧（无 GPU 的无头 VM），跳过本用例");
+        return true;
+    }
+    false
+}
+
+/// 对 testwin 客户区做一次最小捕获，验证当前环境真能产出 WGC 帧。
+fn probe_first_frame() -> bool {
+    let env = common::env();
+    let (cap, rx) = match rd_capture_win::WindowCapture::start(
+        env.hwnd.try_into().unwrap(),
+        rd_capture_win::CaptureOptions::default(),
+    ) {
+        Ok(x) => x,
+        Err(e) => {
+            println!("[wgc-probe] 捕获会话建立失败：{e:#}");
+            return false;
+        }
+    };
+    let got = rx.recv_timeout(Duration::from_secs(8)).is_ok();
+    cap.stop();
+    if !got {
+        println!("[wgc-probe] 8s 内未收到任何首帧，判定环境不可捕获");
+    }
+    got
 }
 
 // ---------------------------------------------------------------------------
