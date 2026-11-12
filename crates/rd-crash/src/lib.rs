@@ -45,7 +45,14 @@ pub fn crash_dir(log_dir: &Path) -> PathBuf {
 }
 
 /// 落一条 dump（由 panic hook 调用；**内部绝不 panic**——失败只丢记录不升级）。
-pub fn write_dump(dir: &Path, app: &str, version: &str, message: &str, location: &str, thread: &str) {
+pub fn write_dump(
+    dir: &Path,
+    app: &str,
+    version: &str,
+    message: &str,
+    location: &str,
+    thread: &str,
+) {
     let entry = DumpEntry {
         app: app.to_string(),
         version: version.to_string(),
@@ -223,7 +230,14 @@ mod tests {
     fn write_and_list_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let d = crash_dir(dir.path());
-        write_dump(&d, "rd-agent", "0.3.0", "boom\nsecond line", "src/x.rs:10", "main");
+        write_dump(
+            &d,
+            "rd-agent",
+            "0.3.0",
+            "boom\nsecond line",
+            "src/x.rs:10",
+            "main",
+        );
         let dumps = list_dumps(&d);
         assert_eq!(dumps.len(), 1);
         assert_eq!(dumps[0].app, "rd-agent");

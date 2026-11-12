@@ -93,7 +93,11 @@ fn verify_sig(payload: &[u8], sig: &Signature) -> bool {
         return true;
     }
     #[cfg(debug_assertions)]
-    if dev_key().verifying_key().verify_strict(payload, sig).is_ok() {
+    if dev_key()
+        .verifying_key()
+        .verify_strict(payload, sig)
+        .is_ok()
+    {
         return true;
     }
     false
@@ -254,7 +258,10 @@ mod tests {
         {
             let code = sign_payload(&payload, &dev_seed_hex()).expect("签发成功");
             assert!(
-                matches!(verify_license(&code, 1_730_000_100), Err(LicenseError::BadSignature)),
+                matches!(
+                    verify_license(&code, 1_730_000_100),
+                    Err(LicenseError::BadSignature)
+                ),
                 "release 构建必须拒绝开发种子签发的码"
             );
         }

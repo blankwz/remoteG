@@ -43,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # 排除 rd-controller：F-2 并入根 workspace 的 Tauri 壳是 Windows 专属
-      # （tray_fusion 直接用 winreg/windows crate），macOS 只验证核心 crate。
-      - run: cargo check --workspace --exclude rd-controller
+      # 只验证可移植 crate（协议/传输/编码/安全/中继/选路/崩溃/终端/基准）。
+      # Windows 专属成员（rd-agent 被控端、rd-controller Tauri 壳、*-win 捕获/
+      # 输入/窗口 crate）不参与 macOS 检查：它们是 Windows-only 产品形态，
+      # macOS job 的价值是防止共享 crate 误引入平台依赖。
+      - run: cargo check -p rd-proto -p rd-transport -p rd-encode -p rd-security -p rd-relay -p rd-switch -p rd-crash -p rd-term -p clarity-bench

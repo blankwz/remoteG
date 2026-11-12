@@ -40,9 +40,10 @@ fn normalize_key(key: &str) -> String {
 fn extract_addr(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => Some(s.split('/').next().unwrap_or(s).to_string()),
-        Value::Object(o) => o.get("address").and_then(Value::as_str).map(|s| {
-            s.split('/').next().unwrap_or(s).to_string()
-        }),
+        Value::Object(o) => o
+            .get("address")
+            .and_then(Value::as_str)
+            .map(|s| s.split('/').next().unwrap_or(s).to_string()),
         _ => None,
     }
 }
@@ -61,8 +62,8 @@ fn get_normalized<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
 
 /// 解析 route JSON（兼容整包 `RouteListData` 与裸 `peer_routes` 两种壳）。
 pub fn parse_route_json(raw: &str) -> anyhow::Result<Vec<RouteEntry>> {
-    let v: Value =
-        serde_json::from_str(raw).with_context(|| format!("easytier-cli 输出非 JSON: {:.120}", raw))?;
+    let v: Value = serde_json::from_str(raw)
+        .with_context(|| format!("easytier-cli 输出非 JSON: {:.120}", raw))?;
 
     // 壳：RouteListData { node_info, peer_routes }（单实例时 cli 直接打印它）
     let pairs = get_normalized(&v, "peer_routes")
@@ -79,7 +80,9 @@ pub fn parse_route_json(raw: &str) -> anyhow::Result<Vec<RouteEntry>> {
         };
         let ipv4 = get_normalized(route, "ipv4_addr").and_then(extract_addr);
         let ipv6 = get_normalized(route, "ipv6_addr").and_then(extract_addr);
-        let hostname = get_normalized(route, "hostname").and_then(Value::as_str).map(str::to_string);
+        let hostname = get_normalized(route, "hostname")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if ipv4.is_some() || ipv6.is_some() {
             out.push(RouteEntry {
                 ipv4,

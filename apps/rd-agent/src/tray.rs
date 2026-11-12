@@ -566,9 +566,7 @@ mod imp {
     /// urlencode 后易超 cmd 8191 字符上限——改用 `explorer <url>`（不经
     /// shell 解析，交默认浏览器）；body 上限同步收紧（M-4：预览=全量上报）。
     fn report_crash() {
-        let dir = rd_agent::default_config_dir()
-            .join("logs")
-            .join("crash");
+        let dir = rd_agent::default_config_dir().join("logs").join("crash");
         let dumps = rd_crash::list_dumps(&dir);
         if dumps.is_empty() {
             show_pair_code_dialog("没有崩溃记录，无需上报。".to_string());

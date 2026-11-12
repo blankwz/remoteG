@@ -592,7 +592,11 @@ pub async fn connect_device(
     // 握手超时（D-013 包2）：纯直连 3s 快速失败让退避节奏生效；配置了
     // 原生中继或 EasyTier 转发时放宽到 30s——直连失败后还要走这些兜底
     let has_relay = entry.relay.as_deref().is_some_and(|s| !s.trim().is_empty());
-    let secs = if has_relay || !extra_addrs.is_empty() { 30 } else { 3 };
+    let secs = if has_relay || !extra_addrs.is_empty() {
+        30
+    } else {
+        3
+    };
     let conn = tokio::time::timeout(
         Duration::from_secs(secs),
         DeviceConn::connect(
@@ -1252,10 +1256,22 @@ pub fn set_easytier(settings: EasyTierSettingsDto) -> Result<(), String> {
         if settings.enabled {
             let mut sec = toml::value::Table::new();
             sec.insert("enabled".into(), toml::Value::Boolean(true));
-            sec.insert("binary_path".into(), toml::Value::String(settings.binary_path.clone()));
-            sec.insert("cli_path".into(), toml::Value::String(settings.cli_path.clone()));
-            sec.insert("network_name".into(), toml::Value::String(settings.network_name.clone()));
-            sec.insert("network_secret".into(), toml::Value::String(settings.network_secret.clone()));
+            sec.insert(
+                "binary_path".into(),
+                toml::Value::String(settings.binary_path.clone()),
+            );
+            sec.insert(
+                "cli_path".into(),
+                toml::Value::String(settings.cli_path.clone()),
+            );
+            sec.insert(
+                "network_name".into(),
+                toml::Value::String(settings.network_name.clone()),
+            );
+            sec.insert(
+                "network_secret".into(),
+                toml::Value::String(settings.network_secret.clone()),
+            );
             sec.insert(
                 "peer_urls".into(),
                 toml::Value::Array(
@@ -1266,7 +1282,10 @@ pub fn set_easytier(settings: EasyTierSettingsDto) -> Result<(), String> {
                         .collect(),
                 ),
             );
-            sec.insert("virtual_ip".into(), toml::Value::String(settings.virtual_ip.clone()));
+            sec.insert(
+                "virtual_ip".into(),
+                toml::Value::String(settings.virtual_ip.clone()),
+            );
             sec.insert("no_tun".into(), toml::Value::Boolean(settings.no_tun));
             sec.insert(
                 "forwards".into(),

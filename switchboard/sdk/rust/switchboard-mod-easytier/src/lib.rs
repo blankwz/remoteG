@@ -101,10 +101,7 @@ mod tests {
         let cands = d.poll_once().await.unwrap();
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].addr, fwd);
-        assert_eq!(
-            cands[0].source,
-            switchboard_core::types::SourceKind::Mesh
-        );
+        assert_eq!(cands[0].source, switchboard_core::types::SourceKind::Mesh);
         // 转发地址是本机入口，成本最低（先于虚拟 IP 直拨）
         assert_eq!(cands[0].cost, 1);
     }

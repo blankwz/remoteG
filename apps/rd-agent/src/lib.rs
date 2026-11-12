@@ -128,16 +128,16 @@ pub fn start(
     // EasyTier 组网托管（可选）：[easytier] enabled=true 才真正启动；未启用/
     // 失败仅降级——直连与中继路径完全不受影响。控制端可经 mesh 直拨本机
     // 虚拟 IP（TUN 模式），故宿主必须在 relay 块之外无条件托管。
-    let easytier_host =
-        match easytier::start(&state.config.easytier, &config_dir.join("easytier")) {
-            Ok(host) => host,
-            Err(e) => {
-                tracing::warn!(err = %e, "EasyTier 托管启动失败（降级：仅直连/中继路径）");
-                easytier::EasyTierHost {
-                    virtual_ip: Arc::new(Mutex::new(None)),
-                }
+    let easytier_host = match easytier::start(&state.config.easytier, &config_dir.join("easytier"))
+    {
+        Ok(host) => host,
+        Err(e) => {
+            tracing::warn!(err = %e, "EasyTier 托管启动失败（降级：仅直连/中继路径）");
+            easytier::EasyTierHost {
+                virtual_ip: Arc::new(Mutex::new(None)),
             }
-        };
+        }
+    };
 
     #[cfg(debug_assertions)]
     if let Some(code) = &test_pair_code {

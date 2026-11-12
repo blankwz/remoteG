@@ -33,11 +33,16 @@ impl EasyTierNode {
     /// 写配置 TOML 到 `work_dir/easytier-<network_name>.toml` 并启动节点，
     /// 阻塞至 rpc-portal 可连接（`READY_TIMEOUT` 内）。提前退出视为失败，
     /// 带上 stderr 摘要报错。
-    pub fn launch(binary: &Path, cfg: &super::config::EasyTierNetConfig, work_dir: &Path) -> anyhow::Result<Self> {
+    pub fn launch(
+        binary: &Path,
+        cfg: &super::config::EasyTierNetConfig,
+        work_dir: &Path,
+    ) -> anyhow::Result<Self> {
         if cfg.network_name.trim().is_empty() {
             anyhow::bail!("EasyTier network_name 不能为空");
         }
-        std::fs::create_dir_all(work_dir).with_context(|| format!("创建目录失败: {}", work_dir.display()))?;
+        std::fs::create_dir_all(work_dir)
+            .with_context(|| format!("创建目录失败: {}", work_dir.display()))?;
         let config_path = work_dir.join(format!(
             "easytier-{}.toml",
             sanitize_name(&cfg.network_name)
@@ -92,7 +97,9 @@ impl EasyTierNode {
             }
             // 子进程提前退出 = 配置/网络错误，尽快失败
             if let Some(status) = child.try_wait()? {
-                let msg = stderr_hold.take().and_then(|mut s| read_stderr_tail(&mut s));
+                let msg = stderr_hold
+                    .take()
+                    .and_then(|mut s| read_stderr_tail(&mut s));
                 anyhow::bail!(
                     "easytier-core 提前退出（{status}）：{}",
                     msg.unwrap_or_else(|| "无 stderr 输出".into())
@@ -233,12 +240,8 @@ mod tests {
             ..Default::default()
         };
         let work = std::env::temp_dir().join(format!("sb-et-test-{}", std::process::id()));
-        let err = EasyTierNode::launch(
-            Path::new("easytier-core-绝不存在的路径.exe"),
-            &cfg,
-            &work,
-        )
-        .expect_err("不存在的二进制必须报错");
+        let err = EasyTierNode::launch(Path::new("easytier-core-绝不存在的路径.exe"), &cfg, &work)
+            .expect_err("不存在的二进制必须报错");
         assert!(err.to_string().contains("启动 easytier-core 失败"));
         let _ = std::fs::remove_dir_all(&work);
     }

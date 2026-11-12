@@ -126,9 +126,7 @@ impl EasyTierNetConfig {
             peer: self
                 .peer_urls
                 .iter()
-                .map(|uri| PeerCfg {
-                    uri: uri.clone(),
-                })
+                .map(|uri| PeerCfg { uri: uri.clone() })
                 .collect(),
             port_forward: self
                 .forwards
@@ -152,10 +150,7 @@ impl EasyTierNetConfig {
     /// easytier-core 启动参数：`--config-file <toml> --rpc-portal <addr>`。
     /// rpc-portal 必须显式给（上游 RpcPortalOptions 无默认值，不给即不开查询口）。
     pub fn core_args(&self) -> Vec<String> {
-        vec![
-            "--rpc-portal".into(),
-            self.rpc_portal.to_string(),
-        ]
+        vec!["--rpc-portal".into(), self.rpc_portal.to_string()]
     }
 }
 
@@ -168,7 +163,10 @@ mod tests {
     fn 默认配置_无tun_默认portal() {
         let cfg = EasyTierNetConfig::default();
         assert!(cfg.no_tun);
-        assert_eq!(cfg.rpc_portal, "127.0.0.1:15888".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            cfg.rpc_portal,
+            "127.0.0.1:15888".parse::<SocketAddr>().unwrap()
+        );
     }
 
     /// TOML 生成快照：字段名与上游 toml.rs 对齐（network_identity/peer/

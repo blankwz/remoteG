@@ -144,10 +144,8 @@ pub fn local_ip_addrs() -> Vec<std::net::IpAddr> {
                         }
                         AF_INET6 => {
                             use windows::Win32::Networking::WinSock::SOCKADDR_IN6;
-                            let sa6 =
-                                unsafe { &*(sa as *const _ as *const SOCKADDR_IN6) };
-                            let bytes: [u8; 16] =
-                                unsafe { sa6.sin6_addr.u.Byte };
+                            let sa6 = unsafe { &*(sa as *const _ as *const SOCKADDR_IN6) };
+                            let bytes: [u8; 16] = unsafe { sa6.sin6_addr.u.Byte };
                             Some(IpAddr::from(bytes))
                         }
                         _ => None,

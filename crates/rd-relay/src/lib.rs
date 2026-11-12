@@ -291,8 +291,7 @@ pub fn encode_signed_control(
     out.extend_from_slice(&TAG_CONTROL.to_le_bytes());
     out.push(kind);
     out.extend_from_slice(fp);
-    let cert_len =
-        u16::try_from(cert_der.len()).expect("证书 DER 不超过 64KiB（实际 ~300B）");
+    let cert_len = u16::try_from(cert_der.len()).expect("证书 DER 不超过 64KiB（实际 ~300B）");
     out.extend_from_slice(&cert_len.to_le_bytes());
     out.extend_from_slice(cert_der);
     out.extend_from_slice(sig);
@@ -303,13 +302,7 @@ pub fn encode_signed_control(
 }
 
 /// 解码签名控制报的产物：`(type, fp, 证书 DER, 签名, 候选尾巴起始偏移)`。
-pub type SignedControl<'a> = (
-    u8,
-    [u8; 32],
-    &'a [u8],
-    [u8; SIGNATURE_LENGTH],
-    usize,
-);
+pub type SignedControl<'a> = (u8, [u8; 32], &'a [u8], [u8; SIGNATURE_LENGTH], usize);
 
 /// 解码签名控制报，返回 [`SignedControl`]。长度字段超界/截断返回 None。
 pub fn decode_signed_control(buf: &[u8]) -> Option<SignedControl<'_>> {
@@ -327,9 +320,7 @@ pub fn decode_signed_control(buf: &[u8]) -> Option<SignedControl<'_>> {
         return None;
     }
     let cert = &buf[43..cert_end];
-    let sig: [u8; SIGNATURE_LENGTH] = buf[cert_end..cert_end + SIGNATURE_LENGTH]
-        .try_into()
-        .ok()?;
+    let sig: [u8; SIGNATURE_LENGTH] = buf[cert_end..cert_end + SIGNATURE_LENGTH].try_into().ok()?;
     Some((kind, fp, cert, sig, cert_end + SIGNATURE_LENGTH))
 }
 
@@ -554,7 +545,13 @@ async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8],
                 return;
             }
             tracing::debug!(tag = Table::tag_of(&fp), peer = %from, "签名 REG 验证通过");
-            handle_reg(table, fp, from, true, decode_reg_candidates_at(pkt, tail_off))
+            handle_reg(
+                table,
+                fp,
+                from,
+                true,
+                decode_reg_candidates_at(pkt, tail_off),
+            )
         }
         TYPE_DIAL => handle_dial(sock, table, fp, from).await,
         _ => None,
@@ -936,7 +933,12 @@ mod tests {
         assert!(decode_signed_control(&pkt[..43 + cert_der.len()]).is_none());
         // 错误消息签名 → 验证失败（域分离防跨协议重放）
         let wrong_domain_sig = test_sign(TYPE_REG, &fp, &key);
-        assert!(!verify_signed_control(TYPE_REG2, &fp, &cert_der, &wrong_domain_sig));
+        assert!(!verify_signed_control(
+            TYPE_REG2,
+            &fp,
+            &cert_der,
+            &wrong_domain_sig
+        ));
     }
 
     /// 签名 REG2 + legacy DIAL 全链路：注册按签名受理，拨号与地址尾巴、
@@ -1021,7 +1023,10 @@ mod tests {
         let bad_sig = [0u8; 64];
         let agent = UdpSocket::bind("127.0.0.1:0").await?;
         agent
-            .send_to(&encode_signed_control(TYPE_REG2, &fp, &cert_der, &bad_sig, &[]), relay)
+            .send_to(
+                &encode_signed_control(TYPE_REG2, &fp, &cert_der, &bad_sig, &[]),
+                relay,
+            )
             .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let mut buf = [0u8; 128];
@@ -1033,7 +1038,10 @@ mod tests {
         // 正常签名注册建立签名会话
         let sig = test_sign(TYPE_REG2, &fp, &key);
         agent
-            .send_to(&encode_signed_control(TYPE_REG2, &fp, &cert_der, &sig, &[]), relay)
+            .send_to(
+                &encode_signed_control(TYPE_REG2, &fp, &cert_der, &sig, &[]),
+                relay,
+            )
             .await?;
         wait_for(
             || {
@@ -1058,17 +1066,26 @@ mod tests {
         agent.send_to(&encode_control(TYPE_REG, &fp), relay).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let mut buf = [0u8; 128];
-        assert!(agent.try_recv_from(&mut buf).is_err(), "legacy REG 不得有应答");
+        assert!(
+            agent.try_recv_from(&mut buf).is_err(),
+            "legacy REG 不得有应答"
+        );
 
         // ③ 换一把钥匙签同一 fp：证书指纹与声明的 fp 失配 → 验签拒绝，无应答
         let (rogue_key, rogue_cert, _rogue_fp) = test_identity("rogue");
         let rogue_sig = test_sign(TYPE_REG2, &fp, &rogue_key);
         agent
-            .send_to(&encode_signed_control(TYPE_REG2, &fp, &rogue_cert, &rogue_sig, &[]), relay)
+            .send_to(
+                &encode_signed_control(TYPE_REG2, &fp, &rogue_cert, &rogue_sig, &[]),
+                relay,
+            )
             .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let mut buf = [0u8; 128];
-        assert!(agent.try_recv_from(&mut buf).is_err(), "冒名签名 REG 不得有应答");
+        assert!(
+            agent.try_recv_from(&mut buf).is_err(),
+            "冒名签名 REG 不得有应答"
+        );
         Ok(())
     }
 
@@ -1082,8 +1099,11 @@ mod tests {
         for i in 0..(MAX_SESSIONS_PER_IP + 4) {
             let (_key, cert_der, fp) = test_identity(&format!("flood-{i}"));
             let sig = test_sign(TYPE_REG2, &fp, &_key);
-            sock.send_to(&encode_signed_control(TYPE_REG2, &fp, &cert_der, &sig, &[]), relay)
-                .await?;
+            sock.send_to(
+                &encode_signed_control(TYPE_REG2, &fp, &cert_der, &sig, &[]),
+                relay,
+            )
+            .await?;
             let mut buf = [0u8; 64];
             let deadline = Instant::now() + Duration::from_secs(2);
             let status = loop {

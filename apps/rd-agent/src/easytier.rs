@@ -88,7 +88,12 @@ fn build_net_config(cfg: &EasyTierAgentConfig) -> Option<EasyTierNetConfig> {
     Some(EasyTierNetConfig {
         network_name: cfg.network_name.clone(),
         network_secret: (!cfg.network_secret.is_empty()).then(|| cfg.network_secret.clone()),
-        peer_urls: cfg.peer_urls.iter().filter(|s| !s.trim().is_empty()).cloned().collect(),
+        peer_urls: cfg
+            .peer_urls
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .collect(),
         listeners: Vec::new(),
         virtual_ip: (!cfg.virtual_ip.is_empty()).then(|| cfg.virtual_ip.clone()),
         no_tun: cfg.no_tun,
@@ -103,13 +108,20 @@ fn resolve_cli_path(cfg: &EasyTierAgentConfig) -> Option<PathBuf> {
         return Some(PathBuf::from(&cfg.cli_path));
     }
     let bin = PathBuf::from(&cfg.binary_path);
-    let exe = if cfg!(windows) { "easytier-cli.exe" } else { "easytier-cli" };
+    let exe = if cfg!(windows) {
+        "easytier-cli.exe"
+    } else {
+        "easytier-cli"
+    };
     bin.parent().map(|dir| dir.join(exe))
 }
 
 /// 启动 EasyTier 节点托管。未启用/配置无效返回 None；启动失败返回 Err 带原因
 /// （调用方决定是否降级——本项目统一降级告警）。
-pub fn start(cfg: &EasyTierAgentConfig, work_dir: &std::path::Path) -> anyhow::Result<EasyTierHost> {
+pub fn start(
+    cfg: &EasyTierAgentConfig,
+    work_dir: &std::path::Path,
+) -> anyhow::Result<EasyTierHost> {
     let Some(net_cfg) = build_net_config(cfg) else {
         return Ok(EasyTierHost {
             virtual_ip: Arc::new(Mutex::new(None)),
@@ -234,8 +246,16 @@ mod tests {
     #[test]
     fn 转发规则解析() {
         let r = parse_forward_rule("10.126.126.3:21118@21130").expect("合法格式");
-        assert_eq!(r.bind, "127.0.0.1:21130".parse::<std::net::SocketAddr>().unwrap());
-        assert_eq!(r.dst, "10.126.126.3:21118".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            r.bind,
+            "127.0.0.1:21130".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            r.dst,
+            "10.126.126.3:21118"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+        );
         assert_eq!(r.proto, ForwardProto::Udp);
         // 非法：缺 @ / 端口非法 / bind 端口 0
         assert!(parse_forward_rule("1.2.3.4:21118").is_none());
@@ -270,7 +290,10 @@ mod tests {
             Some(PathBuf::from(r"C:\tools\easytier\easytier-cli.exe"))
         );
         c.cli_path = r"D:\custom\cli.exe".into();
-        assert_eq!(resolve_cli_path(&c), Some(PathBuf::from(r"D:\custom\cli.exe")));
+        assert_eq!(
+            resolve_cli_path(&c),
+            Some(PathBuf::from(r"D:\custom\cli.exe"))
+        );
     }
 
     #[test]

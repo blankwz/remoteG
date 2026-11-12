@@ -13,7 +13,7 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all --check
 ```
 
-要求：Rust stable（`x86_64-pc-windows-msvc`）+ VS Build Tools。macOS 仅要求 `cargo check --workspace` 通过（Windows 专属模块用 `#[cfg(windows)]` 隔离）。
+要求：Rust stable（`x86_64-pc-windows-msvc`）+ VS Build Tools。共享 crate（协议/传输/编码/安全/中继/选路等）保持跨平台，CI 在 macOS 上对其逐一 `cargo check`；被控端与控制端是 Windows 专属产品，不参与 macOS 检查。
 
 控制端 `apps/rd-controller/` 为独立 Cargo workspace（Tauri 2 + Node/pnpm），由根 workspace 排除（见 DECISIONS.md D-008）。
 

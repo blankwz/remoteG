@@ -124,10 +124,9 @@ fn bench_conv_i420(c: &mut Criterion) {
     for (name, w, h) in [("1080p", 1920u32, 1080u32), ("4k", 3840u32, 2160u32)] {
         let frame = make_frame(w, h, 0xABCD);
         let mut planes = YuvPlanes::new(w, h);
-        c.bench_function(
-            &format!("conv/bgra_to_i420_{name}"),
-            |b| b.iter(|| black_box(frame.bgra_to_i420_into(&mut planes))),
-        );
+        c.bench_function(&format!("conv/bgra_to_i420_{name}"), |b| {
+            b.iter(|| black_box(frame.bgra_to_i420_into(&mut planes)))
+        });
     }
 }
 
