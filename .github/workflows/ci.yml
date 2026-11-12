@@ -33,6 +33,17 @@ jobs:
           $dir = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1
           Move-Item $dir.FullName "$env:GITHUB_WORKSPACE\ffmpeg-btbn"
           Add-Content $env:GITHUB_PATH "$env:GITHUB_WORKSPACE\ffmpeg-btbn\bin"
+      # tauri.conf.json 的 bundle.resources 声明了 ffmpeg-bin/*（FFmpeg DLL，本地
+      # gitignore）与 switchboard/studio/dist（Studio 前端产物，本地构建生成），
+      # tauri-build 在编译期校验 glob，缺失即失败。CI 用刚下载的 BtbN DLL 备出
+      # 前者、用占位文件备出后者（clippy/test 只需目录存在，不打包）。
+      - name: Prepare tauri bundle resource dirs (ffmpeg-bin, studio/dist)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\apps\rd-controller\src-tauri\ffmpeg-bin" | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\ffmpeg-btbn\bin\*.dll" "$env:GITHUB_WORKSPACE\apps\rd-controller\src-tauri\ffmpeg-bin\"
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\switchboard\studio\dist" | Out-Null
+          Set-Content "$env:GITHUB_WORKSPACE\switchboard\studio\dist\.ci-placeholder" "placeholder for tauri bundle.resources glob"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
