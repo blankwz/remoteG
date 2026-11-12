@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
-          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/n9.0/ffmpeg-n9.0-win64-lgpl-shared.zip' -OutFile $zip
+          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip' -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
           $dir = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1
           Move-Item $dir.FullName "$env:GITHUB_WORKSPACE\ffmpeg-btbn"
@@ -43,4 +43,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --workspace
+      # 排除 rd-controller：F-2 并入根 workspace 的 Tauri 壳是 Windows 专属
+      # （tray_fusion 直接用 winreg/windows crate），macOS 只验证核心 crate。
+      - run: cargo check --workspace --exclude rd-controller

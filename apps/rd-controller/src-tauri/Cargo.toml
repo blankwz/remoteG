@@ -44,10 +44,11 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
-winreg = "0.10"
 zstd = "0.14"
 
 [target.'cfg(windows)'.dependencies]
+# tray_fusion（开机自启 HKCU Run）独占；与 windows crate 一样是 Windows 专属。
+winreg = "0.10"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
