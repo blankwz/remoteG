@@ -627,6 +627,33 @@ pub async fn open_window_fec(
     Ok((ack, tile))
 }
 
+/// 视频链路排障：把 Agent 日志尾部打出来（只在失败路径调用）。
+/// Agent 是独立进程、日志写在临时目录，不 dump 在 CI 上永远看不到；
+/// 这正是「CI 视频帧超时但本地全绿」时定位编码/捕获层问题的唯一证据源。
+pub fn dump_agent_logs() {
+    let Some(env) = ENV.get() else {
+        return;
+    };
+    let logs_dir = env._config_dir.path().join("logs");
+    let Ok(entries) = std::fs::read_dir(&logs_dir) else {
+        println!("[e2e] Agent 日志目录不可读: {}", logs_dir.display());
+        return;
+    };
+    let mut files: Vec<_> = entries.flatten().collect();
+    files.sort_by_key(|e| e.file_name());
+    for f in files {
+        let Ok(content) = std::fs::read_to_string(f.path()) else {
+            continue;
+        };
+        println!("--- Agent 日志: {}（尾 40 行）---", f.file_name().display());
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(40);
+        for line in &lines[start..] {
+            println!("{line}");
+        }
+    }
+}
+
 /// 从视频流收下一个属于 `window_id` 的帧（Annex-B AU）。
 pub async fn recv_video_frame(
     rx: &mut DataRx,
@@ -636,10 +663,13 @@ pub async fn recv_video_frame(
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        let frame = tokio::time::timeout(left, rx.recv())
-            .await
-            .context("等待视频帧超时")?
-            .context("视频流接收失败")?;
+        let frame = match tokio::time::timeout(left, rx.recv()).await {
+            Ok(v) => v.context("视频流接收失败")?,
+            Err(_) => {
+                dump_agent_logs();
+                anyhow::bail!("等待视频帧超时");
+            }
+        };
         match frame {
             Some(DataFrame::Video(header, au)) if header.window_id == window_id => {
                 return Ok((header, au.to_vec()));

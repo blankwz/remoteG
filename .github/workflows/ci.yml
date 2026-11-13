@@ -46,7 +46,9 @@ jobs:
           Set-Content "$env:GITHUB_WORKSPACE\switchboard\studio\dist\.ci-placeholder" "placeholder for tauri bundle.resources glob"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # --no-fail-fast：e2e 失败后 spike_loopback（合成帧→编码器→流，不依赖
+      # WGC）仍会跑，用来隔离「CI 上编码器不产 AU」还是「捕获→编码接线」问题。
+      - run: cargo test --workspace --no-fail-fast
       # T-025 无头端到端（串行运行：用例共享 testwin/Agent 进程）。
       # WGC 不可用时相关用例打印 SKIP 原因后跳过，不静默通过。
       - name: E2E tests (rd-agent, serial)

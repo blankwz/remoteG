@@ -814,15 +814,17 @@ async fn t09_media_fec_video_datagrams() -> Result<()> {
             .chain(parity_slots.iter())
             .filter(|s| s.is_some())
             .count();
-        anyhow::ensure!(
-            !left.is_zero(),
-            "60s 内未攒齐/未恢复 fec 帧 0（有效片 {present}，datagram 共 {total_pkts} 个，fid 分布 {:?}）",
-            {
-                let mut v: Vec<_> = fid_hist.iter().collect();
-                v.sort_by_key(|(k, _)| **k);
-                v.into_iter().take(12).collect::<Vec<_>>()
-            }
-        );
+        if left.is_zero() {
+            common::dump_agent_logs();
+            anyhow::bail!(
+                "60s 内未攒齐/未恢复 fec 帧 0（有效片 {present}，datagram 共 {total_pkts} 个，fid 分布 {:?}）",
+                {
+                    let mut v: Vec<_> = fid_hist.iter().collect();
+                    v.sort_by_key(|(k, _)| **k);
+                    v.into_iter().take(12).collect::<Vec<_>>()
+                }
+            );
+        }
         let pkt = match tokio::time::timeout(left, c.conn.read_datagram()).await {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => return Err(e).context("读取 datagram 失败"),

@@ -129,9 +129,42 @@ impl FfmpegEncoder {
             enc_height: enc_h,
             crop,
         };
-        // 探测：以目标分辨率实际编码 1 帧测试图案。
-        let probe = probe_frame(enc_w, enc_h);
-        enc.encode_raw(&probe, false)?;
+        // 探测：以目标分辨率实际编码测试图案，且限时内必须拿到真实 AU。
+        // 仅「创建成功 + 编码不报错」不够：无 GPU 合成环境（CI 虚拟机、
+        // RDP 会话、部分云主机）上 MFT 能打开但 drain 的 receive_packet
+        // 永久阻塞——编码线程卡死、用户永远黑屏且无任何错误。
+        // 探测超时/无 AU 按候选不可用处理，create_best 420 路径据此回退
+        // OpenH264。超时路径会遗弃卡死的编码器线程（每候选至多一次的
+        // 进程内泄漏，换取功能在 VM/RDP 机器上可用）。
+        const PROBE_FRAMES: u8 = 5;
+        const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut e = enc;
+            let probe = probe_frame(e.enc_width, e.enc_height);
+            let _ = probe_tx.send((|| -> Result<Self> {
+                for n in 0..PROBE_FRAMES {
+                    if e.encode_raw(&probe, n == 0)?.is_some() {
+                        return Ok(e);
+                    }
+                }
+                anyhow::bail!("{} 探测 {} 帧未产出任何 AU", e.codec_name, PROBE_FRAMES)
+            })());
+        });
+        enc = match probe_rx.recv_timeout(PROBE_TIMEOUT) {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => bail!("{} 探测失败: {e:#}", codec_name),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                bail!(
+                    "{} 探测 {}s 内未产出 AU（编码器打开但无输出，疑似无 GPU 合成环境），按不可用处理",
+                    codec_name,
+                    PROBE_TIMEOUT.as_secs()
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("{} 探测线程异常退出", codec_name)
+            }
+        };
         // 丢弃探测所在的编码器流水线（MFT 类编码器带 delay，探测帧的 AU
         // 会在后续 encode 调用中混入正式流），重建后首帧即干净 IDR。
         enc.rebuild(enc_w, enc_h)?;
