@@ -365,13 +365,15 @@ impl FecRsRx {
         }
         let mut out = vec![0u8; r.orig_len as usize];
         for (block_id, b) in &r.blocks {
-            for i in 0..b.k as usize {
+            for (i, shard) in b.shards.iter().take(b.k as usize).enumerate() {
                 let global = *block_id as usize * r.max_k + i;
                 let base = global * r.shard_size;
-                if base >= out.len() || b.shards[i].is_none() {
+                let Some(sh) = shard.as_ref() else {
+                    continue;
+                };
+                if base >= out.len() {
                     continue;
                 }
-                let sh = b.shards[i].as_ref().unwrap();
                 let n = (base + r.shard_size).min(out.len()) - base;
                 out[base..base + n].copy_from_slice(&sh[..n]);
             }
