@@ -15,6 +15,10 @@ pub mod events;
 #[cfg(windows)]
 pub mod group;
 #[cfg(windows)]
+pub mod ledger;
+#[cfg(windows)]
+pub mod quiet;
+#[cfg(windows)]
 pub mod resize;
 
 /// 矩形（物理像素）。字段与 `rd-capture-win::Rect` 相同：`x`/`y` 为左上角坐标，

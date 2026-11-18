@@ -456,6 +456,67 @@ static WATCHER: OnceLock<EventWatcher> = OnceLock::new();
 /// watcher 初始化锁（避免并发首次 ListWindows 重复启动监听线程）。
 static WATCHER_INIT: Mutex<()> = Mutex::new(());
 
+/// E2 自扰静默窗（privacy::set 登记，桥接线程消费）。
+fn event_quiet() -> &'static Mutex<rd_window_win::quiet::QuietWindow> {
+    static Q: OnceLock<Mutex<rd_window_win::quiet::QuietWindow>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(rd_window_win::quiet::QuietWindow::default()))
+}
+
+/// 单调秒基准（静默窗与节流共用；进程内一致即可）。
+pub(crate) fn mono_now() -> f64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
+}
+
+/// E2：登记一次本进程引起的窗口扰动（隐私屏开关、未来虚拟屏换档）。
+pub(crate) fn note_self_disturbance() {
+    let mut q = event_quiet().lock().unwrap_or_else(lock_poisoned);
+    q.note(mono_now());
+    tracing::debug!("窗口事件自扰静默 5s");
+}
+
+/// E2：是否本进程自造的窗口（隐私屏黑窗）——其事件永不推给控制端。
+fn is_self_induced(ev: &WindowEventRaw) -> bool {
+    let hwnd = match ev {
+        WindowEventRaw::Created(h)
+        | WindowEventRaw::Destroyed(h)
+        | WindowEventRaw::Moved(h)
+        | WindowEventRaw::Title(h)
+        | WindowEventRaw::MenuStart(h)
+        | WindowEventRaw::MenuEnd(h) => *h,
+    };
+    is_shield_window(hwnd)
+}
+
+/// 类名是否隐私屏黑窗（与 privacy::SHIELD_CLASS 同源；黑窗类名稳定）。
+fn is_shield_window(hwnd: isize) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+        let h = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+        let mut buf = [0u16; 64];
+        let n = unsafe { GetClassNameW(h, &mut buf) };
+        if n <= 0 {
+            return false;
+        }
+        HSTRING::from_wide(&buf[..n as usize]) == rd_agent_privacy_class()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        false
+    }
+}
+
+/// 隐私屏黑窗类名（与 privacy.rs 的 w!("rd-privacy-shield") 同源）。
+fn rd_agent_privacy_class() -> &'static str {
+    "rd-privacy-shield"
+}
+
 fn ensure_watcher() -> Option<&'static EventWatcher> {
     if let Some(w) = WATCHER.get() {
         return Some(w);
@@ -474,12 +535,20 @@ fn ensure_watcher() -> Option<&'static EventWatcher> {
     let (tx, _) = broadcast::channel(BROADCAST_CAP);
     // 监听线程(crossbeam) → 各连接订阅任务(broadcast) 的桥接线程；
     // JoinHandle 直接 detach（单例生命周期 = 进程生命周期）。
+    // E2 自扰静默：本进程黑窗（rd-privacy-shield）的事件永不外推；
+    // 自扰静默期（privacy::set 登记）内的窗口事件暂缓推送（控制端稍后
+    // 刷新列表即可，静默期取 max 防风暴无限拖延——snug ConnectionTracker
+    // 语义）。
     let bridge_tx = tx.clone();
     let bridged = std::thread::Builder::new()
         .name("rd-winevent-bridge".into())
         .spawn(move || {
             while let Ok(ev) = rx.recv() {
-                // 无订阅者时 send 返回 Err，事件直接丢弃（列表仍可拉取）
+                let now = mono_now();
+                let quiet = event_quiet().lock().unwrap_or_else(lock_poisoned);
+                if is_self_induced(&ev) || quiet.is_quiet(now) {
+                    continue;
+                }
                 let _ = bridge_tx.send(ev);
             }
         });
@@ -641,7 +710,17 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
     // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
     let saved = match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
-        Ok(p) => Some(p),
+        Ok(p) => {
+            // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
+            if let Err(err) = rd_window_win::ledger::OperationLedger::open(
+                &crate::default_config_dir(),
+            )
+            .record(wid as isize, "remote-session", &p)
+            {
+                tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
+            }
+            Some(p)
+        }
         Err(err) => {
             tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
             None
@@ -1094,6 +1173,9 @@ fn restore_saved(hwnd: isize, saved: &Option<SavedPlacement>) {
     if let Some(p) = saved {
         if let Err(err) = restore_placement(hwnd, p) {
             tracing::warn!(hwnd = format!("{hwnd:#x}"), "恢复窗口布局失败: {err:#}");
+        } else {
+            // E1 记账还原：复原成功销账（崩溃兜底账本）
+            rd_window_win::ledger::OperationLedger::open(&crate::default_config_dir()).clear(hwnd);
         }
     }
 }

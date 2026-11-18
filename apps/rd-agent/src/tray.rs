@@ -66,6 +66,7 @@ mod imp {
     const ID_OPEN_LOGS: &str = "open-logs";
     const ID_REPORT_CRASH: &str = "report-crash";
     const ID_LICENSE: &str = "license";
+    const ID_CHECK_UPDATE: &str = "check-update";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
     const DEVICE_ID_PREFIX: &str = "device-";
@@ -117,6 +118,7 @@ mod imp {
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
         let report_crash_item = MenuItem::with_id(ID_REPORT_CRASH, "上报崩溃…", true, None);
         let license_item = MenuItem::with_id(ID_LICENSE, "授权…", true, None);
+        let check_update_item = MenuItem::with_id(ID_CHECK_UPDATE, "检查更新", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
         let menu = Menu::new();
@@ -129,6 +131,7 @@ mod imp {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&check_update_item);
         let _ = menu.append(&open_logs);
         let _ = menu.append(&report_crash_item);
         let _ = menu.append(&license_item);
@@ -268,6 +271,7 @@ mod imp {
             }
             ID_OPEN_LOGS => open_log_dir(),
             ID_REPORT_CRASH => report_crash(),
+            ID_CHECK_UPDATE => check_update(runtime),
             ID_LICENSE => {
                 // 授权状态弹窗（T-029）：当前档位 + 升级操作说明（大白话）
                 show_pair_code_dialog(license_dialog_text(&state));
@@ -554,6 +558,98 @@ mod imp {
         match std::process::Command::new("explorer").arg(&dir).spawn() {
             Ok(_) => tracing::info!(dir = %dir.display(), "打开日志目录"),
             Err(err) => tracing::warn!(dir = %dir.display(), "打开日志目录失败: {err}"),
+        }
+    }
+
+    /// 托盘「检查更新」（改造项 A）：独立线程跑完整链——检查（验签 + 版本
+    /// 比较）→ 确认 → 下载拼装对调 → 确认重启 → 断开会话 → spawn 新 exe
+    /// → exit(0)。MessageBox 模态自身线程，托盘消息循环不受阻；下载期间
+    /// 远程会话由 tokio runtime 线程照常服务。
+    fn check_update(runtime: &rd_agent::AgentRuntime) {
+        let rt = runtime.rt.clone();
+        let state = std::sync::Arc::clone(&runtime.state);
+        std::thread::spawn(move || {
+            let settings = rd_agent::updater::UpdateSettings::from_env();
+            if !settings.enabled() {
+                show_pair_code_dialog(
+                    "更新功能未启用（未配置更新渠道 RD_UPDATE_ENDPOINT）。".to_string(),
+                );
+                return;
+            }
+            let http = match reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(600))
+                .build()
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    show_pair_code_dialog(format!("HTTP 客户端初始化失败: {err}"));
+                    return;
+                }
+            };
+
+            // 1) 检查（验签 + 防回滚版本比较）
+            let current = env!("CARGO_PKG_VERSION");
+            let manifest = match rt.block_on(rd_agent::updater::check(&http, &settings, current)) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    show_pair_code_dialog("已是最新版本。".to_string());
+                    return;
+                }
+                Err(err) => {
+                    show_pair_code_dialog(format!("检查更新失败:\n{err:#}"));
+                    return;
+                }
+            };
+
+            // 2) 用户确认（更新会短暂断开会话）
+            if !confirm_box(&format!(
+                "发现新版本 {}（当前 {}），现在更新吗？\n\n更新会下载新版本并替换文件，\
+                 完成后自动重启（会话会短暂断开）。",
+                manifest.version, current
+            )) {
+                return;
+            }
+
+            // 3) 下载 → 拼装 → 对调
+            let plan = match rt.block_on(rd_agent::updater::apply(&http, &settings, &manifest)) {
+                Ok(p) => p,
+                Err(err) => {
+                    show_pair_code_dialog(format!("更新失败（已放弃替换）:\n{err:#}"));
+                    return;
+                }
+            };
+
+            // 4) 重启确认 + 执行：断会话 → spawn 新 exe → exit(0)
+            if !confirm_box(&format!(
+                "文件已替换完成，现在重启进入 {} 吗？（点「否」则下次启动生效）",
+                manifest.version
+            )) {
+                tracing::info!(version = %manifest.version, "用户选择稍后重启，下次启动生效");
+                return;
+            }
+            state.disconnect_all_peers(&rt, "升级重启");
+            if let Err(err) = rd_agent::updater::restart_now(&plan) {
+                show_pair_code_dialog(format!(
+                    "新版启动失败（文件已替换，手动重启 rd-agent 即可用新版本）:\n{err:#}"
+                ));
+                return;
+            }
+            std::process::exit(0);
+        });
+    }
+
+    /// 是/否确认框。
+    fn confirm_box(text: &str) -> bool {
+        let text = HSTRING::from(text);
+        let title = HSTRING::from("rd 远程控制 · 检查更新");
+        unsafe {
+            MessageBoxW(
+                None,
+                &text,
+                &title,
+                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+            ) == IDYES
         }
     }
 

@@ -22,6 +22,7 @@ pub mod punch_candidates;
 pub mod server;
 pub mod session;
 pub mod term_handler;
+pub mod updater;
 pub mod window_session;
 
 use std::collections::HashMap;
@@ -55,8 +56,15 @@ impl AgentRuntime {
     /// 托盘「退出/断开所有」与 app 关闭路径共用；内部经启动时句柄 block_on，
     /// 因此可从任意线程调用。
     pub fn disconnect_all(&self, reason: &str) {
+        self.state.disconnect_all_peers(&self.rt, reason);
+    }
+}
+
+impl AgentState {
+    /// [`AgentRuntime::disconnect_all`] 的实际实现：托盘更新线程只持有
+    /// `Arc<AgentState>` + runtime 句柄（升级重启场景），同样需要优雅断开。
+    pub fn disconnect_all_peers(&self, rt: &tokio::runtime::Handle, reason: &str) {
         let peers: Vec<_> = self
-            .state
             .peers
             .lock()
             .expect("peers 锁中毒")
@@ -66,7 +74,7 @@ impl AgentRuntime {
         for peer in peers {
             let ctl = Arc::clone(&peer.ctl);
             let reason = reason.to_string();
-            self.rt.block_on(async move {
+            rt.block_on(async move {
                 let mut ctl = ctl.lock().await;
                 let _ = ctl
                     .send(&rd_proto::v0::Envelope {
@@ -81,7 +89,7 @@ impl AgentRuntime {
                     .await;
             });
         }
-        for peer in self.state.peers.lock().expect("peers 锁中毒").values() {
+        for peer in self.peers.lock().expect("peers 锁中毒").values() {
             peer.cancel.cancel();
         }
     }
@@ -100,7 +108,9 @@ pub fn start(
     // 操作审计（合规留痕）：与 tracing 日志同目录，audit.jsonl
     audit::init(&config_dir.join("logs"));
     // 隐私屏黑罩线程（T-028 F9）：进程内一次，常驻待命
-    privacy::init();
+    privacy::init(config_dir);
+    // E3 重启回看恢复：上次运行时隐私屏开着 → 重新遮蔽（保护跨重启）
+    privacy::recover_state(config_dir);
 
     let identity = rd_security::load_or_create_identity(config_dir, "rd-agent")
         .context("加载/生成本机身份失败")?;
@@ -149,7 +159,7 @@ pub fn start(
 
     let listen_addrs = server::resolve_listen_addrs(&state.config, cli_listen)?;
     let (servers, direct_socks): (Vec<_>, Vec<_>) =
-        server::bind_servers(&listen_addrs, &state.identity)?
+        server::bind_servers_with_retry(&listen_addrs, &state.identity)?
             .into_iter()
             .unzip();
     let bound: Vec<SocketAddr> = servers.iter().map(|s| s.local_addr()).collect();

@@ -29,11 +29,37 @@ jobs:
       - name: Package agent
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1
+      - name: Pack agent update bundle（改造项 A：切块 + 清单 + 签名）
+        shell: pwsh
+        env:
+          # ed25519 seed hex（rd-pack-cli keygen 生成；T-039 配 GitHub secret）。
+          # 未配置时 pack/update.json 照常产出、跳过签名——Agent 端公钥占位
+          # 本来就 fail-closed 不消费，发布流水线不因密钥未就绪而阻塞。
+          RD_UPDATE_SIGN_KEY: ${{ secrets.RD_UPDATE_SIGN_KEY }}
+        run: |
+          $zip = Get-ChildItem dist -Filter "rd-agent-*-win64.zip" | Select-Object -First 1
+          if (-not $zip) { Write-Error "dist 下没有 agent zip"; exit 1 }
+          # 版本从 zip 文件名取（rd-agent-<版本>-win64.zip），与 package-agent.ps1 同源
+          $version = $zip.Name -replace '^rd-agent-', '' -replace '-win64\.zip$', ''
+          $keyArgs = @()
+          if ($env:RD_UPDATE_SIGN_KEY) {
+            $keyFile = "$env:RUNNER_TEMP\rd-sign-key.hex"
+            Set-Content -Path $keyFile -Value $env:RD_UPDATE_SIGN_KEY -NoNewline
+            $keyArgs = @("--sign-key", "@$keyFile")
+          } else {
+            Write-Host "RD_UPDATE_SIGN_KEY 未配置：跳过 update.json 签名（T-039 前的占位行为）"
+          }
+          cargo run -q -p rd-update-pack --features mirror --bin rd-pack-cli -- pack `
+            --zip $zip.FullName --version $version --out-dir dist @keyArgs
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: rd-agent-win64
-          path: dist/rd-agent-*-win64.zip
+          path: |
+            dist/rd-agent-*-win64.zip
+            dist/rd-agent-*-win64.pack
+            dist/update.json
+            dist/update.json.sig
 
   controller-windows:
     runs-on: windows-latest
@@ -142,3 +168,31 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  mirror-cos:
+    # 改造项 B：国内渠道补传（COS+CDN）。publish 产物齐全后才跑；内容寻址
+    # 幂等（同 sha256 跳过、不同拒绝），可中断重跑；latest 指针防回滚。
+    # 未配置 COS 密钥（T-039 前）时步骤自查空变量即跳过，流水线不受阻。
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Mirror to COS（内容寻址幂等补传）
+        shell: pwsh
+        env:
+          COS_CONFIG_JSON: ${{ secrets.COS_CONFIG_JSON }}
+          COS_KEYS_JSON: ${{ secrets.COS_KEYS_JSON }}
+        run: |
+          if (-not $env:COS_CONFIG_JSON -or -not $env:COS_KEYS_JSON) {
+            Write-Host "COS_CONFIG_JSON / COS_KEYS_JSON 未配置：跳过国内渠道补传（T-039 前的占位行为）"
+            exit 0
+          }
+          $cfgFile = "$env:RUNNER_TEMP\rd-cos-config.json"
+          $keyFile = "$env:RUNNER_TEMP\rd-cos-keys.json"
+          Set-Content -Path $cfgFile -Value $env:COS_CONFIG_JSON -NoNewline
+          Set-Content -Path $keyFile -Value $env:COS_KEYS_JSON -NoNewline
+          # 密钥只经临时文件传 CLI（@引用），不进命令行参数（进程列表可见）
+          cargo run -q -p rd-update-pack --features mirror --bin rd-pack-cli -- mirror `
+            --tag "${{ github.ref_name }}" `
+            --cos "@$cfgFile" --cos-keys "@$keyFile"
