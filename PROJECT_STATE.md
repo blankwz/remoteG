@@ -1,8 +1,9 @@
 # PROJECT_STATE
 
-- 更新：2026-11-07（**T-043 EasyTier 组网接入完成**：switchboard 编排器模块 sb.easytier.mesh（process 绑定）+ rd 双端托管与转发候选接线，双 workspace 测试/clippy/前端全绿；V0.3 批次 1（T-036/T-038/T-040/T-042/T-041）此前已全部完成；批次 2（T-039/T-041 收款）等外部资源）
+- 更新：2026-11-19（**snug 改造计划全项落地**：改造项 A 缺块增量自更新 + B 国内渠道发布 + C 手势翻译 crate + D 虚拟屏预研 + E 窗口还原/静默/恢复/探针四小项，T-044~T-048；全量门禁复跑与分批提交见 RUN_LOG 同日行）
 
 ## 当前状态
+- **snug 改造（2026-11-19）**：依 `13_handoff/snug-借鉴与改造计划.md` 五项全落地。**A（P0）**：新 crate `rd-update-pack`（FastCDC 切块 + pack 格式**有意不去重** + ed25519 验签 + 防回滚）+ Agent `updater.rs`（check fail-closed→apply 缺块 Range 下载→拼装→.old 对调→重启计划）+ `RD_UPDATE_MODE=full|chunked` 灰度 + 托盘「检查更新」+ release.yml 打包接线；**B（P0）**：COS 镜像（mirror.rs 官方固定向量锚定签名 + 内容寻址可中断重跑 + latest 指针防回滚）+ `scripts/rd-mirror.ps1` 补传 + CI mirror-cos job，密钥只经 secret/@文件；**C（P1）**：零依赖 crate `rd-touch-translate`（四相手势状态机 + 滚动惯性，13 测试）+ proto 预留 ContinuousScroll tag 51（不接线上）；**D（P1）**：虚拟屏预研报告 + T-044 卡（virtual-display-rs 首选，改造面 11 项两期）；**E（P2）**：窗口记账还原（ledger.rs 崩溃后放回窗口）+ 自扰静默（quiet.rs 黑窗事件风暴过滤）+ 隐私屏状态跨重启恢复 + 挂死窗口 1s 探针（会话不被拖死）。手测口径：`09_test/手测清单.md` §5（本地 HTTP 模拟发布端全链路等八节）。遗留：验签公钥占位/COS 真渠道验证归 T-039；e2e 前台注入类待桌面空闲。
 - **T-043（2026-11-07）**：**EasyTier 组网接入**——第四种跨网路径（mesh 内置打洞/中继/多协议回退）。批次1 编排器：新 crate `switchboard/sdk/rust/switchboard-mod-easytier`（sb.easytier.mesh，process 绑定不引 easytier 依赖：TOML 配置生成 + easytier-core 进程托管含 Windows Job Object 孤儿防护 + cli route 发现 camel/snake 双兼容）+ SourceKind::Mesh + registry/spec07/原理卡/USAGE 注册；批次2 agent：agent.toml `[easytier]` 节（no_tun 默认 true 免管理员）+ 托管降级 + 虚拟 IP 进直连候选（relay 竞速零改动）；批次3 controller：融合版自动继承托管 + 转发候选接线（DeviceConn::connect extra_addrs，默认路径不变）+ 设置页 EasyTier 节。验证：rd workspace 297+52+67 测试、switchboard 60 测试、前端 198 测试、双 workspace clippy 零 error；e2e t04/t05/t09 失败为前台注入类测试环境性失败（memory 警告），待空闲复跑。待外部：easytier 二进制真机双机实测（09_test/手测清单.md 1.16）。详见 RUN_LOG 2026-11-07 行。
 - **T-042/T-041（2026-11-07）**：**官网下载页**（website/ 单页静态站+隐私政策+Pages 工作流，OWNER 占位待仓库远端）与**发码台账**（license-ledger.ps1 半自动发码+发码SOP.md 含撤销泄露预案；正式种子实发一单验收通过）。批次 1 至此代码全部落地，详见 RUN_LOG 2026-11-07 行。
 
