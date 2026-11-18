@@ -1,0 +1,7 @@
+[package]
+name = "rd-touch-translate"
+version.workspace = true
+edition.workspace = true
+
+# 纯逻辑零依赖：状态机与滚动物理不需要第三方 crate（时间由调用方注入）。
+[dependencies]
