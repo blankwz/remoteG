@@ -1,6 +1,6 @@
 # PROJECT_STATE
 
-- 更新：2026-11-19（**snug 改造计划全项落地**：改造项 A 缺块增量自更新 + B 国内渠道发布 + C 手势翻译 crate + D 虚拟屏预研 + E 窗口还原/静默/恢复/探针四小项，T-044~T-048；全量门禁复跑与分批提交见 RUN_LOG 同日行）
+- 更新：2026-11-19（**snug 改造计划全项落地 + 操作入口审计**：改造项 A 缺块增量自更新（含自动检查）+ B 国内渠道发布 + C 手势翻译 crate + D 虚拟屏预研 + E 窗口还原/静默/恢复/探针四小项，T-044~T-048；全量门禁复绿，提交 5c4182a/a06b577/a76b45a/05052a4）
 
 ## 当前状态
 - **snug 改造（2026-11-19）**：依 `13_handoff/snug-借鉴与改造计划.md` 五项全落地。**A（P0）**：新 crate `rd-update-pack`（FastCDC 切块 + pack 格式**有意不去重** + ed25519 验签 + 防回滚）+ Agent `updater.rs`（check fail-closed→apply 缺块 Range 下载→拼装→.old 对调→重启计划）+ `RD_UPDATE_MODE=full|chunked` 灰度 + 托盘「检查更新」+ release.yml 打包接线；**B（P0）**：COS 镜像（mirror.rs 官方固定向量锚定签名 + 内容寻址可中断重跑 + latest 指针防回滚）+ `scripts/rd-mirror.ps1` 补传 + CI mirror-cos job，密钥只经 secret/@文件；**C（P1）**：零依赖 crate `rd-touch-translate`（四相手势状态机 + 滚动惯性，13 测试）+ proto 预留 ContinuousScroll tag 51（不接线上）；**D（P1）**：虚拟屏预研报告 + T-044 卡（virtual-display-rs 首选，改造面 11 项两期）；**E（P2）**：窗口记账还原（ledger.rs 崩溃后放回窗口）+ 自扰静默（quiet.rs 黑窗事件风暴过滤）+ 隐私屏状态跨重启恢复 + 挂死窗口 1s 探针（会话不被拖死）。手测口径：`09_test/手测清单.md` §5（本地 HTTP 模拟发布端全链路等八节）。遗留：验签公钥占位/COS 真渠道验证归 T-039；e2e 前台注入类待桌面空闲。
