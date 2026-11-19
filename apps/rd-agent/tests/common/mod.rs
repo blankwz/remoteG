@@ -35,6 +35,9 @@ pub const CLIENT_W: u32 = 800;
 pub const CLIENT_H: u32 = 600;
 /// 控制流收包默认超时。
 pub const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// OpenWindow 应答超时（首个 WGC 会话的 FramePool 初始化实测可达 4.5s：真机
+/// 虚拟屏建屏后首次捕获，5s 全局限时太紧，t15 实测超时即由此触发）。
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // 共享环境
@@ -448,8 +451,17 @@ impl Client {
 
     /// 发请求并等待同 req_id 的应答（期间 req_id=0 的推送打印后丢弃）。
     pub async fn call(&mut self, msg: envelope::Msg) -> Result<Envelope> {
+        self.call_timeout(msg, RECV_TIMEOUT).await
+    }
+
+    /// 同 [`call`]，但用调用方给的单次超时（首个 WGC 会话初始化等的长等待）。
+    pub async fn call_timeout(
+        &mut self,
+        msg: envelope::Msg,
+        timeout: Duration,
+    ) -> Result<Envelope> {
         let id = self.send(msg).await?;
-        self.recv_until(RECV_TIMEOUT, |env: &Envelope| env.req_id == id)
+        self.recv_until(timeout, |env: &Envelope| env.req_id == id)
             .await
     }
 
@@ -638,13 +650,16 @@ pub struct WindowStreams {
 /// 打开窗口并收齐 ack 与两条数据流（Agent 侧先视频后瓦片建立，顺序一致）。
 pub async fn open_window(c: &mut Client, hwnd: u64) -> Result<WindowStreams> {
     let reply = c
-        .call(envelope::Msg::OpenWindow(rd_proto::v0::OpenWindow {
-            window_id: hwnd,
-            fit: rd_proto::v0::FitMode::Fit as i32,
-            max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
-            max_fps: 30,
-            view_only: false,
-        }))
+        .call_timeout(
+            envelope::Msg::OpenWindow(rd_proto::v0::OpenWindow {
+                window_id: hwnd,
+                fit: rd_proto::v0::FitMode::Fit as i32,
+                max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
+                max_fps: 30,
+                view_only: false,
+            }),
+            OPEN_TIMEOUT,
+        )
         .await?;
     let ack = match reply.msg {
         Some(envelope::Msg::OpenWindowAck(ack)) => ack,
@@ -677,13 +692,16 @@ pub async fn open_window_fec(
     hwnd: u64,
 ) -> Result<(rd_proto::v0::OpenWindowAck, DataRx)> {
     let reply = c
-        .call(envelope::Msg::OpenWindow(rd_proto::v0::OpenWindow {
-            window_id: hwnd,
-            fit: rd_proto::v0::FitMode::Fit as i32,
-            max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
-            max_fps: 30,
-            view_only: false,
-        }))
+        .call_timeout(
+            envelope::Msg::OpenWindow(rd_proto::v0::OpenWindow {
+                window_id: hwnd,
+                fit: rd_proto::v0::FitMode::Fit as i32,
+                max_level: rd_proto::v0::RenderLevel::L0Pixel as i32,
+                max_fps: 30,
+                view_only: false,
+            }),
+            OPEN_TIMEOUT,
+        )
         .await?;
     let ack = match reply.msg {
         Some(envelope::Msg::OpenWindowAck(ack)) => ack,

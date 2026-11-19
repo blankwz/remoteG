@@ -26,7 +26,7 @@ pub use backend::{DisplayInfo, VDisplayBackend};
 pub use fit::{PhoneSpec, ScreenFit};
 pub use protocol::{Mode, Monitor};
 #[cfg(windows)]
-pub use windows_backend::WindowsBackend;
+pub use windows_backend::{displays, WindowsBackend};
 
 /// 驱动登记里标识「这块屏是 rd 的」的名字（建屏前据它清理残留）。
 pub const MONITOR_NAME: &str = "rd-vdisplay";

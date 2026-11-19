@@ -13,6 +13,7 @@
 
 mod cases_recovery;
 mod cases_update;
+mod cases_vdisplay;
 #[path = "../common/mod.rs"]
 mod common;
 

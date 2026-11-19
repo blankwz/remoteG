@@ -418,15 +418,21 @@ fn spawn_plain_agent(cfg: &Path) -> Result<(common::AgentProc, std::net::SocketA
 
 /// 最小 OpenWindow（低帧率减轻无人消费视频流的负担）；ack/Error 都可——
 /// 记账发生在 open_window 的 save_placement（早于任何捕获失败路径）。
+///
+/// 独立 Agent 进程的**首个** WGC FramePool 冷启动实测约 4.0s，与 t15 同源，
+/// 故用 [`common::OPEN_TIMEOUT`] 而非 5s 默认值。
 async fn open_window_quiet(c: &mut Client, hwnd: u64) -> Result<()> {
     let reply = c
-        .call(Msg::OpenWindow(OpenWindow {
-            window_id: hwnd,
-            fit: FitMode::Fit as i32,
-            max_level: RenderLevel::L0Pixel as i32,
-            max_fps: 1,
-            view_only: false,
-        }))
+        .call_timeout(
+            Msg::OpenWindow(OpenWindow {
+                window_id: hwnd,
+                fit: FitMode::Fit as i32,
+                max_level: RenderLevel::L0Pixel as i32,
+                max_fps: 1,
+                view_only: false,
+            }),
+            common::OPEN_TIMEOUT,
+        )
         .await?;
     println!("[t14] OpenWindow 回包: {:?}", reply.msg);
     Ok(())

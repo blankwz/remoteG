@@ -200,6 +200,11 @@ impl VDisplayBackend for WindowsBackend {
     }
 }
 
+/// 当前桌面显示拓扑（诊断与 e2e 前后对比用；不接触驱动管道）。
+pub fn displays() -> Result<Vec<DisplayInfo>, Error> {
+    enumerate_displays()
+}
+
 /// 枚举桌面上已接入的显示器及其当前模式。
 fn enumerate_displays() -> Result<Vec<DisplayInfo>, Error> {
     let mut out = Vec::new();
