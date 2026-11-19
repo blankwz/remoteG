@@ -17,7 +17,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -55,8 +54,6 @@ pub struct Env {
 static ENV: OnceLock<Env> = OnceLock::new();
 /// 用例互斥锁（tokio Mutex：guard 需跨 await 持有整个用例周期）。
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// 本测试进程是否已完成 4 步配对（信任列表已在 Agent 侧落盘）。
-static PAIRED: AtomicBool = AtomicBool::new(false);
 
 /// 用例间互斥：共享的 testwin/Agent 同一时刻只允许一个用例操作。
 /// 即使命令行未加 `--test-threads=1` 也能保证串行语义。
@@ -79,7 +76,7 @@ fn setup_env() -> Result<Env> {
         "[e2e] agent 日志目录: {}",
         config_dir.path().join("logs").display()
     );
-    let testwin = spawn_testwin()?;
+    let testwin = spawn_testwin_proc()?;
     let testwin_pid = testwin.child.id();
     // 按子进程 PID 锁定自己的 testwin——桌面上可能有历史遗留的同名窗口。
     let hwnd = wait_testwin_window(testwin_pid).context("等待 testwin 窗口出现失败")?;
@@ -156,8 +153,8 @@ fn spawn_cleanup_watchdog(test_pid: u32, agent_pid: u32, testwin_pid: u32) {
 // 子进程管理（Drop 按 PID 结束，禁止全局强杀）
 // ---------------------------------------------------------------------------
 
-struct TestwinProc {
-    child: Child,
+pub struct TestwinProc {
+    pub child: Child,
 }
 
 impl Drop for TestwinProc {
@@ -167,8 +164,8 @@ impl Drop for TestwinProc {
     }
 }
 
-struct AgentProc {
-    child: Child,
+pub struct AgentProc {
+    pub child: Child,
 }
 
 impl Drop for AgentProc {
@@ -179,7 +176,7 @@ impl Drop for AgentProc {
 }
 
 /// `target/debug/clarity-bench(.exe)`：`CARGO_BIN_EXE` 不跨 crate，手工定位。
-fn testwin_exe() -> PathBuf {
+pub fn testwin_exe() -> PathBuf {
     let dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
@@ -208,8 +205,10 @@ fn ensure_testwin_built() -> Result<()> {
     Ok(())
 }
 
-/// 启动 `clarity-bench testwin --mode static --size 800x600`。
-fn spawn_testwin() -> Result<TestwinProc> {
+/// 启动 `clarity-bench testwin --mode static --size 800x600`（独立实例；
+/// t13/t14 等需要自己的 testwin 时不碰共享 env 的那份）。产物缺失先补建。
+pub fn spawn_testwin_proc() -> Result<TestwinProc> {
+    ensure_testwin_built()?;
     let child = Command::new(testwin_exe())
         .args([
             "testwin",
@@ -227,7 +226,7 @@ fn spawn_testwin() -> Result<TestwinProc> {
 }
 
 /// 轮询窗口列表直到 `pid` 的 testwin 出现（可捕获顶层窗口），返回 hwnd。
-fn wait_testwin_window(pid: u32) -> Result<u64> {
+pub fn wait_testwin_window(pid: u32) -> Result<u64> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let wins = rd_window_win::list_windows()?;
@@ -245,11 +244,22 @@ fn wait_testwin_window(pid: u32) -> Result<u64> {
     }
 }
 
-/// 启动 `rd-agent run`（随机端口）并从 stdout 读取实际监听地址（同 tests/auth.rs）。
+/// 启动共享环境的 `rd-agent run`（随机端口）：Pro 授权 + 标准无托盘参数。
 fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
-    // 写入 Pro 授权（T-029 免费版门控的 e2e 放行）：并行用例共享同一
-    // agent 进程，免费版「同时 1 连接」会把并行的第二条连接拒掉。顺带
-    // 覆盖 license.key 的加载路径（无效码回落免费版的行为由单测覆盖）。
+    write_pro_license(config_dir)?;
+    let (agent, addr, _rx) = spawn_agent_custom(
+        Path::new(env!("CARGO_BIN_EXE_rd-agent")),
+        config_dir,
+        &[],
+        &["--no-tray", "--listen", "127.0.0.1:0", "--print-port"],
+    )?;
+    Ok((agent, addr))
+}
+
+/// 写入 Pro 授权（T-029 免费版门控的 e2e 放行）：独立 agent 实例（t11/t12/t14）
+/// 与共享环境都需要——免费版「同时 1 连接」会把第二条连接拒掉。顺带覆盖
+/// license.key 的加载路径（无效码回落免费版的行为由单测覆盖）。
+pub fn write_pro_license(config_dir: &Path) -> Result<()> {
     let license_code = rd_security::license::sign_payload(
         &serde_json::json!({
             "plan": "pro", "name": "e2e", "devices_max": 99,
@@ -260,31 +270,43 @@ fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
     )?;
     std::fs::write(config_dir.join("license.key"), license_code)
         .context("写入 e2e 授权文件失败")?;
+    Ok(())
+}
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rd-agent"))
-        .args([
-            "run",
-            "--no-tray",
-            "--listen",
-            "127.0.0.1:0",
-            "--print-port",
-            "--config-dir",
-        ])
+/// 通用 Agent 子进程启动（独立实例用）：指定启动 exe、自定义环境变量与附加
+/// 参数；固定携带 `run --config-dir <dir> --test-pair-code`，stdout 管道解析
+/// `RD_LISTEN=`。返回值第三个是后续 `RD_LISTEN=` 行的通道（t11 消费更新对调
+/// 重启后**新进程**打印的监听地址——新进程继承同一 stdout 管道；不需要时
+/// 忽略即可，读线程始终排空管道不会堵住 Agent 的 stdout 写）。调用方负责
+/// 进程的最终清理（Drop 兜底 kill + [`kill_agent_by_config_dir`] 覆盖「父
+/// 进程 spawn 的孙进程」——更新对调重启产生的新进程不在 Child 里）。
+pub fn spawn_agent_custom(
+    exe: &Path,
+    config_dir: &Path,
+    extra_env: &[(&str, &str)],
+    extra_args: &[&str],
+) -> Result<(AgentProc, SocketAddr, std::sync::mpsc::Receiver<String>)> {
+    let mut cmd = Command::new(exe);
+    cmd.args(["run", "--config-dir"])
         .arg(config_dir)
         .args(["--test-pair-code", TEST_PAIR_CODE])
+        .args(extra_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env(
             "RUST_LOG",
             std::env::var("RD_AGENT_RUST_LOG").unwrap_or_else(|_| "info".into()),
-        )
-        .spawn()
-        .context("启动 rd-agent 子进程失败")?;
+        );
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().context("启动 rd-agent 子进程失败")?;
     let stdout = child.stdout.take().context("未捕获 rd-agent stdout")?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     // 逐行读直到机器可读的 RD_LISTEN= 前缀(stdout 现在同时输出彩色日志行);
     // 找到后**继续消费**管道,防止 Agent 的 stdout 写因读端关闭而失败。
+    // 注意：更新对调重启的新进程继承同一管道，本线程继续读其 RD_LISTEN=。
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(stdout);
@@ -309,7 +331,36 @@ fn spawn_agent(config_dir: &Path) -> Result<(AgentProc, SocketAddr)> {
     let addr: SocketAddr = line
         .parse()
         .with_context(|| format!("无法解析 rd-agent 打印的监听地址行: {line:?}"))?;
-    Ok((AgentProc { child }, addr))
+    Ok((AgentProc { child }, addr, rx))
+}
+
+/// 按命令行中的 config-dir 路径结束 rd-agent 进程（PowerShell 过滤）：
+/// 只杀本用例 spawn 的实例（tempdir 路径唯一），禁止按进程名全局强杀。
+/// 覆盖 t11 更新对调重启产生的新进程——它由 Agent 子进程 spawn，不是测试
+/// 进程的 Child，Drop 管不到。
+pub fn kill_agent_by_config_dir(dir: &Path) {
+    let pattern = format!("*{}*", dir.display());
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"Name='rd-agent.exe'\" | \
+         Where-Object {{ $_.CommandLine -like '{pattern}' }} | \
+         ForEach-Object {{ taskkill /PID $_.ProcessId /F 2>$null }}"
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Drop 兜底：按 config-dir 杀掉本用例 spawn 的全部 rd-agent（含更新对调
+/// 重启产生的孙进程）。用例 bail 传播时同样触发。
+pub struct AgentCleanup(pub PathBuf);
+
+impl Drop for AgentCleanup {
+    fn drop(&mut self) {
+        kill_agent_by_config_dir(&self.0);
+    }
 }
 
 /// 本测试进程的固定控制端身份（配对一次后所有用例复用信任）。
@@ -333,35 +384,40 @@ pub struct Client {
 }
 
 impl Client {
-    /// 建立连接并完成 Hello 握手；首次调用附带 4 步配对。
+    /// 建立到共享环境 Agent 的连接并完成 Hello 握手（含首次配对）。
     pub async fn connect() -> Result<Self> {
-        Self::connect_with(false).await
+        Self::connect_to(env().addr).await
     }
 
     /// 同 [`connect`]，但可指定 fec-shards 视频路径协商位（T-027/T-028 t09）。
     pub async fn connect_with(media_fec: bool) -> Result<Self> {
-        let env = env();
-        let conn = connect(env.addr, client_identity(), None)
+        Self::connect_to_inner(env().addr, media_fec).await
+    }
+
+    /// 连接指定地址（独立 agent 实例用，t11/t12/t14）。首次调用附带 4 步配对。
+    pub async fn connect_to(addr: SocketAddr) -> Result<Self> {
+        Self::connect_to_inner(addr, false).await
+    }
+
+    /// 连接实现：自适应配对——发 Hello 后按 Agent 回包判定：未信任回
+    /// `Error{code:1}`（走 4 步配对），已信任直接 `HelloAck`。不依赖进程级
+    /// 「已配对」static：t11/t12/t14 各自 spawn 的 agent 有独立信任列表，
+    /// 每个实例的首次连接都可能需要配对。
+    async fn connect_to_inner(addr: SocketAddr, media_fec: bool) -> Result<Self> {
+        let conn = connect(addr, client_identity(), None)
             .await
             .context("连接 Agent 失败")?;
         let agent_fp = conn.peer_fingerprint();
         let (mut tx, mut rx) = conn.open_control().await.context("打开控制流失败")?;
         tx.send(&hello_envelope(media_fec)).await?;
-        let hello_ack = if PAIRED.swap(true, Ordering::SeqCst) {
-            expect_hello_ack(&mut rx).await?
-        } else {
-            // 未信任:Agent 对 Hello 回 Error{1}(req_id 沿用),消费后再发起配对
-            let rejected = tokio::time::timeout(RECV_TIMEOUT, rx.recv())
-                .await
-                .context("等待配对前置 Error{1} 超时")?
-                .context("控制流已关闭")?
-                .context("解码信封失败")?;
-            assert!(
-                matches!(rejected.msg, Some(envelope::Msg::Error(ref e)) if e.code == 1),
-                "配对前期望 Error{{code:1}},实际 {rejected:?}"
-            );
-            pair_over(&mut tx, &mut rx, agent_fp).await?;
-            expect_hello_ack(&mut rx).await?
+        let hello_ack = match expect_hello_ack_or_reject(&mut rx).await? {
+            Some(ack) => ack,
+            None => {
+                // 未信任:Agent 对 Hello 回 Error{1}(req_id 沿用),已在
+                // expect 内消费,这里发起 4 步配对后等 HelloAck
+                pair_over(&mut tx, &mut rx, agent_fp).await?;
+                expect_hello_ack(&mut rx).await?
+            }
         };
         Ok(Self {
             conn,
@@ -490,6 +546,22 @@ async fn recv_pair_result(rx: &mut ControlRx) -> Result<PairResult> {
         if let Some(envelope::Msg::PairRes(res)) = env.msg {
             return Ok(res);
         }
+    }
+}
+
+/// 收一条控制流消息，判定信任状态：`HelloAck` = 已信任（返回 Some），
+/// `Error{code:1}` = 未信任（已消费，返回 None，调用方走配对）。
+async fn expect_hello_ack_or_reject(rx: &mut ControlRx) -> Result<Option<HelloAck>> {
+    let msg = tokio::time::timeout(RECV_TIMEOUT, rx.recv())
+        .await
+        .context("等待 Hello 回包超时")?
+        .context("控制流已关闭")?
+        .context("解码信封失败")?;
+    match msg.msg {
+        Some(envelope::Msg::HelloAck(a)) => Ok(Some(a)),
+        Some(envelope::Msg::Error(ref e)) if e.code == 1 => Ok(None),
+        Some(other) => bail!("连接前期望 HelloAck 或 Error{{1}}，实际 {other:?}"),
+        None => bail!("收到空信封"),
     }
 }
 
@@ -634,7 +706,12 @@ pub fn dump_agent_logs() {
     let Some(env) = ENV.get() else {
         return;
     };
-    let logs_dir = env._config_dir.path().join("logs");
+    dump_logs_in(env._config_dir.path());
+}
+
+/// 指定 config-dir 下 Agent 日志尾部打印（独立 agent 实例的失败诊断）。
+pub fn dump_logs_in(config_dir: &Path) {
+    let logs_dir = config_dir.join("logs");
     let Ok(entries) = std::fs::read_dir(&logs_dir) else {
         println!("[e2e] Agent 日志目录不可读: {}", logs_dir.display());
         return;

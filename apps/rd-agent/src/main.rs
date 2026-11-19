@@ -143,6 +143,24 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         let _ = std::io::stdout().flush();
     }
 
+    // e2e 更新链自动触发（仅 debug + windows + 显式环境变量；照 RD_TEST_CRASH
+    // 先例）：RD_UPDATE_TEST_AUTO=1 时启动后 1.5s 自动跑一次「检查更新」完整
+    // 链（silent 自动通道；两个确认框经 RD_UPDATE_TEST_CONFIRM 直通），供 t11
+    // 无托盘验证下载→对调→spawn 对调重启。release 构建无此分支。
+    #[cfg(all(windows, debug_assertions))]
+    if std::env::var("RD_UPDATE_TEST_AUTO").as_deref() == Ok("1") {
+        let handle = rt.handle().clone();
+        let state = std::sync::Arc::clone(&runtime.state);
+        std::thread::Builder::new()
+            .name("rd-update-e2e".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                tracing::info!("[update-e2e] 自动触发更新链（RD_UPDATE_TEST_AUTO）");
+                tray::update_flow(&handle, &state, true);
+            })
+            .context("启动更新 e2e 触发线程失败")?;
+    }
+
     park_main_thread(&runtime, args.no_tray)?;
     rt.shutdown_timeout(Duration::from_secs(2));
     Ok(())

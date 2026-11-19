@@ -265,6 +265,14 @@ unsafe extern "system" fn def_wndproc(
 pub fn notify_user(peer_name: &str) {
     #[cfg(windows)]
     {
+        // e2e 直通（仅 debug + 显式环境变量；照 main.rs RD_TEST_CRASH 先例）：
+        // 不弹知情框只落日志——t12 无人值守跑隐私屏恢复，弹窗会挂在无人
+        // 点击的桌面上、真机用户也会被全屏黑罩前的弹窗打扰。release 无此分支。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_TEST_SILENT_NOTIFY").as_deref() == Ok("1") {
+            tracing::info!("[e2e] 隐私屏知情提示直通(不弹): 设备 {peer_name}");
+            return;
+        }
         let text = format!(
             "设备「{peer_name}」已开启隐私保护：\n本机屏幕即将黑屏，远程操作继续。\n\n(点「确定」继续；结束远控后屏幕自动恢复)"
         );

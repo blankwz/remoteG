@@ -20,6 +20,11 @@ pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
     imp::run(runtime)
 }
 
+/// 更新完整链（Windows）：托盘菜单与 main.rs 的 e2e 自动触发钩子共用
+/// （RD_UPDATE_TEST_AUTO，t11 无托盘验证 spawn 对调重启）。
+#[cfg(windows)]
+pub(crate) use imp::update_flow;
+
 #[cfg(not(windows))]
 pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
     let _ = runtime;
@@ -435,11 +440,33 @@ mod imp {
         }
     }
 
+    /// 弹窗文本的日志安全截断：直通路径把文本写入日志，截断防长文刷屏；
+    /// 配对码等不该进日志的内容（生产路径本就不落日志）不因直通泄漏全文。
+    #[cfg(debug_assertions)]
+    fn truncate_for_log(text: &str) -> String {
+        const LIMIT: usize = 160;
+        let mut s: String = text.chars().take(LIMIT).collect();
+        if text.chars().count() > LIMIT {
+            s.push('…');
+        }
+        s
+    }
+
     /// 弹出配对对话框(独立线程,模态于该线程不阻塞托盘循环)。
     ///
     /// 文案 = 本机可达地址(多条逐行)+ 配对码;指纹不再展示(D-013:MITM
     /// 防护由 SPAKE2 MAC 绑定指纹保证,与是否肉眼比对无关,概念最小化)。
     fn show_pair_code_dialog(text: String) {
+        // e2e 直通（仅 debug + 显式环境变量）：不弹窗、文本截断落日志——
+        // 无人值守环境弹窗会挂在无人点击的桌面上（t11 更新失败路径的诊断出口）。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_UPDATE_TEST_CONFIRM").as_deref() == Ok("1") {
+            tracing::info!(
+                "[update-e2e] dialog 直通(不弹): {}",
+                truncate_for_log(&text)
+            );
+            return;
+        }
         if CODE_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -599,7 +626,11 @@ mod imp {
     /// 与「文件已替换」两处必须弹——前者是自动检查的存在意义，后者动了
     /// 用户磁盘文件必须告知。MessageBox 模态自身线程，托盘消息循环不受阻；
     /// 下载期间远程会话由 tokio runtime 线程照常服务。
-    fn update_flow(rt: &tokio::runtime::Handle, state: &Arc<AgentState>, silent: bool) {
+    ///
+    /// 更新完整链：main.rs 的 e2e 自动触发钩子（RD_UPDATE_TEST_AUTO，t11）
+    /// 与托盘菜单共用本函数（经模块顶层 re-export 为 tray::update_flow；
+    /// imp 模块私有，此可见性不会外泄出 crate）。
+    pub(crate) fn update_flow(rt: &tokio::runtime::Handle, state: &Arc<AgentState>, silent: bool) {
         if UPDATE_BUSY.swap(true, Ordering::SeqCst) {
             return; // 已有更新链在跑（手动连点 / 自动撞手动）
         }
@@ -703,6 +734,16 @@ mod imp {
 
     /// 是/否确认框。
     fn confirm_box(text: &str) -> bool {
+        // e2e 直通（仅 debug + 显式环境变量；照 main.rs RD_TEST_CRASH 先例）：
+        // 自动确认「是」，文本截断落日志供 t11 断言更新链路径。release 无此分支。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_UPDATE_TEST_CONFIRM").as_deref() == Ok("1") {
+            tracing::info!(
+                "[update-e2e] confirm_box 直通(=是): {}",
+                truncate_for_log(text)
+            );
+            return true;
+        }
         let text = HSTRING::from(text);
         let title = HSTRING::from("rd 远程控制 · 检查更新");
         unsafe {
