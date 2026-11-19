@@ -4651,6 +4651,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rd-vdisplay"
+version = "0.3.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "rd-window-win"
 version = "0.3.1"
 dependencies = [
