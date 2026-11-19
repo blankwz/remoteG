@@ -29,7 +29,12 @@ import { WindowGroupView } from "../session/WindowGroupView";
 import type { RecordControl, SessionControl } from "../session/WindowGroupView";
 import { WindowSidebar } from "../session/WindowSidebar";
 import { TermView } from "../term/TermView";
-import { closeWindow } from "../api/session";
+import {
+  closeWindow,
+  setDisplayWidth,
+  subscribeVdisplayState,
+} from "../api/session";
+import type { VdisplayStateDto } from "../api/session";
 import { disconnectDevice } from "../api/devices";
 import { FloatingToolbar, QUALITY_LABEL, type Quality } from "../session/FloatingToolbar";
 import { FilesPanel } from "../session/FilesPanel";
@@ -117,6 +122,10 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [recordingSince, setRecordingSince] = useState<number | null>(null);
   /** 快捷键速查浮层（? 呼出）。 */
   const [helpOpen, setHelpOpen] = useState(false);
+  // 虚拟屏状态（T-044 一期控制端接线）：最新一条 VirtualDisplayState——
+  // CREATED/SWITCHED 持尺寸（更多菜单显示档位组），FAILED 持原因（菜单
+  // 显示失败行），DESTROYED 回 null（组消失）
+  const [vdisplay, setVdisplay] = useState<VdisplayStateDto | null>(null);
   const helpOpenRef = useRef(false);
   useEffect(() => {
     helpOpenRef.current = helpOpen;
@@ -341,6 +350,33 @@ export function Session({ deviceId }: { deviceId: string }) {
     })();
     return () => {
       alive = false;
+    };
+  }, [deviceId]);
+
+  // 虚拟屏状态订阅（T-044 一期控制端接线）：接收建屏/换档/撤屏/失败通知，
+  // 驱动更多菜单的档位组与失败行（FAILED 置原因行、CREATED/SWITCHED 置
+  // 尺寸、DESTROYED 清空）。设备未连接时订阅命令直接 reject，.catch 吞掉；
+  // 连接断开时 Rust 侧任务自动退出。
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    void subscribeVdisplayState(deviceId, (s) => {
+      if (!alive) {
+        return;
+      }
+      setVdisplay(s);
+    })
+      .then((fn) => {
+        if (alive) {
+          unlisten = fn;
+        } else {
+          fn();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      unlisten?.();
     };
   }, [deviceId]);
 
@@ -827,6 +863,13 @@ export function Session({ deviceId }: { deviceId: string }) {
         >
           <FloatingToolbar
             windowActions={activeWindow !== null}
+            vdisplay={vdisplay !== null && vdisplay.kind !== 3 ? { width: vdisplay.width, height: vdisplay.height } : null}
+            vdisplayError={vdisplay !== null && vdisplay.kind === 3 ? vdisplay.message : null}
+            onDisplayWidth={(w) => {
+              void setDisplayWidth(deviceId, w).catch((e) =>
+                showToast(`虚拟屏换档没有成功：${errText(e)}`, true),
+              );
+            }}
             onScreenshot={() => void doScreenshot()}
             onFullscreen={() => void doFullscreen()}
             onLockScreen={() => void doLockScreen()}

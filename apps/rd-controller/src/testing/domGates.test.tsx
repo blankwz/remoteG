@@ -211,6 +211,9 @@ function ToolbarHarness() {
       onShortcuts={() => undefined}
       onSendText={() => undefined}
       onSendCombo={() => undefined}
+      vdisplay={null}
+      vdisplayError={null}
+      onDisplayWidth={() => undefined}
     />
   );
 }

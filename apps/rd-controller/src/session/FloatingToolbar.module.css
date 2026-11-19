@@ -171,3 +171,46 @@
     transform: scale(1) translateY(0);
   }
 }
+
+/* ── 虚拟屏档位组（T-044 一期控制端接线）── */
+.vdisplayRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 6px;
+  border-top: 1px solid var(--rd-border, rgba(255, 255, 255, 0.08));
+  margin-top: 6px;
+}
+.vdisplayLabel {
+  font-size: var(--rd-fs-small, 12px);
+  color: var(--rd-text-faint);
+  white-space: nowrap;
+}
+.vdisplayBtns {
+  display: inline-flex;
+  gap: 4px;
+}
+.vdisplayBtn {
+  border: 1px solid var(--rd-border, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: var(--rd-text);
+  font-size: var(--rd-fs-micro, 11px);
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.vdisplayBtn:hover { background: var(--rd-hover); }
+.vdisplayBtnOn {
+  background: var(--rd-accent, #3b82f6);
+  border-color: transparent;
+  color: #fff;
+}
+.vdisplayErr {
+  margin: 4px 14px 8px;
+  padding: 6px 10px;
+  font-size: var(--rd-fs-micro, 11px);
+  color: var(--rd-danger, #ef4444);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 6px;
+}

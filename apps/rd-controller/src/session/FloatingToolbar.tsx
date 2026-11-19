@@ -84,6 +84,13 @@ interface Props {
   /** 只看态（R12：设备级注入通道一并停发——锁屏/安全键/常用语/虚拟按键
    * 置灰，与「键鼠停发」的承诺对齐）。 */
   inputLocked: boolean;
+  /** 虚拟屏状态（T-044 一期控制端接线）：null = 当前无虚拟屏（未启用/
+   * 已撤屏/失败）。存在时更多菜单显示档位组。 */
+  vdisplay: { width: number; height: number } | null;
+  /** 最近一次虚拟屏失败原因（显示在更多菜单；非 null 时档位组隐藏）。 */
+  vdisplayError: string | null;
+  /** 虚拟屏换档 request（非法档位 Agent 回 Error{60}，页面层 catch 提示）。 */
+  onDisplayWidth: (w: number) => void;
 }
 
 export function FloatingToolbar(props: Props) {
@@ -375,6 +382,36 @@ function MorePanel(
           </span>
         </button>
       ))}
+      {/*
+       * 虚拟屏档位组（T-044 一期控制端接线）：仅当虚拟屏存在时显示——
+       * 换档即时生效（Agent 换档不掉线，关键帧自然跟上新尺寸）；失败时
+       * 显示失败原因行。放更多菜单 = 低频操作定位。
+       */}
+      {props.vdisplay !== null && (
+        <div className={styles.vdisplayRow} role="group" aria-label="虚拟屏宽度">
+          <span className={styles.vdisplayLabel}>
+            虚拟屏 {props.vdisplay.width}×{props.vdisplay.height}
+          </span>
+          <span className={styles.vdisplayBtns}>
+            {[540, 720, 900, 1080].map((w) => (
+              <button
+                key={w}
+                type="button"
+                className={`${styles.vdisplayBtn} ${props.vdisplay?.width === w ? styles.vdisplayBtnOn : ""}`}
+                onClick={() => props.onDisplayWidth(w)}
+              >
+                {w}
+                {"px"}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+      {props.vdisplayError !== null && (
+        <p className={styles.vdisplayErr} role="alert">
+          虚拟屏：{props.vdisplayError}
+        </p>
+      )}
       <button type="button" className={styles.closeRow} onClick={props.onClose}>
         <IconClose size={13} /> 关闭菜单
       </button>

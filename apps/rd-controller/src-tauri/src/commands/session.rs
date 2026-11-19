@@ -17,7 +17,8 @@
 
 use rd_proto::v0::{
     CloseWindow, Envelope, FitMode, OpenWindow, OpenWindowAck, QualityPreset, RenderLevel,
-    SetPrivacy, SetQuality, StatsReport, ViewportInfo, WindowInfo, envelope, window_event,
+    SetDisplayWidth, SetPrivacy, SetQuality, StatsReport, ViewportInfo, WindowInfo, envelope,
+    window_event,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -508,6 +509,83 @@ pub async fn subscribe_session_state(
 pub struct SessionStateDto {
     pub kind: i32,
     pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
+// 虚拟屏（T-044 一期控制端接线）：状态订阅 + 换档 RPC
+// ---------------------------------------------------------------------------
+
+/// Agent 虚拟屏状态通知的 DTO（`VirtualDisplayState`，05_api §9.1）。
+#[derive(Debug, Clone, Serialize)]
+pub struct VdisplayStateDto {
+    /// 0 CREATED / 1 SWITCHED / 2 DESTROYED / 3 FAILED
+    pub kind: i32,
+    pub width: u32,
+    pub height: u32,
+    pub message: String,
+}
+
+/// 订阅 Agent 虚拟屏状态（建屏/换档/撤屏/失败）。断开或前端 Channel 关闭
+/// 时任务自动退出（与 `subscribe_session_state` 同款模式）。
+#[tauri::command]
+pub async fn subscribe_vdisplay_state(
+    device_id: String,
+    on_state: Channel<VdisplayStateDto>,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let conn = get_conn(&state, &device_id)?;
+    let mut rx = conn.subscribe();
+    let mut closed = conn.closed();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = closed.changed() => break,
+                ev = rx.recv() => match ev {
+                    Ok(env) => {
+                        let Some(envelope::Msg::VdisplayState(s)) = &env.msg else {
+                            continue;
+                        };
+                        let dto = VdisplayStateDto {
+                            kind: s.kind,
+                            width: s.width,
+                            height: s.height,
+                            message: s.message.clone(),
+                        };
+                        if on_state.send(dto).is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "虚拟屏状态订阅积压溢出，跳过 {skipped} 条");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 虚拟屏换档（`SetDisplayWidth` RPC，tag 53）：成功回 echo（同 req_id），
+/// 尺寸另由 `VirtualDisplayState{SWITCHED}` 通知；非法档位/未建屏回
+/// `Error{60}`。档位范围 540~1080 步进 10（05_api §9.1）。
+#[tauri::command]
+pub async fn set_display_width(
+    device_id: String,
+    width: u32,
+    state: State<'_, ConnManager>,
+) -> Result<(), String> {
+    let conn = get_conn(&state, &device_id)?;
+    let reply = conn
+        .rpc(envelope::Msg::SetDisplayWidth(SetDisplayWidth { width }))
+        .await
+        .map_err(|e| format!("发送换档请求失败：{e:#}"))?;
+    match reply.msg {
+        // echo：RPC 回执到位；新尺寸等 SWITCHED 通知（订阅路径）
+        Some(envelope::Msg::SetDisplayWidth(_)) => Ok(()),
+        Some(envelope::Msg::Error(e)) => Err(agent_error(&e)),
+        _ => Err("换档响应异常（非 echo/错误）".to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -159,6 +159,37 @@ export function subscribeSessionState(
   return call("subscribe_session_state", { deviceId, onState: ch });
 }
 
+/** Agent 虚拟屏状态（T-044 一期；05_api §9.1）。 */
+export interface VdisplayStateDto {
+  /** 0 CREATED / 1 SWITCHED / 2 DESTROYED / 3 FAILED */
+  kind: number;
+  width: number;
+  height: number;
+  message: string;
+}
+
+/** 订阅虚拟屏状态（建屏/换档/撤屏/失败，断开时任务自动退出）。 */
+export function subscribeVdisplayState(
+  deviceId: string,
+  onState: (s: VdisplayStateDto) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(() => undefined);
+  }
+  const ch = new Channel<VdisplayStateDto>();
+  ch.onmessage = onState;
+  return call("subscribe_vdisplay_state", { deviceId, onState: ch });
+}
+
+/**
+ * 虚拟屏换档（SetDisplayWidth RPC）：成功仅代表回执到位，新尺寸以
+ * SWITCHED 通知为准；非法档位/未建屏 reject（Error{60}，message 大白话）。
+ * 档位 540~1080 步进 10。
+ */
+export function setDisplayWidth(deviceId: string, width: number): Promise<void> {
+  return call("set_display_width", { deviceId, width });
+}
+
 /** 发送文本到被控端剪贴板（v0.1）。 */
 export function sendClipboard(deviceId: string, text: string): Promise<void> {
   return call("send_clipboard", { deviceId, text });

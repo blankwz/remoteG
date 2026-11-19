@@ -36,6 +36,9 @@ function mountToolbar(overrides: Partial<Parameters<typeof FloatingToolbar>[0]> 
     onShortcuts,
     onSendText: () => undefined,
     onSendCombo: () => undefined,
+    vdisplay: null,
+    vdisplayError: null,
+    onDisplayWidth: () => undefined,
     ...overrides,
   };
   render(<FloatingToolbar {...props} />);
@@ -119,5 +122,40 @@ describe("终端标签下画质下拉收口（R17）", () => {
     mountToolbar({ windowActions: false });
     expect(screen.queryByRole("combobox")).toBeNull(); // 画质 select 随 windowActions 收口
     expect(screen.getByText("锁屏")).toBeTruthy();      // 设备级操作仍保留
+  });
+});
+
+describe("虚拟屏档位组（T-044 一期控制端接线）", () => {
+  it("虚拟屏存在时更多菜单显示档位组，当前档高亮", () => {
+    mountToolbar({ vdisplay: { width: 540, height: 950 } });
+    openMoreMenu();
+    expect(screen.getByLabelText("虚拟屏宽度")).toBeTruthy();
+    expect(screen.getByText("虚拟屏 540×950")).toBeTruthy();
+    // 四档齐备，当前档（540）高亮
+    for (const w of [540, 720, 900, 1080]) {
+      expect(screen.getByText(`${w}px`)).toBeTruthy();
+    }
+    const current = screen.getByText("540px").closest("button");
+    expect(current?.className).toContain("vdisplayBtnOn");
+  });
+
+  it("点击档位触发 onDisplayWidth 且不收起菜单外其他行为", () => {
+    const onDisplayWidth = vi.fn();
+    mountToolbar({ vdisplay: { width: 540, height: 950 }, onDisplayWidth });
+    openMoreMenu();
+    fireEvent.click(screen.getByText("720px"));
+    expect(onDisplayWidth).toHaveBeenCalledWith(720);
+  });
+
+  it("无虚拟屏（null）不渲染档位组；FAILED 时显示失败行", () => {
+    mountToolbar({ vdisplay: null, vdisplayError: null });
+    openMoreMenu();
+    expect(screen.queryByLabelText("虚拟屏宽度")).toBeNull();
+
+    cleanup();
+    mountToolbar({ vdisplay: null, vdisplayError: "被控端未启用虚拟屏" });
+    openMoreMenu();
+    expect(screen.getByRole("alert").textContent).toContain("被控端未启用虚拟屏");
+    expect(screen.queryByLabelText("虚拟屏宽度")).toBeNull();
   });
 });

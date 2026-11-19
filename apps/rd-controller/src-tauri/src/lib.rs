@@ -182,6 +182,8 @@ pub fn run() {
             commands::input::mouse_button,
             commands::input::mouse_wheel,
             commands::touch::touch_gesture,
+            commands::session::subscribe_vdisplay_state,
+            commands::session::set_display_width,
             commands::input::key_event,
             commands::input::text_input,
             // T-023：终端
