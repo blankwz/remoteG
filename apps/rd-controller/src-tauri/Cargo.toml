@@ -26,6 +26,7 @@ rd-agent = { path = "../../../apps/rd-agent" }
 rd-crash = { path = "../../../crates/rd-crash" }
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }
+rd-touch-translate = { path = "../../../crates/rd-touch-translate" }
 rd-transport = { path = "../../../crates/rd-transport" }
 rd-switch = { path = "../../../crates/rd-switch" }
 switchboard-core = { path = "../../../switchboard/sdk/rust/switchboard-core" }

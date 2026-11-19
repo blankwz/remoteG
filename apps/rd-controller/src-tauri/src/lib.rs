@@ -181,6 +181,7 @@ pub fn run() {
             commands::input::mouse_move,
             commands::input::mouse_button,
             commands::input::mouse_wheel,
+            commands::touch::touch_gesture,
             commands::input::key_event,
             commands::input::text_input,
             // T-023：终端
