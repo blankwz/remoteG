@@ -153,7 +153,18 @@ pub async fn apply(
     s: &UpdateSettings,
     manifest: &Manifest,
 ) -> anyhow::Result<RestartPlan> {
-    let install_dir = install_dir()?;
+    apply_into(http, s, manifest, &install_dir()?).await
+}
+
+/// 同 [`apply`]，但安装目录由调用方指定——e2e 用 tempdir 重定向（t11），
+/// 生产路径 [`apply`] 固定传 [`install_dir`]。
+pub async fn apply_into(
+    http: &reqwest::Client,
+    s: &UpdateSettings,
+    manifest: &Manifest,
+    install_dir: &Path,
+) -> anyhow::Result<RestartPlan> {
+    let install_dir = install_dir.to_path_buf();
     ensure_writable(&install_dir)?;
 
     // 缺块计算：chunked 模式尝试本机旧 zip（找不到就全包下载，无特殊分支）
@@ -170,8 +181,15 @@ pub async fn apply(
         "开始下载更新包"
     );
 
-    // HTTP Range 逐段下载 → 解块核对
+    // HTTP Range 逐段下载 → 解块核对。chunked 模式下**本机 zip 里的共享块**
+    // 先行入池（t11 e2e 实测：available 只装下载段会让 assemble 缺本机已有
+    // 的块——单测只锚定了 ranges 计算，未锚定拼装链路，此缺陷此前不可见）。
     let mut available = std::collections::HashMap::new();
+    if let Some(bytes) = &local_zip {
+        if let Some(local_chunks) = manifest.chunks_in(bytes, &Chunker::with_defaults()) {
+            available.extend(local_chunks);
+        }
+    }
     for r in &ranges {
         let segment = http_get(http, &pack_url(s, manifest), Some((r.start, r.end))).await?;
         let recovered = manifest
@@ -277,6 +295,11 @@ fn pack_url(s: &UpdateSettings, manifest: &Manifest) -> String {
 }
 
 /// GET（可选 Range）：返回字节。统一 30s 连接 / 600s 总超时。
+///
+/// `range` 为包内**半开区间** `[start, end)`（同 `missing_ranges` 的
+/// `Range<u64>` 语义）；HTTP Range 头是**闭区间**（`bytes=a-b` 含 b），须
+/// 端点 -1 换算——此前直接把半开 end 当闭区间发送，标准 Range 服务器会多
+/// 回 1 字节，`Manifest::unpack` 的长度校验必然失败（t11 e2e 实测）。
 async fn http_get(
     http: &reqwest::Client,
     url: &str,
@@ -284,7 +307,8 @@ async fn http_get(
 ) -> anyhow::Result<Vec<u8>> {
     let mut req = http.get(url);
     if let Some((start, end)) = range {
-        req = req.header(reqwest::header::RANGE, format!("bytes={start}-{end}"));
+        anyhow::ensure!(end > start, "Range 区间为空: {start}..{end}");
+        req = req.header(reqwest::header::RANGE, format!("bytes={start}-{}", end - 1));
     }
     let resp = req
         .send()
@@ -327,16 +351,35 @@ pub fn swap_files(install: &Path, staged: &Path) -> anyhow::Result<()> {
 }
 
 /// 启动时清理上次更新留下的 `*.old`。返回清理的文件数（日志用）。
+///
+/// 对调重启的常态竞速：旧进程 exit(0) 与新进程启动清理并行——旧进程的
+/// **映像锁**（rename 后 .old 仍是其运行映像）会让首轮删除失败。短重试
+/// 覆盖旧进程退出的毫秒级窗口；仍失败（非重启场景的外部锁定）留给下次
+/// 启动，无 .old 时零等待。
 pub fn cleanup_old_files(install: &Path) -> usize {
-    let mut cleaned = 0usize;
     let Ok(entries) = std::fs::read_dir(install) else {
         return 0;
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.ends_with(".old") && std::fs::remove_file(entry.path()).is_ok() {
-            cleaned += 1;
+    let mut pending: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".old")))
+        .map(|e| e.path())
+        .collect();
+    let mut cleaned = 0usize;
+    for attempt in 0..5 {
+        pending.retain(|p| {
+            if std::fs::remove_file(p).is_ok() {
+                cleaned += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if pending.is_empty() {
+            break;
+        }
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
     cleaned

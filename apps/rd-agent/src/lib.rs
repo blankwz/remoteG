@@ -111,6 +111,9 @@ pub fn start(
     privacy::init(config_dir);
     // E3 重启回看恢复：上次运行时隐私屏开着 → 重新遮蔽（保护跨重启）
     privacy::recover_state(config_dir);
+    // E1 窗口账本目录登记：记账/销账（window_session）与 main.rs 的启动恢复
+    // 同一目录——`--config-dir` 覆盖时若各自取目录账本永远对不上
+    window_session::set_ledger_dir(config_dir);
 
     let identity = rd_security::load_or_create_identity(config_dir, "rd-agent")
         .context("加载/生成本机身份失败")?;

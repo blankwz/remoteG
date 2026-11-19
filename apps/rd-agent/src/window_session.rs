@@ -47,6 +47,7 @@
 //! 未收到 ack 前对同一窗口发后续窗口消息，此为 M1 的既定约束。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -149,6 +150,25 @@ static CHILD_MEMBERS: OnceLock<Mutex<HashMap<usize, HashSet<u64>>>> = OnceLock::
 /// "停旧建新"并发——仅按 window_id 移除会把新注册的管线误杀（管线消失
 /// 黑屏），收尾必须比对世代号，见 [`unregister_pipe`]。
 static PIPE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 窗口账本目录（E1）：记账/销账与 main.rs 的启动恢复必须同一目录——
+/// `--config-dir` 覆盖启动时若两条路径各自取目录（此前记账/销账写
+/// `default_config_dir`，启动恢复读覆盖目录），账本永远对不上。lib `start`
+/// 时登记运行时目录；未登记（单测直调）回退默认目录。
+static LEDGER_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 登记窗口账本目录（lib `start` 调用；进程内一次）。
+pub(crate) fn set_ledger_dir(dir: &std::path::Path) {
+    let _ = LEDGER_DIR.set(dir.to_path_buf());
+}
+
+/// 窗口账本目录：运行时目录（已登记）或默认目录（单测兜底）。
+fn ledger_dir() -> PathBuf {
+    LEDGER_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(crate::default_config_dir)
+}
 
 fn pipes() -> &'static Mutex<HashMap<u64, PipeHandle>> {
     PIPES.get_or_init(Default::default)
@@ -709,23 +729,22 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     // 布局快照先于还原（D-013 包2）：还原后 showCmd 已变为普通态，
     // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
     // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
-    let saved = match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
-        Ok(p) => {
-            // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
-            if let Err(err) = rd_window_win::ledger::OperationLedger::open(
-                &crate::default_config_dir(),
-            )
-            .record(wid as isize, "remote-session", &p)
-            {
-                tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
+    let saved =
+        match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
+            Ok(p) => {
+                // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
+                if let Err(err) = rd_window_win::ledger::OperationLedger::open(&ledger_dir())
+                    .record(wid as isize, "remote-session", &p)
+                {
+                    tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
+                }
+                Some(p)
             }
-            Some(p)
-        }
-        Err(err) => {
-            tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
-            None
-        }
-    };
+            Err(err) => {
+                tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
+                None
+            }
+        };
     // 最小化自动还原（用户实测反馈 1：任何状态必须可控制）。最小化有两条
     // 呈现路径，都必须还原后再捕获：
     // - 在可捕获列表中（如资源管理器，最小化后客户区仍非 0）→ `minimized`
@@ -1175,7 +1194,7 @@ fn restore_saved(hwnd: isize, saved: &Option<SavedPlacement>) {
             tracing::warn!(hwnd = format!("{hwnd:#x}"), "恢复窗口布局失败: {err:#}");
         } else {
             // E1 记账还原：复原成功销账（崩溃兜底账本）
-            rd_window_win::ledger::OperationLedger::open(&crate::default_config_dir()).clear(hwnd);
+            rd_window_win::ledger::OperationLedger::open(&ledger_dir()).clear(hwnd);
         }
     }
 }
