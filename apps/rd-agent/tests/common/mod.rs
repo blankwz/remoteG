@@ -297,7 +297,11 @@ pub fn spawn_agent_custom(
         .env(
             "RUST_LOG",
             std::env::var("RD_AGENT_RUST_LOG").unwrap_or_else(|_| "info".into()),
-        );
+        )
+        // 虚拟屏（一期）默认关：e2e 跑在开发机上，驱动可能已装——若默认建屏，
+        // 被测窗口会被摆到虚拟屏上（t05/t06 注入真实鼠标的坐标会全错）。
+        // 专门的虚拟屏用例经 extra_env 显式 RD_VDISPLAY=1 打开（循环在后，覆盖本值）。
+        .env("RD_VDISPLAY", "0");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

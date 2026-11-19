@@ -32,6 +32,7 @@ switchboard-core = { path = "../../switchboard/sdk/rust/switchboard-core" }
 switchboard-mod-fec-rs = { path = "../../switchboard/sdk/rust/switchboard-mod-fec-rs" }
 switchboard-mod-easytier = { path = "../../switchboard/sdk/rust/switchboard-mod-easytier" }
 rd-window-win = { path = "../../crates/rd-window-win" }
+rd-vdisplay = { path = "../../crates/rd-vdisplay" }
 rd-update-pack = { path = "../../crates/rd-update-pack" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

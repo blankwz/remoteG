@@ -47,6 +47,35 @@ pub struct Config {
     /// 失败仅降级告警,不影响直连/中继路径。
     #[serde(default)]
     pub easytier: EasyTierAgentConfig,
+    /// 虚拟屏(一期):会话期间按用户手机规格建一块虚拟显示器,远控窗口落到
+    /// 这块屏上,物理屏保持可用。驱动未装时建屏失败只上报,不影响远控会话。
+    #[serde(default)]
+    pub virtual_display: VirtualDisplayConfig,
+}
+
+/// agent.toml `[virtual_display]` 节(全部字段有默认,旧配置文件零改动兼容)。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VirtualDisplayConfig {
+    /// 总开关(默认开;环境变量 `RD_VDISPLAY=0` 可强制关,测试/排障用)。
+    pub enabled: bool,
+    /// 用户手机物理像素宽(0 = 用标准机 1320×2868)。
+    pub phone_width: u32,
+    /// 用户手机物理像素高。
+    pub phone_height: u32,
+    /// 手机逻辑宽度(点);0 = 未知,档位数学按 400 估。
+    pub points: u32,
+}
+
+impl Default for VirtualDisplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            phone_width: 0,
+            phone_height: 0,
+            points: 0,
+        }
+    }
 }
 
 /// agent.toml `[easytier]` 节(全部字段有默认,旧配置文件零改动兼容)。
@@ -108,6 +137,7 @@ impl Default for Config {
             start_kbps: 8000,
             relay_addr: None,
             easytier: EasyTierAgentConfig::default(),
+            virtual_display: VirtualDisplayConfig::default(),
         }
     }
 }
@@ -145,6 +175,32 @@ mod tests {
         assert!(!cfg.easytier.enabled);
         assert_eq!(cfg.easytier.network_name, "");
         assert!(cfg.easytier.no_tun); // 默认 no_tun（免管理员）
+    }
+
+    /// 旧版 agent.toml（无 [virtual_display] 节）零改动兼容：默认开启。
+    #[test]
+    fn 旧配置_无virtual_display节_默认开启() {
+        let cfg: Config = toml::from_str("listen_port = 21118\n").unwrap();
+        assert!(cfg.virtual_display.enabled);
+        assert_eq!(cfg.virtual_display.phone_width, 0);
+        assert_eq!(cfg.virtual_display.points, 0);
+    }
+
+    /// [virtual_display] 节完整解析。
+    #[test]
+    fn virtual_display节_完整解析() {
+        let raw = r#"
+[virtual_display]
+enabled = false
+phone_width = 1080
+phone_height = 2400
+points = 400
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(!cfg.virtual_display.enabled);
+        assert_eq!(cfg.virtual_display.phone_width, 1080);
+        assert_eq!(cfg.virtual_display.phone_height, 2400);
+        assert_eq!(cfg.virtual_display.points, 400);
     }
 
     /// [easytier] 节完整解析。

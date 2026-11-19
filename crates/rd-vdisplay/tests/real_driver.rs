@@ -32,7 +32,11 @@ fn real_driver_roundtrip() {
 
     let t1 = Instant::now();
     vd.set_width(1080).expect("换档到最宽");
-    println!("换档 {:.0}ms: 1080×{}", t1.elapsed().as_secs_f64() * 1000.0, vd.size().1);
+    println!(
+        "换档 {:.0}ms: 1080×{}",
+        t1.elapsed().as_secs_f64() * 1000.0,
+        vd.size().1
+    );
     assert_eq!(vd.size(), fit.size(1080));
     // 换档不换屏：设备名（编号）不变
     assert!(vd.device_name().is_some());

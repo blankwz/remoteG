@@ -199,6 +199,9 @@ pub struct SessionCtx {
     pub user_quality: Arc<AtomicU32>,
     /// T-028 F9：本会话是否开启了隐私屏（断开时据此自动解除黑罩）。
     pub privacy_on: AtomicBool,
+    /// 虚拟屏（一期）：本会话是否已计入虚拟屏引用（断开时据此对称减引用，
+    /// 最后一个会话断开才撤屏）。
+    pub vdisplay_on: AtomicBool,
     /// 窗口子会话(T-016 实现;桩阶段无读者)。
     #[allow(dead_code)]
     pub windows: WindowSessions,
@@ -341,6 +344,7 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
         media_fec,
         user_quality: Arc::new(AtomicU32::new(0)),
         privacy_on: AtomicBool::new(false),
+        vdisplay_on: AtomicBool::new(false),
         windows: WindowSessions,
         terms: TermAttachments,
         files: crate::file_handler::FileState::default(),
@@ -361,6 +365,9 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     }
 
     spawn_datagram_loop(&ctx);
+    // 虚拟屏（一期）：会话进入已鉴权状态后异步建屏/复用（失败不影响会话，
+    // 结果经 VirtualDisplayState 通知；撤屏在断开清理链末尾）
+    crate::vdisplay::spawn_start(&ctx);
 
     tracing::info!(peer = peer_fp.short_hex(), name = %ctx.peer_name, "会话进入已鉴权状态");
     // 审计（合规留痕）：会话开始。media_fec 单列，画质档位变化另有事件。
@@ -376,6 +383,9 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     // --- 断开清理(任务卡步骤 5)---
     crate::power::release();
     window_session::on_disconnect(&ctx);
+    // 虚拟屏撤屏必须在窗口布局还原之后：撤屏引发桌面拓扑变化，系统会把
+    // 跨屏窗口重排；先还原布局（上面一步），再让虚拟屏消失
+    crate::vdisplay::stop(&ctx).await;
     input_handler::on_disconnect(&ctx);
     term_handler::on_disconnect(&ctx);
     crate::file_handler::on_disconnect(&ctx).await;
@@ -611,6 +621,11 @@ async fn dispatch_loop(ctx: &Arc<SessionCtx>, rx: &mut ControlRx) -> anyhow::Res
             envelope::Msg::SetQuality(m) => handle_soft(
                 &ctx.peer_name,
                 window_session::set_quality(ctx, env.req_id, m).await,
+            ),
+            // 虚拟屏换档（一期）：请求-应答（echo），失败回 Error{60}
+            envelope::Msg::SetDisplayWidth(m) => handle_soft(
+                &ctx.peer_name,
+                crate::vdisplay::set_width(ctx, env.req_id, m).await,
             ),
             // 隐私屏（T-028 F9，Pro）：机器级黑罩；断开自动解除
             envelope::Msg::SetPrivacy(m) => {
