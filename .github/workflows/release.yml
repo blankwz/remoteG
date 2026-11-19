@@ -30,7 +30,9 @@ jobs:
           Move-Item $dir.FullName "$env:GITHUB_WORKSPACE\ffmpeg-btbn"
       - name: Package agent
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1
+        # -AllowDevCert：当前随包驱动是开发自签证书（正式证书归 T-039，
+        # 就位后移除此开关并替换 driver/vdisplay 证书三件）
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1 -AllowDevCert
       - name: Pack agent update bundle（改造项 A：切块 + 清单 + 签名）
         shell: pwsh
         env:

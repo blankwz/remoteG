@@ -84,6 +84,20 @@ fn fit_of(cfg: &VirtualDisplayConfig) -> ScreenFit {
 /// 同步部分只做计数与标志(保证 [`stop`] 无论多早到达都能对称减引用)。
 pub fn spawn_start(ctx: &Arc<SessionCtx>) {
     if !enabled(&ctx.state.config.virtual_display) {
+        // 未启用也回一次 FAILED：控制端不知道被控端配置（agent.toml 在被
+        // 控端），静默会让它分不清「功能没开」与「消息丢失」——契约 §9.1
+        // 「任何 Start 必有响应」的本意（审查 MEDIUM-3 修正）
+        let ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            let _ = notify(
+                &ctx,
+                Kind::Failed,
+                0,
+                0,
+                "被控端未启用虚拟屏（agent.toml [virtual_display] enabled=false）".into(),
+            )
+            .await;
+        });
         return;
     }
     if ctx.vdisplay_on.swap(true, Ordering::SeqCst) {
@@ -111,12 +125,7 @@ async fn ensure_display(ctx: &Arc<SessionCtx>) -> anyhow::Result<()> {
     }
 
     let fit = fit_of(&ctx.state.config.virtual_display);
-    let cfg = ctx.state.config.virtual_display.clone();
-    let opened = tokio::task::spawn_blocking(move || {
-        let _ = cfg;
-        VDisplay::open(fit)
-    })
-    .await;
+    let opened = tokio::task::spawn_blocking(move || VDisplay::open(fit)).await;
 
     match opened {
         Ok(Ok(vd)) => {

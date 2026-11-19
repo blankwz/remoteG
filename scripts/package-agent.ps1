@@ -1,7 +1,14 @@
 # package-agent.ps1 - Package Windows agent portable zip (T-026)
-# Usage: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1 [-AllowDevCert]
 # Prereq: FFMPEG_DIR points to a BtbN LGPL shared build (bin\*.dll + LICENSE); Rust stable + MSVC.
-# Output: dist/rd-agent-<version>-win64.zip (exe + LGPL DLLs + LICENSE, portable)
+# Output: dist/rd-agent-<version>-win64.zip (exe + LGPL DLLs + LICENSE + driver bundle, portable)
+
+param(
+    # 显式放行开发自签驱动证书（install-driver.cmd 会把它装入用户 root +
+    # TrustedPublisher 存储；自签私钥在开发机上，正式发布绝不能静默带走。
+    # 审查 MEDIUM-2：缺省拒绝，CI/本地测试显式声明）
+    [switch]$AllowDevCert
+)
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot | Split-Path
@@ -44,6 +51,22 @@ foreach ($f in @("VirtualDisplayDriver.inf", "VirtualDisplayDriver.dll",
 $driverDst = Join-Path $stage "driver\vdisplay"
 New-Item $driverDst -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $driverSrc "*") $driverDst -Recurse
+
+# Dev-cert guard (review MEDIUM-2): the bundle's driver certificate gets
+# installed into the user's root + TrustedPublisher stores by
+# install-driver.cmd. Refuse to ship a self-signed dev cert without an
+# explicit opt-in — a formal release must re-sign with a real certificate
+# (see driver/vdisplay/NOTICE.md).
+$certPath = Join-Path $driverDst "DriverCertificateMaster.cer"
+$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath)
+if ($cert.Subject -eq $cert.Issuer) {
+    if (-not $AllowDevCert) {
+        throw ("Driver bundle uses the self-signed DEV certificate (Subject={0}). " +
+               "It must NOT ship in a release silently - re-sign with a formal " +
+               "certificate first, or pass -AllowDevCert for local/CI test builds.") -f $cert.Subject
+    }
+    Write-Warning "Shipping DEV self-signed driver certificate (-AllowDevCert): local/CI test builds only, NOT for release."
+}
 
 $zip = "$root\dist\rd-agent-$version-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }

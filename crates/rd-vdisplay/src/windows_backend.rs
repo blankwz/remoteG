@@ -5,6 +5,11 @@
 //! `\\.\pipe\virtualdisplaydriver` 即可，读侧用 `PeekNamedPipe` 轮询可用字节
 //! 再读，不需要额外线程，也不会因阻塞读留下无法回收的线程。
 //!
+//! ⚠ 勿与 v0.3.1 官方驱动混淆：那是**消息模式**（客户端须
+//! `SetNamedPipeHandleState(PIPE_READMODE_MESSAGE)`，否则命令静默不生效）。
+//! 本后端只服务 master 0.4.0-dev（byte 模式），t15 真机全绿实证；给 master
+//! 客户端「补」READMODE_MESSAGE 会报错 87。版本差异注记见实测文档 §5.3。
+//!
 //! 换档走 `ChangeDisplaySettingsExW`（实测 228ms、屏不掉线、编号不变），
 //! 而不是缩 Notify 档位表（380ms 且先掉后亮）。
 
