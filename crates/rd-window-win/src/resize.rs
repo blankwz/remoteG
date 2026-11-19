@@ -178,6 +178,48 @@ fn ensure_in_work_area(h: HWND) {
     }
 }
 
+/// 窗口外框矩形（`GetWindowRect`，屏幕物理像素，含 DWM 不可见边框）。
+pub fn window_rect(hwnd: isize) -> Result<Rect> {
+    let _dpi = DpiGuard::new();
+    let h = HWND(hwnd as *mut c_void);
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() {
+            bail!("窗口句柄无效: {hwnd:#x}");
+        }
+        let mut rc = RECT::default();
+        GetWindowRect(h, &mut rc).context("GetWindowRect 失败")?;
+        Ok(Rect {
+            x: rc.left,
+            y: rc.top,
+            w: (rc.right - rc.left).max(0) as u32,
+            h: (rc.bottom - rc.top).max(0) as u32,
+        })
+    }
+}
+
+/// 只移动窗口不改尺寸（虚拟屏居中摆放用）。
+pub fn move_window_to(hwnd: isize, x: i32, y: i32) -> Result<()> {
+    let _dpi = DpiGuard::new();
+    let h = HWND(hwnd as *mut c_void);
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() {
+            bail!("窗口句柄无效: {hwnd:#x}");
+        }
+        ensure_responsive(h)?;
+        SetWindowPos(
+            h,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .context("SetWindowPos(移动) 失败")?;
+    }
+    Ok(())
+}
+
 /// `WINDOWPLACEMENT` 快照（会话开始保存、结束恢复；含最大化状态）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedPlacement(WINDOWPLACEMENT);

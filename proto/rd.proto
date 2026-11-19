@@ -23,7 +23,9 @@ message Envelope { uint32 req_id = 1; oneof msg {
   // 翻译产出,控制端翻译成此事件;被控端 rd-input-win 未来消费)。tag 51,
   // 相位值对齐 CGEvent 常量(phase: 0 none/1 began/2 changed/4 ended;
   // momentum: 0 none/1 begin/2 continue/3 end)。
-  ContinuousScroll continuous_scroll = 51; } }
+  ContinuousScroll continuous_scroll = 51;
+  // v0.3(虚拟屏一期):用户手机比例虚拟屏的状态通知与换档(见 VirtualDisplayState)
+  VirtualDisplayState vdisplay_state = 52; SetDisplayWidth set_display_width = 53; } }
 
 // 画质档位(T-028 F5):控制端手动选择,覆盖码率自适应。
 // window_id=0 表示会话内全部窗口;成功时 Agent 原样回 SetQuality(echo),
@@ -147,3 +149,25 @@ message FileXferChunk { uint64 xfer_id = 1; uint32 seq = 2; bytes data = 3; bool
 message FileXferAck { uint64 xfer_id = 1; bool ok = 2; string message = 3; }
 // 取消(双向,req_id=0):接收方校验失败/写入失败/用户取消;发送方收到后停止分片。
 message FileCancel { uint64 xfer_id = 1; string reason = 2; }
+
+// ---------------------------------------------------------------------------
+// v0.3(虚拟屏一期):用户手机比例的虚拟显示器
+// ---------------------------------------------------------------------------
+// 会话建立后 Agent 按用户手机规格建一块虚拟屏(档位表一次登记),会话断开撤屏。
+// 建屏失败不能影响远控会话本身——失败只发 FAILED,窗口维持在物理屏上。
+
+// Agent→控制端(req_id=0):状态通知。width/height = 生效后的像素尺寸。
+// FAILED 时 message 带大白话原因(驱动未装/换档不支持/CID 占满等)。
+message VirtualDisplayState {
+  enum Kind {
+    CREATED = 0;   // 建屏成功(基准档)
+    SWITCHED = 1;  // 换档成功
+    DESTROYED = 2; // 撤屏完成(含断开时的自动撤屏)
+    FAILED = 3;    // 建屏/换档失败,会话继续
+  }
+  Kind kind = 1; uint32 width = 2; uint32 height = 3; string message = 4;
+}
+// 控制端→Agent:换到同比例的另一档(540~1080,步进 10;非法值回 Error{60})。
+// 成功回 SetDisplayWidth(echo,req_id 同请求)——用于回执;尺寸另由
+// VirtualDisplayState{SWITCHED} 通知。换档后帧管线按新尺寸重配并强制 IDR。
+message SetDisplayWidth { uint32 width = 1; }

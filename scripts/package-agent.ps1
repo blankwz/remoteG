@@ -31,6 +31,20 @@ Copy-Item "$ffmpegBin\*.dll" $stage
 $license = Get-ChildItem "$env:FFMPEG_DIR" -Filter "LICENSE*" -File | Select-Object -First 1
 if ($license) { Copy-Item $license.FullName $stage } else { Write-Warning "ffmpeg LICENSE file not found" }
 
+# Virtual display driver bundle (driver/vdisplay: driver + install-driver.cmd +
+# ownership NOTICE). Without it the packaged agent falls back to the physical
+# screen only — VirtualDisplayState{FAILED}. See driver/vdisplay/NOTICE.md.
+$driverSrc = Join-Path $root "driver\vdisplay"
+if (-not (Test-Path $driverSrc)) { throw "Driver bundle missing: $driverSrc" }
+foreach ($f in @("VirtualDisplayDriver.inf", "VirtualDisplayDriver.dll",
+                 "virtualdisplaydriver.cat", "DriverCertificateMaster.cer",
+                 "nefconw.exe", "install-driver.cmd", "NOTICE.md")) {
+  if (-not (Test-Path (Join-Path $driverSrc $f))) { throw "Driver bundle incomplete: $f missing" }
+}
+$driverDst = Join-Path $stage "driver\vdisplay"
+New-Item $driverDst -ItemType Directory -Force | Out-Null
+Copy-Item (Join-Path $driverSrc "*") $driverDst -Recurse
+
 $zip = "$root\dist\rd-agent-$version-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $stage -DestinationPath $zip

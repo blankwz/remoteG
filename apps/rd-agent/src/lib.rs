@@ -23,6 +23,7 @@ pub mod server;
 pub mod session;
 pub mod term_handler;
 pub mod updater;
+pub mod vdisplay;
 pub mod window_session;
 
 use std::collections::HashMap;

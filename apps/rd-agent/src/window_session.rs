@@ -179,6 +179,20 @@ fn pipes() -> &'static Mutex<HashMap<u64, PipeHandle>> {
 /// `HashMap::insert` 的顶替在锁内原子完成：任何注册路径（根窗口 open、
 /// 窗口组成员接入）若与既有同窗口条目相撞，注册完成即只剩一条——
 /// "同一窗口至多一条存活管线"的注册侧兜底。
+/// 置位本连接全部窗口管线的「下一帧 IDR」标志（虚拟屏换档后调用）。
+///
+/// 换档改变了被捕获窗口的像素尺寸；编码器随后按新尺寸重配，旧引用链
+/// 对新尺寸无效，首帧必须是 IDR 才能解码（与陈旧帧丢弃同一消费路径）。
+pub(crate) fn force_idr_owned(ctx: &SessionCtx) {
+    let key = ctx_key(ctx);
+    let map = pipes().lock().unwrap_or_else(lock_poisoned);
+    for h in map.values() {
+        if h.owner == key {
+            h.drop_to_idr.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 fn register_pipe(handle: PipeHandle) -> Option<PipeHandle> {
     pipes()
         .lock()
@@ -1171,6 +1185,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         fps_cap,
         members: group_snapshot,
         serial,
+        drop_to_idr,
     });
     if let Some(old) = replaced {
         tracing::warn!(
@@ -1180,6 +1195,12 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         // 不恢复布局：恢复归 open 开头的停旧路径 / CloseWindow 负责，避免与
         // 本次会话刚保存的布局叠加。
         old.shutdown(false);
+    }
+
+    // 虚拟屏（一期）：根窗口摆到虚拟屏中央（物理屏保持可用）。只在建屏后
+    // 生效，无虚拟屏时静默跳过。
+    if spec.is_root {
+        crate::vdisplay::center_window(wid).await;
     }
 
     Ok(PipeStarted {
@@ -1386,6 +1407,8 @@ async fn apply_viewport(ctx: &SessionCtx, window_id: u64, fit: i32, vp: &Viewpor
                 h = target_h,
                 "窗口客户区已适配视口"
             );
+            // 尺寸变了就重新摆到虚拟屏中央（换档后窗口仍居中）
+            crate::vdisplay::center_window(window_id).await;
         }
         Ok(FitResult::Partial { actual_w, actual_h }) => {
             tracing::warn!(
@@ -1394,6 +1417,7 @@ async fn apply_viewport(ctx: &SessionCtx, window_id: u64, fit: i32, vp: &Viewpor
                 actual = format!("{actual_w}x{actual_h}"),
                 "窗口尺寸调整受程序限制，退化本地缩放"
             );
+            crate::vdisplay::center_window(window_id).await;
             let _ = send_error(
                 ctx,
                 0,
@@ -1459,6 +1483,9 @@ struct PipeHandle {
     /// 管线世代号（[`PIPE_SEQ`]）：收尾按它确认"注册表里还是不是自己这条"，
     /// 防止旧管线收尾误杀同窗口重开的新管线。
     serial: u64,
+    /// 强制下一帧 IDR（虚拟屏换档）：尺寸变了，旧引用链全部作废，首帧必须
+    /// 关键帧。与捕获层的 `drop_to_idr` 同一标志（编码循环消费）。
+    drop_to_idr: Arc<AtomicBool>,
 }
 
 impl PipeHandle {
@@ -3045,6 +3072,7 @@ mod tests {
             fps_cap: Arc::new(AtomicU32::new(0)),
             members: None,
             serial,
+            drop_to_idr: Arc::new(AtomicBool::new(false)),
         }
     }
 

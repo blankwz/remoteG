@@ -1,0 +1,22 @@
+[package]
+name = "rd-vdisplay"
+version.workspace = true
+edition.workspace = true
+
+# 档位数学与协议编解码为纯逻辑（任何平台可测）；管道与显示系统 API 仅 Windows。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
