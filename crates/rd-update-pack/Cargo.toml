@@ -1,0 +1,36 @@
+[package]
+name = "rd-update-pack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+getrandom = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+zstd = { workspace = true }
+
+# 发布端工具链（rd-pack-cli 专用；核心库不依赖网络栈——agent 只用核心）
+clap = { version = "4", features = ["derive"], optional = true }
+hmac = { version = "0.12", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+], optional = true }
+sha1 = { version = "0.10", optional = true }
+
+[features]
+default = []
+# mirror = 国内渠道上传/补传（改造项 B）。rd-pack-cli 启用；rd-agent 只依赖默认特性。
+mirror = ["dep:clap", "dep:hmac", "dep:reqwest", "dep:sha1"]
+
+[[bin]]
+name = "rd-pack-cli"
+path = "src/bin/rd-pack-cli.rs"
+required-features = ["mirror"]
+
+[dev-dependencies]
+tempfile = "3"

@@ -11,6 +11,9 @@
 //! WGC 不可用时相关用例 skip 并打印原因（不得静默通过）；窗口列表与终端
 //! 用例不依赖 WGC，始终执行。
 
+mod cases_recovery;
+mod cases_update;
+#[path = "../common/mod.rs"]
 mod common;
 
 use std::time::{Duration, Instant};

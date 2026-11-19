@@ -45,6 +45,36 @@ export function mouseWheel(
   return call("mouse_wheel", { deviceId, windowId, x, y, dx, dy });
 }
 
+/** 单个触控事件（改造项 C）：坐标=窗口客户区相对物理像素，t=单调秒。 */
+export interface TouchGestureEvent {
+  kind: "press" | "drag" | "release";
+  x: number;
+  y: number;
+  t: number;
+}
+
+/** 触控手势接管范围：窗口客户区尺寸（物理像素）+ 显示缩放（远程宽/画面
+ * css 宽，阈值随它放大）。 */
+export interface TouchRegion {
+  w: number;
+  h: number;
+  scale: number;
+}
+
+/**
+ * 触控手势批量喂入（触屏 pointer 路径，控制流可靠）。原始事件原样上送，
+ * 翻译在控制端 Rust（rd-touch-translate 四相状态机）：点击补发/长按右键/
+ * 拖动滚动/甩动惯性，惯性帧由控制端常驻任务按 60fps 继续发送。
+ */
+export function touchGesture(
+  deviceId: string,
+  windowId: string,
+  region: TouchRegion,
+  events: TouchGestureEvent[],
+): Promise<void> {
+  return call("touch_gesture", { deviceId, windowId, region, events });
+}
+
 /** 键盘事件（控制流可靠）。扫描码为 PS/2 Set 1 基本码 + extended 标志。 */
 export function keyEvent(
   deviceId: string,

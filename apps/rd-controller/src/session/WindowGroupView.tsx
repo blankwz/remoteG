@@ -31,6 +31,8 @@ import {
   mouseMove,
   mouseWheel,
   textInput,
+  touchGesture,
+  type TouchGestureEvent,
 } from "../api/input";
 import { getHostVersion } from "../api/devices";
 import { call, listenStub } from "../api/bridge";
@@ -599,8 +601,58 @@ export function WindowGroupView({
     () => () => {
       pacerRef.current?.cancel();
       mapperRef.current?.releaseAll();
+      if (touchTimerRef.current !== null) {
+        clearTimeout(touchTimerRef.current);
+        touchTimerRef.current = null;
+      }
     },
     [sendInput],
+  );
+
+  /**
+   * 触控手势路径（改造项 C）：pointerType==="touch" 的事件不走鼠标路径，
+   * 采集原始事件（窗口相对物理坐标）16ms 批量喂控制端翻译
+   * （rd-touch-translate）。手势期间钉住按下命中的窗口（capture 语义）；
+   * 惯性帧由控制端常驻任务驱动，前端松手即止。
+   */
+  const touchTargetRef = useRef<{
+    winId: string;
+    ox: number;
+    oy: number;
+    w: number;
+    h: number;
+    scale: number;
+  } | null>(null);
+  const touchBufRef = useRef<TouchGestureEvent[]>([]);
+  const touchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushTouch = useCallback(() => {
+    if (touchTimerRef.current !== null) {
+      clearTimeout(touchTimerRef.current);
+      touchTimerRef.current = null;
+    }
+    const buf = touchBufRef.current;
+    touchBufRef.current = [];
+    const target = touchTargetRef.current;
+    if (buf.length === 0 || target === null) {
+      return;
+    }
+    void touchGesture(
+      deviceIdRef.current,
+      target.winId,
+      { w: target.w, h: target.h, scale: target.scale },
+      buf,
+    ).catch(() => undefined);
+  }, []);
+  const queueTouch = useCallback(
+    (kind: TouchGestureEvent["kind"], x: number, y: number, t: number): void => {
+      touchBufRef.current.push({ kind, x, y, t });
+      if (touchTimerRef.current === null) {
+        touchTimerRef.current = setTimeout(flushTouch, 16);
+        // release 是手势终点，立即发不延迟——调用方 queueTouch 后自行
+        // flushTouch()（此处统一 16ms 批量只为拖动降噪）
+      }
+    },
+    [flushTouch],
   );
 
   /** 组容器 CSS 坐标 → 根窗口物理像素（无容器/无帧返回 null：不发送）。 */
@@ -655,6 +707,16 @@ export function WindowGroupView({
     if (phase !== "open" || viewOnly) {
       return;
     }
+    // 触控手势路径：手势期间钉住按下窗口（capture 语义，同鼠标按下拖拽）
+    if (e.pointerType === "touch") {
+      const target = touchTargetRef.current;
+      const p = toPhys(e.clientX, e.clientY);
+      if (target === null || p === null) {
+        return;
+      }
+      queueTouch("drag", p.x - target.ox, p.y - target.oy, e.timeStamp / 1000);
+      return;
+    }
     const p = toPhys(e.clientX, e.clientY);
     if (p === null) {
       return;
@@ -689,6 +751,35 @@ export function WindowGroupView({
     textareaRef.current?.focus({ preventScroll: true });
     const p = toPhys(e.clientX, e.clientY);
     if (p !== null) {
+      // 触控手势路径（改造项 C）：钉住命中窗口，原始事件交控制端翻译；
+      // scale=远程物理宽/画面 css 宽（阈值语义），w/h=窗口客户区尺寸
+      if (e.pointerType === "touch") {
+        const hit = hitAt(p);
+        if (hit !== null) {
+          const el = groupRef.current;
+          const rs = rootStatsRef.current;
+          const scale =
+            el !== null && rs !== null && el.clientWidth > 0
+              ? rs.width / el.clientWidth
+              : 1;
+          touchTargetRef.current = {
+            winId: hit.id,
+            ox: hit.x,
+            oy: hit.y,
+            w: hit.w,
+            h: hit.h,
+            scale,
+          };
+          queueTouch("press", p.x - hit.x, p.y - hit.y, e.timeStamp / 1000);
+        }
+        e.preventDefault();
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // 捕获失败不影响本次手势（指针未离开容器时事件仍按几何命中）
+        }
+        return;
+      }
       const hit = hitAt(p);
       if (hit !== null) {
         const btn = mapButton(e.button);
@@ -711,9 +802,25 @@ export function WindowGroupView({
     }
   };
 
-  /** 按下按钮抬起（pointerup / pointercancel 共用）。 */
+  /** 按下按钮抬起（pointerup / pointercancel 共用）；触控手势终点立即
+   * flush（release 后惯性帧由控制端驱动，前端到此收工）。 */
   const releaseButton = (e: PointerEvent<HTMLDivElement>): void => {
     if (phase !== "open" || viewOnly) {
+      return;
+    }
+    if (e.pointerType === "touch") {
+      const target = touchTargetRef.current;
+      if (target !== null) {
+        const p = toPhys(e.clientX, e.clientY);
+        queueTouch(
+          "release",
+          p === null ? target.ox : p.x - target.ox,
+          p === null ? target.oy : p.y - target.oy,
+          e.timeStamp / 1000,
+        );
+        flushTouch();
+        touchTargetRef.current = null;
+      }
       return;
     }
     const btn = mapButton(e.button);

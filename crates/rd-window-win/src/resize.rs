@@ -32,6 +32,8 @@ use crate::Rect;
 pub const MIN_CLIENT_W: u32 = 200;
 /// 目标客户区最小高。
 pub const MIN_CLIENT_H: u32 = 150;
+/// E4：窗口响应性探针超时（毫秒）。挂死窗口不拖会话链路，直接放弃操作。
+pub const RESPONSIVE_TIMEOUT_MS: u32 = 1000;
 
 /// 按控制端视口换算目标客户区物理尺寸：`round(css × dpr)`，下限 200×150。
 pub fn target_client_size(css_w: u32, css_h: u32, dpr: f32) -> (u32, u32) {
@@ -72,6 +74,10 @@ pub fn fit_window(hwnd: isize, client_w: u32, client_h: u32) -> Result<FitResult
         if !IsWindow(Some(h)).as_bool() {
             bail!("窗口句柄无效: {hwnd:#x}");
         }
+        // E4 双通道分离：存在性查询（IsWindow，不经进程）已过；操作前再探
+        // 响应性（1s 超时）——挂死窗口的 SetWindowPos 是同步等待，会把会话
+        // 链路一起拖死。无响应直接放弃，控制端看到明确错误。
+        ensure_responsive(h)?;
         let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
         if style & WS_THICKFRAME.0 == 0 {
             return Ok(FitResult::NotResizable);
@@ -192,6 +198,13 @@ impl SavedPlacement {
             h: (rc.bottom - rc.top).max(0) as u32,
         }
     }
+
+    /// 还原矩形 [left, top, right, bottom]（E1 账本投影；与 [`Self::from_parts`]
+    /// 对称）。
+    pub fn normal_rect_ltrb(&self) -> [i32; 4] {
+        let rc = self.0.rcNormalPosition;
+        [rc.left, rc.top, rc.right, rc.bottom]
+    }
 }
 
 /// 保存窗口当前布局（`GetWindowPlacement`）。
@@ -210,6 +223,53 @@ pub fn save_placement(hwnd: isize) -> Result<SavedPlacement> {
 pub fn restore_placement(hwnd: isize, p: &SavedPlacement) -> Result<()> {
     let _dpi = DpiGuard::new();
     let h = HWND(hwnd as *mut c_void);
+    // E4：挂死窗口的 SetWindowPlacement 同样会同步阻塞，先探响应性
+    ensure_responsive(h)?;
     unsafe { SetWindowPlacement(h, &p.0).context("SetWindowPlacement 失败")? };
     Ok(())
+}
+
+/// E4 响应性探针：`SendMessageTimeoutW(WM_NULL, SMTO_ABORTIFHUNG, 1s)`。
+/// 与存在性查询（`IsWindow`，不经目标进程）分离——前者验证「消息循环活着」，
+/// 后者只验证「句柄有效」。
+pub(crate) fn ensure_responsive(h: HWND) -> Result<()> {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_NULL,
+    };
+    let mut result = 0usize;
+    let ok = unsafe {
+        SendMessageTimeoutW(
+            h,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            RESPONSIVE_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    if ok.0 == 0 {
+        bail!("窗口无响应（消息循环挂死超过 {RESPONSIVE_TIMEOUT_MS}ms），跳过窗口操作");
+    }
+    Ok(())
+}
+
+impl SavedPlacement {
+    /// 由账本投影字段重建（E1 记账还原：showCmd + 还原矩形）。
+    pub fn from_parts(show_cmd: u32, normal: [i32; 4]) -> Self {
+        Self(WINDOWPLACEMENT {
+            length: mem::size_of::<WINDOWPLACEMENT>() as u32,
+            flags: windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT_FLAGS(0),
+            showCmd: show_cmd,
+            ptMinPosition: Default::default(),
+            ptMaxPosition: Default::default(),
+            rcNormalPosition: RECT {
+                left: normal[0],
+                top: normal[1],
+                right: normal[2],
+                bottom: normal[3],
+            },
+        })
+    }
 }

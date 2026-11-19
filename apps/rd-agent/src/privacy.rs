@@ -14,6 +14,8 @@
 //! 销毁），切换只 ShowWindow；[`set`] 经通道投递请求后立即返回。
 
 #[cfg(windows)]
+use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::sync::OnceLock;
@@ -21,6 +23,9 @@ use std::sync::OnceLock;
 /// 黑罩线程的请求通道；进程内一次。
 #[cfg(windows)]
 static SHIELD_TX: OnceLock<Sender<Req>> = OnceLock::new();
+/// 状态文件目录（init 时登记；E3 状态落盘用）。
+#[cfg(windows)]
+static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// 设置隐私屏（异步生效；与当前状态相同则为无操作）。返回是否已受理
 /// （`false` = 线程未起或已退出，调用方据此回 Error）。
@@ -29,7 +34,17 @@ pub fn set(on: bool) -> bool {
     let Some(tx) = SHIELD_TX.get() else {
         return false;
     };
-    tx.send(if on { Req::On } else { Req::Off }).is_ok()
+    // E2 自扰静默：黑窗创建/销毁会触发窗口事件风暴，登记静默窗（取 max
+    // 延后），静默期内桥接线程不向控制端推窗口事件
+    crate::window_session::note_self_disturbance();
+    let accepted = tx.send(if on { Req::On } else { Req::Off }).is_ok();
+    // E3 状态落盘：重启回看恢复用（受理即记，与实际生效异步一致由线程保证）
+    if accepted {
+        if let Some(dir) = STATE_DIR.get() {
+            persist_state(dir, on);
+        }
+    }
+    accepted
 }
 
 /// 非 Windows：不可用（保持可 check 可运行）。
@@ -38,9 +53,71 @@ pub fn set(_on: bool) -> bool {
     false
 }
 
+/// 隐私屏状态文件（E3 重启回看恢复）：`<config_dir>/rd-privacy-state.json`。
+/// 崩溃重启后回看恢复（开着 → 重新遮蔽；保护跨重启，fail-safe 方向）。
+const STATE_ON: &str = "{\"on\":true}";
+const STATE_OFF: &str = "{\"on\":false}";
+
+/// 状态落盘（原子写：临时文件 + rename）。
+fn persist_state(config_dir: &std::path::Path, on: bool) {
+    let path = config_dir.join("rd-privacy-state.json");
+    let tmp = path.with_extension("json.tmp");
+    let body = if on { STATE_ON } else { STATE_OFF };
+    if let Err(err) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)) {
+        tracing::warn!("隐私屏状态落盘失败（重启后不恢复）: {err}");
+    }
+}
+
+/// 回看恢复：读状态文件（无文件 = 从未开启过，不恢复）。
+fn read_state(config_dir: &std::path::Path) -> Option<bool> {
+    let bytes = std::fs::read(config_dir.join("rd-privacy-state.json")).ok()?;
+    if bytes == STATE_ON.as_bytes() {
+        Some(true)
+    } else if bytes == STATE_OFF.as_bytes() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// 启动回看恢复：重启前隐私屏开着 → 重新遮蔽（E3；恢复失败只记日志）。
+#[cfg(windows)]
+pub fn recover_state(config_dir: &std::path::Path) {
+    if read_state(config_dir) == Some(true) {
+        tracing::info!("重启回看：隐私屏在上次运行时开启，恢复遮蔽");
+        if !set(true) {
+            tracing::warn!("隐私屏恢复投递失败（黑罩线程未就绪）");
+        }
+    }
+}
+
+/// 启动回看恢复（非 Windows no-op）。
+#[cfg(not(windows))]
+pub fn recover_state(_config_dir: &std::path::Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// E3 状态文件：写读回看 roundtrip；未知内容返回 None（不猜）。
+    #[test]
+    fn state_file_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(read_state(dir.path()), None, "无文件 = 从未开启，不恢复");
+        persist_state(dir.path(), true);
+        assert_eq!(read_state(dir.path()), Some(true));
+        persist_state(dir.path(), false);
+        assert_eq!(read_state(dir.path()), Some(false));
+        // 损坏内容：None（不猜，宁可不复原也不误判）
+        std::fs::write(dir.path().join("rd-privacy-state.json"), b"garbage").unwrap();
+        assert_eq!(read_state(dir.path()), None);
+    }
+}
+
 /// 启动黑罩线程（进程内一次；lib `start` 时调用）。
 #[cfg(windows)]
-pub fn init() {
+pub fn init(config_dir: &Path) {
+    let _ = STATE_DIR.set(config_dir.to_path_buf());
     let (tx, rx) = std::sync::mpsc::channel::<Req>();
     if SHIELD_TX.set(tx).is_err() {
         return; // 已初始化
@@ -188,6 +265,14 @@ unsafe extern "system" fn def_wndproc(
 pub fn notify_user(peer_name: &str) {
     #[cfg(windows)]
     {
+        // e2e 直通（仅 debug + 显式环境变量；照 main.rs RD_TEST_CRASH 先例）：
+        // 不弹知情框只落日志——t12 无人值守跑隐私屏恢复，弹窗会挂在无人
+        // 点击的桌面上、真机用户也会被全屏黑罩前的弹窗打扰。release 无此分支。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_TEST_SILENT_NOTIFY").as_deref() == Ok("1") {
+            tracing::info!("[e2e] 隐私屏知情提示直通(不弹): 设备 {peer_name}");
+            return;
+        }
         let text = format!(
             "设备「{peer_name}」已开启隐私保护：\n本机屏幕即将黑屏，远程操作继续。\n\n(点「确定」继续；结束远控后屏幕自动恢复)"
         );

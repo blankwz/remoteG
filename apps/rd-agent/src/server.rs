@@ -107,6 +107,41 @@ pub fn bind_servers(
     Ok(out)
 }
 
+/// [`bind_servers`] 的升级重启配套版：旧进程退出与端口释放之间有窗口期，
+/// `AddrInUse` 时按 500ms 间隔重试（最长 ~15s，30 次）；其余错误照常上抛。
+/// 正常启动路径零成本（一次成功即返回）；e2e 用随机端口不会触发重试。
+pub fn bind_servers_with_retry(
+    addrs: &[SocketAddr],
+    identity: &Identity,
+) -> anyhow::Result<Vec<(Server, std::sync::Arc<tokio::net::UdpSocket>)>> {
+    const MAX_TRIES: usize = 30;
+    const INTERVAL: Duration = Duration::from_millis(500);
+    for attempt in 1..=MAX_TRIES {
+        match bind_servers(addrs, identity) {
+            Ok(v) => return Ok(v),
+            Err(err) if is_addr_in_use(&err) && attempt < MAX_TRIES => {
+                tracing::warn!(
+                    attempt,
+                    addrs = ?addrs,
+                    "监听地址被占用（疑似升级重启窗口），500ms 后重试"
+                );
+                std::thread::sleep(INTERVAL);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("重试循环必在 MAX_TRIES 内返回")
+}
+
+/// 错误链里是否有 AddrInUse（bind_servers 的 anyhow 链底层是 std io::Error）。
+fn is_addr_in_use(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+    })
+}
+
 /// 为每个监听器启动 accept 循环;每个连接交给 [`session::handle_conn`]。
 pub async fn serve_all(state: Arc<AgentState>, servers: Vec<Server>) {
     let mut tasks = Vec::with_capacity(servers.len());

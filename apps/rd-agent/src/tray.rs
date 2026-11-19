@@ -20,6 +20,11 @@ pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
     imp::run(runtime)
 }
 
+/// 更新完整链（Windows）：托盘菜单与 main.rs 的 e2e 自动触发钩子共用
+/// （RD_UPDATE_TEST_AUTO，t11 无托盘验证 spawn 对调重启）。
+#[cfg(windows)]
+pub(crate) use imp::update_flow;
+
 #[cfg(not(windows))]
 pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
     let _ = runtime;
@@ -66,6 +71,7 @@ mod imp {
     const ID_OPEN_LOGS: &str = "open-logs";
     const ID_REPORT_CRASH: &str = "report-crash";
     const ID_LICENSE: &str = "license";
+    const ID_CHECK_UPDATE: &str = "check-update";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
     const DEVICE_ID_PREFIX: &str = "device-";
@@ -103,6 +109,8 @@ mod imp {
 
     /// 托盘入口:构建图标/菜单/托盘,主线程泵消息直至退出(永不返回)。
     pub(super) fn run(runtime: &rd_agent::AgentRuntime) -> ! {
+        // 自动检查更新（改造项 A 收口）：常驻线程静默轮询，未配渠道时零打扰
+        spawn_auto_update_check(runtime);
         let state: Arc<AgentState> = Arc::clone(&runtime.state);
         let idle_icon = load_icon(IDLE_ICON_BYTES, "tray.ico");
         let active_icon = load_icon(ACTIVE_ICON_BYTES, "tray-active.ico");
@@ -117,6 +125,7 @@ mod imp {
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
         let report_crash_item = MenuItem::with_id(ID_REPORT_CRASH, "上报崩溃…", true, None);
         let license_item = MenuItem::with_id(ID_LICENSE, "授权…", true, None);
+        let check_update_item = MenuItem::with_id(ID_CHECK_UPDATE, "检查更新", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
         let menu = Menu::new();
@@ -129,6 +138,7 @@ mod imp {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&check_update_item);
         let _ = menu.append(&open_logs);
         let _ = menu.append(&report_crash_item);
         let _ = menu.append(&license_item);
@@ -268,6 +278,7 @@ mod imp {
             }
             ID_OPEN_LOGS => open_log_dir(),
             ID_REPORT_CRASH => report_crash(),
+            ID_CHECK_UPDATE => check_update(runtime),
             ID_LICENSE => {
                 // 授权状态弹窗（T-029）：当前档位 + 升级操作说明（大白话）
                 show_pair_code_dialog(license_dialog_text(&state));
@@ -429,11 +440,33 @@ mod imp {
         }
     }
 
+    /// 弹窗文本的日志安全截断：直通路径把文本写入日志，截断防长文刷屏；
+    /// 配对码等不该进日志的内容（生产路径本就不落日志）不因直通泄漏全文。
+    #[cfg(debug_assertions)]
+    fn truncate_for_log(text: &str) -> String {
+        const LIMIT: usize = 160;
+        let mut s: String = text.chars().take(LIMIT).collect();
+        if text.chars().count() > LIMIT {
+            s.push('…');
+        }
+        s
+    }
+
     /// 弹出配对对话框(独立线程,模态于该线程不阻塞托盘循环)。
     ///
     /// 文案 = 本机可达地址(多条逐行)+ 配对码;指纹不再展示(D-013:MITM
     /// 防护由 SPAKE2 MAC 绑定指纹保证,与是否肉眼比对无关,概念最小化)。
     fn show_pair_code_dialog(text: String) {
+        // e2e 直通（仅 debug + 显式环境变量）：不弹窗、文本截断落日志——
+        // 无人值守环境弹窗会挂在无人点击的桌面上（t11 更新失败路径的诊断出口）。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_UPDATE_TEST_CONFIRM").as_deref() == Ok("1") {
+            tracing::info!(
+                "[update-e2e] dialog 直通(不弹): {}",
+                truncate_for_log(&text)
+            );
+            return;
+        }
         if CODE_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -554,6 +587,172 @@ mod imp {
         match std::process::Command::new("explorer").arg(&dir).spawn() {
             Ok(_) => tracing::info!(dir = %dir.display(), "打开日志目录"),
             Err(err) => tracing::warn!(dir = %dir.display(), "打开日志目录失败: {err}"),
+        }
+    }
+
+    /// 自动检查更新节奏：启动后首次延迟（避开启动风暴与新旧进程 15s 交接
+    /// 窗口），之后每 24h 一查（对齐控制端 useUpdater 的 24h 节流）。未配
+    /// 渠道 = 完全静默，T-039 配上渠道即自动生效。
+    const AUTO_UPDATE_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    const AUTO_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+    /// 更新链防重入（手动连点 / 自动撞手动：apply 的 .old 对调不可并发）。
+    static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
+
+    /// 托盘「检查更新」（改造项 A）：独立线程跑完整链（见 `update_flow`）。
+    fn check_update(runtime: &rd_agent::AgentRuntime) {
+        let rt = runtime.rt.clone();
+        let state = std::sync::Arc::clone(&runtime.state);
+        std::thread::spawn(move || update_flow(&rt, &state, false));
+    }
+
+    /// 自动检查更新（常驻线程）：静默轮询，发现新版本才打扰用户——家人
+    /// 不会主动点「检查更新」，自动弹窗是渠道触达目标用户的唯一途径。
+    fn spawn_auto_update_check(runtime: &rd_agent::AgentRuntime) {
+        let rt = runtime.rt.clone();
+        let state = std::sync::Arc::clone(&runtime.state);
+        std::thread::spawn(move || {
+            std::thread::sleep(AUTO_UPDATE_FIRST_DELAY);
+            loop {
+                update_flow(&rt, &state, true);
+                std::thread::sleep(AUTO_UPDATE_INTERVAL);
+            }
+        });
+    }
+
+    /// 更新完整链：检查（验签 + 版本比较）→ 确认 → 下载拼装对调 → 确认重启
+    /// → 断开会话 → spawn 新 exe → exit(0)。手动（silent=false）失败逐项
+    /// 弹窗反馈；自动（silent=true）失败一律静默（日志可查），仅发现新版本
+    /// 与「文件已替换」两处必须弹——前者是自动检查的存在意义，后者动了
+    /// 用户磁盘文件必须告知。MessageBox 模态自身线程，托盘消息循环不受阻；
+    /// 下载期间远程会话由 tokio runtime 线程照常服务。
+    ///
+    /// 更新完整链：main.rs 的 e2e 自动触发钩子（RD_UPDATE_TEST_AUTO，t11）
+    /// 与托盘菜单共用本函数（经模块顶层 re-export 为 tray::update_flow；
+    /// imp 模块私有，此可见性不会外泄出 crate）。
+    pub(crate) fn update_flow(rt: &tokio::runtime::Handle, state: &Arc<AgentState>, silent: bool) {
+        if UPDATE_BUSY.swap(true, Ordering::SeqCst) {
+            return; // 已有更新链在跑（手动连点 / 自动撞手动）
+        }
+        update_flow_inner(rt, state, silent);
+        // exit(0)（重启成功路径）不返回到这里；其余路径统一归位
+        UPDATE_BUSY.store(false, Ordering::SeqCst);
+    }
+
+    fn update_flow_inner(rt: &tokio::runtime::Handle, state: &Arc<AgentState>, silent: bool) {
+        let settings = rd_agent::updater::UpdateSettings::from_env();
+        if !settings.enabled() {
+            if !silent {
+                show_pair_code_dialog(
+                    "更新功能未启用（未配置更新渠道 RD_UPDATE_ENDPOINT）。".to_string(),
+                );
+            }
+            return;
+        }
+        let http = match reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+        {
+            Ok(c) => c,
+            Err(err) => {
+                if silent {
+                    tracing::warn!("自动检查更新：HTTP 客户端初始化失败: {err}");
+                } else {
+                    show_pair_code_dialog(format!("HTTP 客户端初始化失败: {err}"));
+                }
+                return;
+            }
+        };
+
+        // 1) 检查（验签 + 防回滚版本比较）
+        let current = env!("CARGO_PKG_VERSION");
+        let manifest = match rt.block_on(rd_agent::updater::check(&http, &settings, current)) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                if silent {
+                    tracing::info!("自动检查更新：已是最新版本");
+                } else {
+                    show_pair_code_dialog("已是最新版本。".to_string());
+                }
+                return;
+            }
+            Err(err) => {
+                if silent {
+                    tracing::warn!("自动检查更新失败（下个周期重试）: {err:#}");
+                } else {
+                    show_pair_code_dialog(format!("检查更新失败:\n{err:#}"));
+                }
+                return;
+            }
+        };
+
+        // 2) 用户确认（更新会短暂断开会话）——手动/自动都弹
+        if !confirm_box(&format!(
+            "发现新版本 {}（当前 {}），现在更新吗？\n\n更新会下载新版本并替换文件，\
+             完成后自动重启（会话会短暂断开）。",
+            manifest.version, current
+        )) {
+            tracing::info!(
+                version = %manifest.version,
+                "用户暂不更新（本周期不再打扰，下个周期再查）"
+            );
+            return;
+        }
+
+        // 3) 下载 → 拼装 → 对调
+        let plan = match rt.block_on(rd_agent::updater::apply(&http, &settings, &manifest)) {
+            Ok(p) => p,
+            Err(err) => {
+                if silent {
+                    tracing::warn!("自动更新失败（已放弃替换）: {err:#}");
+                } else {
+                    show_pair_code_dialog(format!("更新失败（已放弃替换）:\n{err:#}"));
+                }
+                return;
+            }
+        };
+
+        // 4) 重启确认 + 执行：断会话 → spawn 新 exe → exit(0)
+        // （文件已替换必须问——动了用户磁盘必须告知；「否」= 下次启动生效）
+        if !confirm_box(&format!(
+            "文件已替换完成，现在重启进入 {} 吗？（点「否」则下次启动生效）",
+            manifest.version
+        )) {
+            tracing::info!(version = %manifest.version, "用户选择稍后重启，下次启动生效");
+            return;
+        }
+        state.disconnect_all_peers(rt, "升级重启");
+        if let Err(err) = rd_agent::updater::restart_now(&plan) {
+            show_pair_code_dialog(format!(
+                "新版启动失败（文件已替换，手动重启 rd-agent 即可用新版本）:\n{err:#}"
+            ));
+            return;
+        }
+        std::process::exit(0);
+    }
+
+    /// 是/否确认框。
+    fn confirm_box(text: &str) -> bool {
+        // e2e 直通（仅 debug + 显式环境变量；照 main.rs RD_TEST_CRASH 先例）：
+        // 自动确认「是」，文本截断落日志供 t11 断言更新链路径。release 无此分支。
+        #[cfg(debug_assertions)]
+        if std::env::var("RD_UPDATE_TEST_CONFIRM").as_deref() == Ok("1") {
+            tracing::info!(
+                "[update-e2e] confirm_box 直通(=是): {}",
+                truncate_for_log(text)
+            );
+            return true;
+        }
+        let text = HSTRING::from(text);
+        let title = HSTRING::from("rd 远程控制 · 检查更新");
+        unsafe {
+            MessageBoxW(
+                None,
+                &text,
+                &title,
+                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+            ) == IDYES
         }
     }
 
