@@ -101,6 +101,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          # bundle.resources 引用 studio 构建产物（dist 被 gitignore）——二轮 run
+          # 44463604147 暴露 tauri build.rs 校验 resources 路径失败，先构建 studio
+          pnpm -C switchboard/studio install --frozen-lockfile
+          pnpm -C switchboard/studio build
           pnpm -C apps/rd-controller install --frozen-lockfile
           pnpm -C apps/rd-controller tauri build
           # 未签名安装包；NSIS 产物与 updater .sig 在根 target/release/bundle/nsis/
