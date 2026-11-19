@@ -637,6 +637,12 @@ async fn dispatch_loop(ctx: &Arc<SessionCtx>, rx: &mut ControlRx) -> anyhow::Res
                 &ctx.peer_name,
                 input_handler::handle(ctx, InputMsg::MouseWheel(m)),
             ),
+            // 连续滚动（手势翻译产出，60Hz 级高频小步）：软失败——单帧滚动
+            // 失败不打断会话，与 Wheel 同策略
+            envelope::Msg::ContinuousScroll(m) => handle_soft(
+                &ctx.peer_name,
+                input_handler::handle(ctx, InputMsg::ContinuousScroll(m)),
+            ),
             envelope::Msg::Text(m) => {
                 if let Some((code, message)) =
                     input_handler::handle_with_notify(ctx, InputMsg::TextInput(m))

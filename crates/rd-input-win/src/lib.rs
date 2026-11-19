@@ -100,6 +100,31 @@ impl Injector {
         mouse::send(&inputs)
     }
 
+    /// 像素级连续滚动（触控板/手势翻译路径，协议 `ContinuousScroll` 消费）。
+    ///
+    /// 与 [`wheel`](Self::wheel) 的差异：`wheel` 的 `dx`/`dy` 是离散滚轮档位
+    /// （±120），这里输入是像素增量——手势翻译（拖动/惯性）以 60Hz 级频率
+    /// 送来小步增量，直接把像素当 wheel delta 注入（**1px = 1 delta**：
+    /// Chrome/Edge/资源管理器按 delta 比例平滑滚动，观感近似 1:1；应用行高
+    /// 各异，手感调参改这个系数）。phase/momentum 已在控制端消费成连续帧，
+    /// 被控端无状态——惯性物理永远在发送侧。
+    pub fn scroll_pixel(
+        &mut self,
+        hwnd: isize,
+        x: i32,
+        y: i32,
+        pixels_x: i32,
+        pixels_y: i32,
+    ) -> anyhow::Result<()> {
+        if pixels_x == 0 && pixels_y == 0 {
+            return Ok(());
+        }
+        let abs = self.absolute(hwnd, x, y)?;
+        let mut inputs = vec![mouse::build_move(abs)];
+        inputs.extend(mouse::build_wheel(pixels_x, pixels_y));
+        mouse::send(&inputs)
+    }
+
     /// 注入一次键盘事件（扫描码透传，`extended` 加 `KEYEVENTF_EXTENDEDKEY`）。
     ///
     /// Ctrl+Alt+Del 属系统安全注意序列（SAS），`SendInput` 无法注入，返回错误。

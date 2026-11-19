@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use rd_proto::v0::{KeyEvent, MouseButton, MouseWheel, TextInput};
+use rd_proto::v0::{ContinuousScroll, KeyEvent, MouseButton, MouseWheel, TextInput};
 
 use crate::session::SessionCtx;
 
@@ -66,6 +66,17 @@ impl Injector {
         Ok(())
     }
 
+    pub fn scroll_pixel(
+        &mut self,
+        _hwnd: isize,
+        _x: i32,
+        _y: i32,
+        _pixels_x: i32,
+        _pixels_y: i32,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     pub fn key(&mut self, _scancode: u32, _extended: bool, _down: bool) -> anyhow::Result<()> {
         Ok(())
     }
@@ -83,6 +94,7 @@ pub enum InputMsg {
     Key(KeyEvent),
     MouseButton(MouseButton),
     MouseWheel(MouseWheel),
+    ContinuousScroll(ContinuousScroll),
     TextInput(TextInput),
 }
 
@@ -107,6 +119,7 @@ pub fn handle(ctx: &SessionCtx, msg: InputMsg) -> anyhow::Result<()> {
     match msg {
         InputMsg::MouseButton(m) => mouse_button(ctx, &m),
         InputMsg::MouseWheel(m) => mouse_wheel(ctx, &m),
+        InputMsg::ContinuousScroll(m) => continuous_scroll(ctx, &m),
         InputMsg::Key(m) => key_event(ctx, &m),
         InputMsg::TextInput(m) => text_input(ctx, &m),
     }
@@ -307,6 +320,39 @@ fn mouse_wheel(ctx: &SessionCtx, m: &MouseWheel) -> anyhow::Result<()> {
         .expect("injector 锁中毒")
         .wheel(m.window_id as isize, m.x, m.y, m.dx, m.dy)
         .map_err(|err| anyhow::anyhow!("注入滚轮失败: {err:#}"))
+}
+
+/// 连续滚动（手势翻译产出）：与滚轮同守卫（只看不控/未打开丢弃），注入
+/// 像素级滚动。高频小步（60Hz 级），单帧失败软处理不打断会话。
+fn continuous_scroll(ctx: &SessionCtx, m: &ContinuousScroll) -> anyhow::Result<()> {
+    if ctx.windows.is_view_only(m.window_id) {
+        tracing::debug!(
+            name = %ctx.peer_name,
+            window_id = m.window_id,
+            "丢弃连续滚动:窗口为只看不控"
+        );
+        return Ok(());
+    }
+    if !ctx.windows.is_open(m.window_id) {
+        tracing::warn!(
+            name = %ctx.peer_name,
+            window_id = m.window_id,
+            "丢弃连续滚动:窗口未打开"
+        );
+        return Ok(());
+    }
+    ctx.state
+        .injector
+        .lock()
+        .expect("injector 锁中毒")
+        .scroll_pixel(
+            m.window_id as isize,
+            m.x.round() as i32,
+            m.y.round() as i32,
+            m.pixels_x,
+            m.pixels_y,
+        )
+        .map_err(|err| anyhow::anyhow!("注入连续滚动失败: {err:#}"))
 }
 
 /// 键盘:无 window_id,以前台窗口为准,且前台必须属于本会话已打开窗口
