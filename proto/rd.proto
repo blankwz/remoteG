@@ -55,8 +55,14 @@ message HelloAck { uint32 proto_ver = 1; string host_name = 2; repeated Codec en
   string mac_addrs = 7; }
 message PairRequest { bytes spake2_msg = 1; }  message PairResult { bool ok = 1; bytes spake2_msg = 2; string reason = 3; }
 
+// v0.3 二期块 2（T-049）附加字段，旧端忽略、线上兼容：
+//   frame_*：窗口外框屏幕矩形（全局物理像素；客户区 x/y/w/h 之外的几何）。
+//   close_*：标题栏关闭按钮屏幕矩形（全局；全 0 = 无按钮/不可定位）。
+//   列表顺序 = Z 序（EnumWindows 语义，从前到后），控制端轻点关闭核对用。
 message WindowInfo { uint64 id = 1; string title = 2; string process = 3; uint32 pid = 4; bytes icon_png = 5;
-  int32 x = 6; int32 y = 7; uint32 w = 8; uint32 h = 9; uint32 dpi = 10; bool resizable = 11; bool minimized = 12; }
+  int32 x = 6; int32 y = 7; uint32 w = 8; uint32 h = 9; uint32 dpi = 10; bool resizable = 11; bool minimized = 12;
+  int32 frame_x = 13; int32 frame_y = 14; uint32 frame_w = 15; uint32 frame_h = 16;
+  int32 close_x = 17; int32 close_y = 18; uint32 close_w = 19; uint32 close_h = 20; }
 message ListWindows {}  message WindowList { repeated WindowInfo windows = 1; }
 message WindowEvent { enum Kind { CREATED=0; DESTROYED=1; MOVED=2; TITLE=3; CHILD_ADDED=4; CHILD_REMOVED=5; } Kind kind = 1; WindowInfo info = 2; uint64 root_id = 3; }
 

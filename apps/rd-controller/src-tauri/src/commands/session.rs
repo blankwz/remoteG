@@ -612,6 +612,7 @@ mod tests {
             dpi: 96,
             resizable: true,
             minimized: false,
+            ..WindowInfo::default()
         }
     }
 

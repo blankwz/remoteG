@@ -456,6 +456,12 @@ fn list_infos() -> anyhow::Result<Vec<WindowInfo>> {
 }
 
 fn to_window_info(a: &WindowAttrs, icon: Option<Vec<u8>>) -> WindowInfo {
+    // 块 2（T-049）：外框与关闭按钮矩形随列表下发（附加字段，线上兼容）。
+    // 关闭钮全 0 = 无按钮（proto3 缺省语义，控制端按「不可轻点关闭」处理）。
+    let (close_x, close_y, close_w, close_h) = match a.close_button {
+        Some(r) => (r.x, r.y, r.w, r.h),
+        None => (0, 0, 0, 0),
+    };
     WindowInfo {
         id: a.hwnd as u64,
         title: a.title.clone(),
@@ -469,6 +475,14 @@ fn to_window_info(a: &WindowAttrs, icon: Option<Vec<u8>>) -> WindowInfo {
         dpi: a.dpi,
         resizable: a.resizable,
         minimized: a.minimized,
+        frame_x: a.frame.x,
+        frame_y: a.frame.y,
+        frame_w: a.frame.w,
+        frame_h: a.frame.h,
+        close_x,
+        close_y,
+        close_w,
+        close_h,
     }
 }
 
@@ -2447,6 +2461,15 @@ fn child_window_info(m: &GroupMember) -> WindowInfo {
         dpi: 0,
         resizable: false,
         minimized: false,
+        // 组成员走相对坐标语义，外框/关闭钮矩形不适用（块 2 只服务顶层窗口）
+        frame_x: 0,
+        frame_y: 0,
+        frame_w: 0,
+        frame_h: 0,
+        close_x: 0,
+        close_y: 0,
+        close_w: 0,
+        close_h: 0,
     }
 }
 

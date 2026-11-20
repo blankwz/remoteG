@@ -11,7 +11,7 @@ use std::mem;
 
 use anyhow::{Context, Result};
 use windows::core::BOOL;
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
@@ -26,10 +26,10 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassLongPtrW, GetClassNameW, GetClientRect, GetIconInfo, GetWindowLongPtrW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SendMessageTimeoutW, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWL_STYLE, HICON, ICONINFO,
-    ICON_BIG, ICON_SMALL, ICON_SMALL2, SMTO_ABORTIFHUNG, WM_GETICON, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_THICKFRAME, WS_VISIBLE,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SendMessageTimeoutW, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWL_STYLE, HICON, HTCLOSE,
+    ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, SMTO_ABORTIFHUNG, WM_GETICON, WM_NCHITTEST,
+    WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME, WS_VISIBLE,
 };
 
 use crate::Rect;
@@ -52,6 +52,10 @@ pub struct WindowAttrs {
     pub pid: u32,
     /// 客户区屏幕矩形（物理像素）。
     pub rect: Rect,
+    /// 窗口外框屏幕矩形（物理像素；块 2 关闭按钮定位与轻点核对用）。
+    pub frame: Rect,
+    /// 标题栏关闭按钮屏幕矩形（无 `WS_CAPTION` 或探测不到 = `None`）。
+    pub close_button: Option<Rect>,
     /// 窗口 DPI（96 = 100%）。
     pub dpi: u32,
     /// 是否可调尺寸（`WS_THICKFRAME`）。
@@ -168,12 +172,16 @@ fn attrs_of(h: HWND) -> Option<WindowAttrs> {
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
         let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+        let frame = window_frame_rect(h)?;
+        let close_button = close_button_rect(h, style, &frame);
         Some(WindowAttrs {
             hwnd: h.0 as isize,
             title: window_text(h),
             process: process_image_name(pid),
             pid,
             rect: client_rect_screen(h).ok()?,
+            frame,
+            close_button,
             dpi: GetDpiForWindow(h),
             resizable: style & WS_THICKFRAME.0 != 0,
             minimized: IsIconic(h).as_bool(),
@@ -183,6 +191,81 @@ fn attrs_of(h: HWND) -> Option<WindowAttrs> {
             class: class_name(h),
         })
     }
+}
+
+/// 窗口外框屏幕矩形（物理像素）。
+fn window_frame_rect(h: HWND) -> Option<Rect> {
+    let mut rc = RECT::default();
+    unsafe { GetWindowRect(h, &mut rc).ok()? };
+    Some(Rect {
+        x: rc.left,
+        y: rc.top,
+        w: (rc.right - rc.left).max(0) as u32,
+        h: (rc.bottom - rc.top).max(0) as u32,
+    })
+}
+
+/// 关闭按钮矩形基准（96dpi）：宽、高、右内缩、上内缩。实际 Win10/11 按钮
+/// 约为 46×32 且贴外框右上角；这里取略小的矩形（宁小勿大——漏判时普通
+/// 点击自然落在关闭按钮上兜底，误判却会把普通点击变成关窗）。
+const CLOSE_W: f64 = 32.0;
+const CLOSE_H: f64 = 26.0;
+const CLOSE_RIGHT_INSET: f64 = 8.0;
+const CLOSE_TOP_INSET: f64 = 3.0;
+/// `WM_NCHITTEST` 探测挂起窗口的超时（同 `ICON_QUERY_TIMEOUT_MS` 策略）。
+const HITTEST_TIMEOUT_MS: u32 = 200;
+
+/// 标题栏关闭按钮屏幕矩形（块 2/T-049；无 `WS_CAPTION` 或探测不到 = `None`）。
+///
+/// 尺寸没有公开系统 API，用「保守内缩矩形 + `WM_NCHITTEST` 存在性验证」
+/// 双保险：预测中心探测一次，返回 `HTCLOSE` 才认为按钮存在——权威，且对
+/// 按 Windows 惯例处理 hit-test 的自绘标题栏同样有效。
+pub fn close_button_rect(h: HWND, style: u32, frame: &Rect) -> Option<Rect> {
+    if style & WS_CAPTION.0 == 0 {
+        return None;
+    }
+    let d = f64::from(unsafe { GetDpiForWindow(h) }) / 96.0;
+    let rect = close_rect_estimate(frame, d)?;
+    let probe = POINT {
+        x: rect.x + rect.w as i32 / 2,
+        y: rect.y + rect.h as i32 / 2,
+    };
+    hit_test_is_close(h, probe).then_some(rect)
+}
+
+/// 保守内缩关闭钮矩形（纯几何：96dpi 基准 × DPI 缩放；无空间 = `None`）。
+fn close_rect_estimate(frame: &Rect, d: f64) -> Option<Rect> {
+    if frame.w == 0 || frame.h == 0 || !d.is_finite() || d <= 0.0 {
+        return None;
+    }
+    let w = (CLOSE_W * d).round() as u32;
+    let ht = (CLOSE_H * d).round() as u32;
+    if w == 0 || ht == 0 {
+        return None;
+    }
+    let x = frame.x + frame.w as i32 - (CLOSE_RIGHT_INSET * d).round() as i32 - w as i32;
+    let y = frame.y + (CLOSE_TOP_INSET * d).round() as i32;
+    Some(Rect { x, y, w, h: ht })
+}
+
+/// `WM_NCHITTEST` 探测：该点是否 `HTCLOSE`（挂起窗口按超时放弃 = 否）。
+fn hit_test_is_close(h: HWND, p: POINT) -> bool {
+    // MAKELPARAM：x 低 16 位、y 高 16 位（负坐标按补码截断，与 API 同义）
+    let lparam = LPARAM(((i32::from(p.y as u16) << 16) | i32::from(p.x as u16)) as isize);
+    let mut result = 0usize;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            h,
+            WM_NCHITTEST,
+            WPARAM(0),
+            lparam,
+            SMTO_ABORTIFHUNG,
+            HITTEST_TIMEOUT_MS,
+            Some(&mut result),
+        )
+        .0 != 0
+    };
+    sent && result == HTCLOSE as usize
 }
 
 /// `DWMWA_CLOAKED` != 0（UWP 挂起/预启动、其他虚拟桌面窗口）。
@@ -456,4 +539,45 @@ fn encode_png32(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
     Some(out)
+}
+
+#[cfg(test)]
+mod close_rect_tests {
+    use super::*;
+
+    /// i32 结构体字面量速记（rd-window-win 的 Rect 无 new 构造）。
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    /// 96dpi：外框 (100,100,800,600) → 矩形贴右上角内缩（800-8-32=760, 103）。
+    #[test]
+    fn estimate_at_96dpi_sits_inside_top_right() {
+        let frame = rect(100, 100, 800, 600);
+        let r = close_rect_estimate(&frame, 1.0).expect("有空间");
+        assert_eq!((r.x, r.y, r.w, r.h), (860, 103, 32, 26)); // 100+800-8-32=860
+                                                              // 矩形必须落在外框右上角区域内（宁小勿大的前提）
+        assert!(r.x + r.w as i32 <= frame.x + frame.w as i32);
+        assert!(r.y >= frame.y);
+    }
+
+    /// 150% DPI：尺寸与内缩同步放大。
+    #[test]
+    fn estimate_scales_with_dpi() {
+        let frame = rect(0, 0, 1600, 900);
+        let r = close_rect_estimate(&frame, 1.5).expect("有空间");
+        assert_eq!((r.w, r.h), (48, 39));
+        assert_eq!(r.x, 1600 - 12 - 48);
+        assert_eq!(r.y, 5); // round(3 × 1.5)
+    }
+
+    /// 零尺寸外框 / 异常 DPI → None。
+    #[test]
+    fn estimate_rejects_degenerate_input() {
+        assert!(close_rect_estimate(&rect(0, 0, 0, 600), 1.0).is_none());
+        assert!(close_rect_estimate(&rect(0, 0, 800, 0), 1.0).is_none());
+        assert!(close_rect_estimate(&rect(0, 0, 800, 600), 0.0).is_none());
+        assert!(close_rect_estimate(&rect(0, 0, 800, 600), -1.0).is_none());
+        assert!(close_rect_estimate(&rect(0, 0, 800, 600), f64::NAN).is_none());
+    }
 }

@@ -39,6 +39,22 @@ pub struct WindowDto {
     pub dpi: u32,
     pub resizable: bool,
     pub minimized: bool,
+    /// 窗口外框屏幕矩形（全局物理像素；块 2 轻点关闭核对用）。
+    pub frame_x: i32,
+    pub frame_y: i32,
+    pub frame_w: u32,
+    pub frame_h: u32,
+    /// 标题栏关闭按钮屏幕矩形（全局；None = 无按钮/不可定位）。
+    pub close_button: Option<RectDto>,
+}
+
+/// 屏幕矩形（全局物理像素）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RectDto {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// 顶层窗口事件（CREATED / DESTROYED / MOVED / TITLE / CHILD_*）。
@@ -84,6 +100,16 @@ fn to_dto(w: &WindowInfo) -> WindowDto {
         dpi: w.dpi,
         resizable: w.resizable,
         minimized: w.minimized,
+        frame_x: w.frame_x,
+        frame_y: w.frame_y,
+        frame_w: w.frame_w,
+        frame_h: w.frame_h,
+        close_button: (w.close_w.max(w.close_h) > 0).then_some(RectDto {
+            x: w.close_x,
+            y: w.close_y,
+            w: w.close_w,
+            h: w.close_h,
+        }),
     }
 }
 
@@ -247,6 +273,7 @@ mod tests {
             dpi: 96,
             resizable: true,
             minimized: false,
+            ..WindowInfo::default()
         }
     }
 
