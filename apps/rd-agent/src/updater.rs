@@ -84,7 +84,8 @@ impl UpdateSettings {
         };
         Self {
             // 缺省锚定 GitHub 渠道（渠道就绪即小白零配置）；空串覆盖=显式关闭
-            endpoint: std::env::var("RD_UPDATE_ENDPOINT").unwrap_or(DEFAULT_UPDATE_ENDPOINT.to_string()),
+            endpoint: std::env::var("RD_UPDATE_ENDPOINT")
+                .unwrap_or(DEFAULT_UPDATE_ENDPOINT.to_string()),
             pubkey_hex,
             mode: UpdateMode::from_env(),
         }

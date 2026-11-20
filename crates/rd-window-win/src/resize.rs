@@ -197,6 +197,25 @@ pub fn window_rect(hwnd: isize) -> Result<Rect> {
     }
 }
 
+/// 窗口**客户区**尺寸（物理像素）——虚拟屏选档的需求口径（T-049 二期）：
+/// 内容真需求 vs 档位客户区容量（[`rd_vdisplay`]/fit `client_capacity`），
+/// 外框口径会把边框标题栏算进需求导致铺满场景选档震荡。
+pub fn window_client_size(hwnd: isize) -> Result<(u32, u32)> {
+    let _dpi = DpiGuard::new();
+    let h = HWND(hwnd as *mut c_void);
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() {
+            bail!("窗口句柄无效: {hwnd:#x}");
+        }
+        let mut rc = RECT::default();
+        GetClientRect(h, &mut rc).context("GetClientRect 失败")?;
+        Ok((
+            (rc.right - rc.left).max(0) as u32,
+            (rc.bottom - rc.top).max(0) as u32,
+        ))
+    }
+}
+
 /// 只移动窗口不改尺寸（虚拟屏居中摆放用）。
 pub fn move_window_to(hwnd: isize, x: i32, y: i32) -> Result<()> {
     let _dpi = DpiGuard::new();

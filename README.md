@@ -2,7 +2,7 @@
 
 个人用类 RustDesk 远控工具：Windows 被控端按窗口捕获与操控，控制端 1:1 自适应保证文字清晰，终端在控制端自绘。
 
-核心能力：QUIC 传输（quinn + BBR）、多路径竞速（反射打洞 / 直连候选 / rd-relay 中继 / EasyTier mesh / Tailscale）、文件传输、WOL 远程开机、剪贴板互传、隐私屏、录屏、画质四档、授权码商业化（Ed25519 离线验签）、崩溃上报、自动更新（Tauri updater）。
+核心能力：QUIC 传输（quinn + BBR）、多路径竞速（反射打洞 / 直连候选 / rd-relay 中继 / EasyTier mesh / Tailscale）、文件传输、WOL 远程开机、剪贴板互传、隐私屏、录屏、画质四档、授权码商业化（Ed25519 离线验签）、崩溃上报、自动更新（控制端 Tauri updater；被控端缺块差分 + 自动检查，FastCDC 切块省流量）、手机比例虚拟屏（远控连入自动建屏/断开撤屏，触屏手势直控——轻点/惯性滚动/长按右键）。
 
 ## 构建与测试
 
@@ -33,6 +33,9 @@ cargo fmt --all --check
 | `crates/rd-switch` | Plan 执行器选路 |
 | `crates/rd-security` | 配对、信任存储、授权码（Ed25519 离线验签） |
 | `crates/rd-crash` | 崩溃上报（panic hook → JSON dump） |
+| `crates/rd-update-pack` | 被控端自更新：FastCDC 切块 / pack 格式 / 验签 / COS 镜像（mirror feature） |
+| `crates/rd-touch-translate` | 触控手势翻译（四相状态机 + 滚动惯性，零依赖纯逻辑） |
+| `crates/rd-vdisplay` | 虚拟屏：手机比例屏建撤/换档（virtual-display-rs master 管道客户端） |
 | `apps/rd-agent` | 被控端可执行程序 |
 | `apps/rd-controller` | 控制端（Tauri 2） |
 | `switchboard/` | 跨网方案编排器规范 + SDK（EasyTier/DERP/中继等可插拔模块）+ Studio |

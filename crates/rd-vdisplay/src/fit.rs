@@ -130,12 +130,28 @@ impl ScreenFit {
         self.widths.contains(&width)
     }
 
+    /// 档位屏的**客户区容量**：整屏尺寸减外框装饰（边框+标题栏）。
+    ///
+    /// 取 Windows 11 @150% 的实测外框差（宽 16 / 高 62；100% 缩放下装饰更小，
+    /// 容量略保守 → 选档略偏大，保守方向安全）。选档判定用**客户区口径**：
+    /// fit 铺满把窗口客户区铺到接近整屏，若按外框口径则外框恒比屏大 → 联动
+    /// 选档永远想再升一档，与手动换档/当前档冲突（t15 真机复现：手动 1080
+    /// 被联动 1080→1050→1030→1020 连降震荡）。客户区口径下「铺满 = 需求 ≈
+    /// 容量」自洽稳定，真实窗口内容超容量仍精确升档。
+    pub fn client_capacity(&self, width: u32) -> (u32, u32) {
+        const FRAME_W: u32 = 16;
+        const FRAME_H: u32 = 62;
+        let (w, h) = self.size(width);
+        (w.saturating_sub(FRAME_W), h.saturating_sub(FRAME_H))
+    }
+
     /// 能装下全部窗口外框的最窄档；空集 = 基准档；全部档位都装不下 → 最宽档封顶。
     ///
     /// 与 [`ScreenFit::width_to_fit`]（单窗口、以 current 为锚、只升不降）互补：
-    /// 编排层维护「当前在虚拟屏上的全部 rd 窗口外框」需求表，窗口开/关/resize
-    /// 后对整表重算（可升可降）。判定按窗口**外框**（装得下的硬约束是外框不
-    /// 超屏），容差与 `width_to_fit` 一致（2 点）。
+    /// 编排层维护「当前在虚拟屏上的全部 rd 窗口**客户区**」需求表，窗口开/
+    /// 关/resize 后对整表重算（可升可降）。判定按**客户区口径**（窗口内容
+    /// 真需求 vs 档位客户区容量，见 [`Self::client_capacity`]）：铺满场景
+    /// 「需求≈容量」自洽稳定，内容超容量精确升档。容差 2 点吸收取整误差。
     pub fn width_for_windows(&self, windows: &[(u32, u32)]) -> u32 {
         const TOLERANCE: f64 = 2.0;
         if windows.is_empty() {
@@ -145,7 +161,10 @@ impl ScreenFit {
             .iter()
             .copied()
             .find(|w| {
-                let (aw, ah) = (f64::from(*w), f64::from(self.size(*w).1));
+                let (aw, ah) = {
+                    let (cw, ch) = self.client_capacity(*w);
+                    (f64::from(cw), f64::from(ch))
+                };
                 windows.iter().all(|(ww, wh)| {
                     let (ww, wh) = (f64::from(*ww), f64::from(*wh));
                     ww <= aw + TOLERANCE && wh <= ah + TOLERANCE
@@ -322,24 +341,48 @@ mod tests {
         assert_eq!(fit.width_for_windows(&[]), 540);
     }
 
+    /// 铺满自洽不震荡（t15 真机回归）：窗口铺满某档屏后客户区 ≈ 该档客户
+    /// 容量，联动选档必须仍落在该档——外框口径时铺满外框恒比屏大，选档
+    /// 连降震荡（1080→1050→1030→1020）；客户区口径下「需求=容量」自洽。
+    #[test]
+    fn width_for_windows_tolerates_fitted_frame_overshoot() {
+        let fit = ScreenFit::standard();
+        // 铺满 800 档：客户区被 fit 铺到该档客户容量（≈整屏减装饰）
+        let cap = fit.client_capacity(800);
+        assert_eq!(
+            fit.width_for_windows(&[cap]),
+            800,
+            "铺满客户区应稳定在当前档"
+        );
+        // 内容真超容量（客户区再大一点）→ 联动升档仍然有效
+        assert_eq!(
+            fit.width_for_windows(&[(cap.0 + 16, cap.1 + 15)]),
+            820,
+            "内容超容量应升档"
+        );
+    }
+
     #[test]
     fn width_for_windows_picks_narrowest_fitting_tier() {
         let fit = ScreenFit::standard();
-        // 800×600：540 档宽不够 → 800 档（800×1404）装得下。
-        assert_eq!(fit.width_for_windows(&[(800, 600)]), 800);
-        // 两窗口取都能装下的最窄档：520×900 与 700×500 → 700 档（700×1231）。
-        assert_eq!(fit.width_for_windows(&[(520, 900), (700, 500)]), 700);
-        // 容差 2 点内算装得下（与 width_to_fit 同款）。
-        assert_eq!(fit.width_for_windows(&[(542, 952)]), 540);
+        // 客户区口径（容量 = 整屏 - 装饰 16/62）：800×600 客户区需容量宽
+        // ≥798 → 800 档容量 (784,1345) 不够 → 820 档 (804,1381) 装得下。
+        assert_eq!(fit.width_for_windows(&[(800, 600)]), 820);
+        // 两窗口取都能装下的最窄档：(520,900) 需高容量 ≥898 → 550 档；
+        // (700,500) 需宽容量 ≥698 → 720 档；合取最窄共同档 = 720。
+        assert_eq!(fit.width_for_windows(&[(520, 900), (700, 500)]), 720);
+        // 容差 2 点内算装得下：(526,890) 恰在 540 档容量 (524,888)+2 内。
+        assert_eq!(fit.width_for_windows(&[(526, 890)]), 540);
     }
 
     #[test]
     fn width_for_windows_caps_at_max_and_scales_with_height() {
         let fit = ScreenFit::standard();
-        // 全部档位装不下 → 封顶 1080。
+        // 全部档位容量都装不下 → 封顶 1080。
         assert_eq!(fit.width_for_windows(&[(5000, 5000)]), 1080);
-        // 宽小高大的窗口按高定档：900×1600 → 需宽 910（910×1601）。
-        assert_eq!(fit.width_for_windows(&[(900, 1600)]), 910);
+        // 宽小高大的窗口按高定档：900×1600 客户区需高容量 ≥1598 → 950 档
+        // 容量 (934,1609) 首个装得下（高需求主导时档位跳幅大于 10）。
+        assert_eq!(fit.width_for_windows(&[(900, 1600)]), 950);
     }
 
     #[test]

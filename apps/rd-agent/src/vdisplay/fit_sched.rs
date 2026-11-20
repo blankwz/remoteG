@@ -22,7 +22,8 @@ use super::orchestration;
 /// 首个 resize 事件后的静默窗：等窗口尺寸稳定再量、再换档。
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// 需求表：hwnd → 窗口外框 `(w, h)`（虚拟屏屏幕物理像素）。
+/// 需求表：hwnd → 窗口**客户区** `(w, h)`（物理像素）——内容真需求口径，
+/// 与 fit.rs 选档的客户区容量判定配套（外框口径铺满震荡，见 fit.rs）。
 fn demands() -> &'static Mutex<HashMap<u64, (u32, u32)>> {
     static DEMANDS: OnceLock<Mutex<HashMap<u64, (u32, u32)>>> = OnceLock::new();
     DEMANDS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -87,6 +88,34 @@ pub fn set_broadcast_handle(handle: tokio::runtime::Handle) {
     *broadcast_handle().lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
+/// 手动换档保持（T-049 二期）：`SetDisplayWidth` 后记下所选档，作为选档
+/// **下限**——竞态窗口里的旧尺寸 refit（换档前的窗口变化滞后处理）不再
+/// 覆盖手动档（t15 真机复现：手动 1080 被旧 refit 拉回 550）；需求真实
+/// 变大仍跟随升档，需求表清空（全部关窗）则失效回落基准。
+static MANUAL_HOLD: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+
+fn manual_hold() -> &'static Mutex<Option<u32>> {
+    MANUAL_HOLD.get_or_init(|| Mutex::new(None))
+}
+
+/// 手动换档成功后登记档位下限（`set_width` 调用）。
+pub fn set_manual_hold(width: u32) {
+    *manual_hold().lock().unwrap_or_else(|e| e.into_inner()) = Some(width);
+}
+
+/// 手动档下的目标档裁决（纯函数，单测锚定语义）：
+/// - 无手动档 → 自然需求；
+/// - 有手动档且表非空 → `max(自然需求, 手动档)`——需求变大跟随升档，
+///   需求变小（竞态旧值/关小窗）保持手动档；
+/// - 表空（全部关窗）→ 失效回落自然需求（基准档），H-1 关窗回落语义不受
+///   手动档影响。
+fn resolve_target(natural: u32, hold: Option<u32>, has_windows: bool) -> u32 {
+    match hold {
+        Some(held) if has_windows && natural < held => held,
+        _ => natural,
+    }
+}
+
 /// 任意线程可调：窗口尺寸变化 → 重算集体档位（非阻塞入队）。
 pub fn request_refit(hwnd: u64) {
     let _ = fit_tx().send(FitMsg::Refit(hwnd));
@@ -140,9 +169,12 @@ fn refit_blocking(refits: &HashSet<u64>, closeds: &HashSet<u64>) {
             d.remove(h);
         }
         for h in refits {
-            match rd_window_win::resize::window_rect(*h as isize) {
-                Ok(rect) => {
-                    d.insert(*h, (rect.w, rect.h));
+            match rd_window_win::resize::window_client_size(*h as isize) {
+                Ok((cw, ch)) => {
+                    // 客户区口径（T-049 二期）：内容真需求 vs 档位客户区容量
+                    // （fit.rs client_capacity），外框口径会把边框标题栏算进
+                    // 需求，铺满场景选档震荡（t15 真机复现）。
+                    d.insert(*h, (cw, ch));
                 }
                 Err(err) => {
                     tracing::debug!(window = format!("{h:#x}"), "量窗口失败（可能已关）: {err}");
@@ -154,7 +186,10 @@ fn refit_blocking(refits: &HashSet<u64>, closeds: &HashSet<u64>) {
 
     let target = {
         let d = demands().lock().unwrap_or_else(|e| e.into_inner());
-        target_fit.width_for_windows(&d.values().copied().collect::<Vec<_>>())
+        let has = !d.is_empty();
+        let natural = target_fit.width_for_windows(&d.values().copied().collect::<Vec<_>>());
+        let hold = *manual_hold().lock().unwrap_or_else(|e| e.into_inner());
+        resolve_target(natural, hold, has)
     };
     let current = orchestration()
         .with_slot(|handle, _| handle.info().width)
@@ -234,6 +269,18 @@ fn broadcast_switched(width: u32, height: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 手动档裁决三例（T-049）：下限保持 / 需求变大跟随 / 表空失效。
+    #[test]
+    fn resolve_target_manual_hold_semantics() {
+        // 竞态旧尺寸 refit（自然需求 550 < 手动 1080）→ 保持手动档
+        assert_eq!(resolve_target(550, Some(1080), true), 1080);
+        // 需求真实变大（自然 1100 封顶前）→ 跟随升档
+        assert_eq!(resolve_target(1080, Some(1080), true), 1080);
+        assert_eq!(resolve_target(550, None, true), 550, "无手动档=全自动");
+        // 表空（全部关窗）→ 失效回落自然需求（基准档），H-1 回落不受影响
+        assert_eq!(resolve_target(540, Some(1080), false), 540);
+    }
 
     #[test]
     fn demand_table_roundtrip() {

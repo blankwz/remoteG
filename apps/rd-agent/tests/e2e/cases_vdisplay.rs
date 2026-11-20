@@ -379,9 +379,12 @@ async fn t16_vdisplay_window_fit_auto_select() -> Result<()> {
     println!("[t16] 建屏: {} {}×{}", created.device_name, base.0, base.1);
 
     // ── 2. 开窗（外框 800×600）→ 自动升档到能装下的最窄档 ──
+    // 期望档位用**真实读回的客户区**算（与实现 demand 同口径——需求表记
+    // 客户区，选档判定按档位客户区容量；外框口径会把边框标题栏算进需求，
+    // 铺满场景选档震荡，见 fit.rs client_capacity 注释）。
     set_testwin_size(800, 600)?;
-    let rect0 = rd_window_win::resize::window_rect(hwnd as isize).context("读窗口矩形失败")?;
-    let want = fit.width_for_windows(&[(rect0.w, rect0.h)]);
+    let rect0 = rd_window_win::resize::window_client_size(hwnd as isize).context("读客户区失败")?;
+    let want = fit.width_for_windows(&[rect0]);
     let streams = common::open_window(&mut c, hwnd).await?;
     // 后台排空两条数据流：不消费会阻塞 agent 编码循环，窗口 resize 的
     // 捕获帧出不来，选档联动信号（块 1）就丢了。
@@ -389,9 +392,9 @@ async fn t16_vdisplay_window_fit_auto_select() -> Result<()> {
     tokio::spawn(drain_stream(streams.tile));
     wait_tier(&created.device_name, &fit, want, Duration::from_secs(10)).await?;
     println!(
-        "[t16] 开窗 {}×{} → 自动升档 {want}（{:?}）",
-        rect0.w,
-        rect0.h,
+        "[t16] 开窗客户区 {}×{} → 自动升档 {want}（{:?}）",
+        rect0.0,
+        rect0.1,
         fit.size(want)
     );
     ensure!(
@@ -400,23 +403,24 @@ async fn t16_vdisplay_window_fit_auto_select() -> Result<()> {
     );
 
     // ── 3. resize 到 900×1600 → 联动换档（可升）──
-    // 期望档位必须用 resize 后**真实读回的外框**算（与实现的 demand 同源，
-    // 同步骤 2 的 rect0 模式）：跨屏/超屏窗口的实际外框与设定值有出入
-    // （实测 ps1 设 900×1600、窗口被拉回主屏后读回 (900,1427)），按名义值
-    // 算会差一档、误判实现选错档。
+    // 期望档位用 resize 后**真实读回的客户区**算（与实现 demand 同口径，
+    // 同步骤 2）：跨屏/超屏窗口的实际尺寸与设定值有出入，按名义值算会
+    // 误判实现选错档（首跑教训：ps1 设 900×1600 读回外框 (900,1427)）。
     set_testwin_size(900, 1600)?;
-    let rect_up = rd_window_win::resize::window_rect(hwnd as isize).context("读窗口矩形失败")?;
-    let want_up = fit.width_for_windows(&[(rect_up.w, rect_up.h)]);
+    let rect_up =
+        rd_window_win::resize::window_client_size(hwnd as isize).context("读客户区失败")?;
+    let want_up = fit.width_for_windows(&[rect_up]);
     wait_tier(&created.device_name, &fit, want_up, Duration::from_secs(10)).await?;
     println!(
-        "[t16] resize 900×1600（实际 {rect_up:?}）→ 换档 {want_up}（{:?}）",
+        "[t16] resize 900×1600（客户区 {rect_up:?}）→ 换档 {want_up}（{:?}）",
         fit.size(want_up)
     );
 
     // ── 4. resize 回 800×600 → 联动降档（集体选档可升可降）──
     set_testwin_size(800, 600)?;
-    let rect_down = rd_window_win::resize::window_rect(hwnd as isize).context("读窗口矩形失败")?;
-    let want_down = fit.width_for_windows(&[(rect_down.w, rect_down.h)]);
+    let rect_down =
+        rd_window_win::resize::window_client_size(hwnd as isize).context("读客户区失败")?;
+    let want_down = fit.width_for_windows(&[rect_down]);
     ensure!(
         want_down < want_up,
         "缩窗后应降档，{want_down} !< {want_up}"

@@ -164,6 +164,9 @@ pub async fn set_width(ctx: &SessionCtx, req_id: u32, req: SetDisplayWidth) -> a
     match switched {
         Ok(Some(Ok(()))) => {
             let info = current_info().await;
+            // 手动档保持（T-049）：登记为选档下限，竞态旧尺寸 refit 不再
+            // 覆盖手动档；需求真实变大仍跟随升档（fit_sched::resolve_target）
+            fit_sched::set_manual_hold(width);
             ctx.send(Msg::SetDisplayWidth(SetDisplayWidth { width }), req_id)
                 .await?;
             if let Some(info) = &info {

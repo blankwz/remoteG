@@ -36,9 +36,9 @@ jobs:
       - name: Pack agent update bundle（改造项 A：切块 + 清单 + 签名）
         shell: pwsh
         env:
-          # ed25519 seed hex（rd-pack-cli keygen 生成；T-039 配 GitHub secret）。
-          # 未配置时 pack/update.json 照常产出、跳过签名——Agent 端公钥占位
-          # 本来就 fail-closed 不消费，发布流水线不因密钥未就绪而阻塞。
+          # ed25519 seed hex（rd-pack-cli keygen 生成，与 Agent 内置锚定公钥同源）。
+          # 未配置时 pack/update.json 照常产出、跳过签名——Agent 端 update.json.sig
+          # 404 → 检查失败自动静默/手动检查诚实报错（T-039 尾项，配置后渠道完全就绪）
           RD_UPDATE_SIGN_KEY: ${{ secrets.RD_UPDATE_SIGN_KEY }}
         run: |
           $zip = Get-ChildItem dist -Filter "rd-agent-*-win64.zip" | Select-Object -First 1
@@ -51,7 +51,7 @@ jobs:
             Set-Content -Path $keyFile -Value $env:RD_UPDATE_SIGN_KEY -NoNewline
             $keyArgs = @("--sign-key", "@$keyFile")
           } else {
-            Write-Host "RD_UPDATE_SIGN_KEY 未配置：跳过 update.json 签名（T-039 前的占位行为）"
+            Write-Host "RD_UPDATE_SIGN_KEY 未配置：跳过 update.json 签名（渠道未完全就绪，检查会静默失败）"
           }
           cargo run -q -p rd-update-pack --features mirror --bin rd-pack-cli -- pack `
             --zip $zip.FullName --version $version --out-dir dist @keyArgs
@@ -163,6 +163,15 @@ jobs:
           $latest | ConvertTo-Json -Depth 5 |
             Set-Content dist/latest.json -Encoding utf8
           Write-Host "latest.json: v$version, platforms=$($latest.platforms.Keys -join ',')"
+      - name: Generate checksums.sha256（官网下载区承诺的校验文件）
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -File | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          }
+          $lines | Set-Content dist/checksums.sha256 -Encoding ascii
+          Write-Host "checksums.sha256: $($lines.Count) assets"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
