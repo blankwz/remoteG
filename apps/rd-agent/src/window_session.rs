@@ -409,7 +409,7 @@ pub fn on_disconnect(ctx: &SessionCtx) {
         owned.into_iter().filter_map(|id| map.remove(&id)).collect()
     };
     for h in mine {
-        h.shutdown(true);
+        h.shutdown(true, true);
     }
 }
 
@@ -751,10 +751,12 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     let _serial = OPEN_SERIAL.lock().await;
 
     let wid = open.window_id;
-    // 同窗口重复打开：先按关闭语义停掉旧管线（恢复布局，避免覆盖原始 placement）
+    // 同窗口重复打开：先按关闭语义停掉旧管线（恢复布局，避免覆盖原始 placement）。
+    // closed=false：同窗口马上重开（下方 register_pipe 的 request_refit 会重新
+    // 入表），误发 Closed 会造成「回落基准→再升档」抖动（审查 H-1 修复）。
     if let Some(old) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&wid) {
         tracing::info!(window = format!("{wid:#x}"), "窗口已打开，先关闭旧会话");
-        old.shutdown(true);
+        old.shutdown(true, false);
     }
 
     // 校验：不存在/不可捕获 → 10；最小化 → 自动还原再捕获（用户实测反馈 1，
@@ -1218,8 +1220,9 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             "注册时发现同窗口旧管线，兜底关闭"
         );
         // 不恢复布局：恢复归 open 开头的停旧路径 / CloseWindow 负责，避免与
-        // 本次会话刚保存的布局叠加。
-        old.shutdown(false);
+        // 本次会话刚保存的布局叠加。closed=false：同窗口重开顶替，理由同
+        // open_window 开头的停旧路径（审查 H-1 修复）。
+        old.shutdown(false, false);
     }
 
     // 虚拟屏（一期）：根窗口摆到虚拟屏中央（物理屏保持可用）。只在建屏后
@@ -1361,7 +1364,7 @@ fn handle_close(close: CloseWindow) -> anyhow::Result<()> {
         .remove(&close.window_id);
     match handle {
         Some(h) => {
-            h.shutdown(true);
+            h.shutdown(true, true);
             tracing::info!(
                 window = format!("{:#x}", close.window_id),
                 "窗口会话已关闭并恢复布局"
@@ -1519,8 +1522,15 @@ struct PipeHandle {
 
 impl PipeHandle {
     /// 停止管线：取消令牌 → 捕获 drop（通道关闭）→ join 编码线程。
-    /// `restore` 为 true 时恢复会话前的窗口布局。
-    fn shutdown(mut self, restore: bool) {
+    ///
+    /// `restore`：true 时恢复会话前的窗口布局。
+    /// `closed`：true 时把窗口移出虚拟屏选档需求表（块 1「关窗回落」）。
+    /// **调用方必须按语义传**——只有「窗口对 rd 的参与结束」（显式关窗/
+    /// 断连清理/组销毁/管线自亡兜底）才发，同窗口重开的「停旧建新」两处
+    /// 顶替路径（open_window 开头与 register_pipe 兜底）必须传 false：
+    /// 那两条路径后随 register_pipe 的 request_refit 会重新入表，误发
+    /// Closed 会造成「回落基准→再升档」的抖动（审查 H-1 修复）。
+    fn shutdown(mut self, restore: bool, closed: bool) {
         self.cancel.cancel();
         if let Some(a) = self.deb.abort.lock().unwrap_or_else(lock_poisoned).take() {
             a.abort();
@@ -1534,6 +1544,9 @@ impl PipeHandle {
         }
         if restore {
             restore_saved(self.hwnd as isize, &self.saved);
+        }
+        if closed {
+            crate::vdisplay::request_window_closed(self.hwnd);
         }
     }
 }
@@ -2094,9 +2107,10 @@ async fn tile_send_task(
 async fn pipe_cleanup(ctx: &SessionCtx, window_id: u64, serial: u64, errors: Arc<PipeError>) {
     let handle = unregister_pipe(window_id, serial);
     if let Some(handle) = handle {
-        handle.shutdown(true);
-        // 块 1：窗口退出虚拟屏 → 出需求表并重算（最后一个窗口 → 回落基准档）
-        crate::vdisplay::request_window_closed(window_id);
+        // 管线自亡（世代兜底路径：未被显式关窗/断连/组销毁拿走）——窗口对
+        // rd 的参与结束，closed=true 出需求表（移到 shutdown 内统一发，见
+        // PipeHandle::shutdown 文档；审查 H-1 修复）。
+        handle.shutdown(true, true);
     }
     if let Some((code, message)) = errors.take() {
         let _ = ctx.send(Msg::Error(Error { code, message }), 0).await;
@@ -2268,7 +2282,7 @@ async fn poll_groups(ctx: &Arc<SessionCtx>) {
             // 已走推送路径，这里只做资源收场，不再额外通知。
             if let Some(h) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&root) {
                 tracing::info!(root = format!("{root:#x}"), "根窗口已销毁，收场根管线");
-                h.shutdown(false);
+                h.shutdown(false, true);
             }
             continue;
         }
@@ -2412,7 +2426,7 @@ async fn teardown_child(ctx: &Arc<SessionCtx>, root_id: u64, child: isize, notif
         .unwrap_or_else(lock_poisoned)
         .remove(&(child as u64));
     if let Some(h) = handle {
-        h.shutdown(false); // 子窗口无 saved，restore 为 no-op
+        h.shutdown(false, true); // 子窗口无 saved，restore 为 no-op；closed 出表（组成员本不在表，幂等）
     }
     if let Some(set) = child_members()
         .lock()

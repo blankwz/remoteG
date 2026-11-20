@@ -102,6 +102,10 @@ pub fn spawn_start(ctx: &Arc<SessionCtx>) {
     if ctx.vdisplay_on.swap(true, Ordering::SeqCst) {
         return; // 同一连接只计一次
     }
+    // 广播 Handle 注入（审查 M-1）：会话建立必经此路（tokio 上下文内），
+    // 幂等覆盖——即使 fit 线程被编码线程抢先初始化（无 tokio 上下文捕获
+    // 不到 Handle），这里也会补上。
+    fit_sched::set_broadcast_handle(tokio::runtime::Handle::current());
     fit_sched::register_session(crate::window_session::ctx_key(ctx), ctx);
     if !orchestration().acquire() {
         return;

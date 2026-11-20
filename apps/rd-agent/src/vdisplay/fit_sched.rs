@@ -60,18 +60,31 @@ fn fit_tx() -> &'static mpsc::Sender<FitMsg> {
     static TX: OnceLock<mpsc::Sender<FitMsg>> = OnceLock::new();
     TX.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<FitMsg>();
-        // 首次调用必在 tokio 上下文（开窗/视口适配路径先于编码线程 resize），
-        // 据此捕获 Handle 供调度线程广播 SWITCHED 通知。
-        let handle = tokio::runtime::Handle::try_current().ok();
-        if handle.is_none() {
-            tracing::warn!("fit 调度线程启动时无 tokio 上下文，换档通知将不可用");
+        // 首次调用若恰在 tokio 上下文顺手注入广播 Handle（防御：首次调用
+        // 早于任何会话建立）；常规注入点是 spawn_start（审查 M-1 修复——
+        // 不用 OnceLock 缓存「可能为 None 的结果」，注入式幂等覆盖）。
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            set_broadcast_handle(h);
         }
         std::thread::Builder::new()
             .name("vdisplay-fit".into())
-            .spawn(move || fit_loop(rx, handle))
+            .spawn(move || fit_loop(rx))
             .expect("spawn fit 调度线程失败");
         tx
     })
+}
+
+/// 广播用 tokio Handle：fit 线程自身无 tokio 上下文，由 tokio 侧调用点注入
+/// （[`set_broadcast_handle`]，spawn_start 每次会话建立时幂等覆盖）。
+fn broadcast_handle() -> &'static Mutex<Option<tokio::runtime::Handle>> {
+    static H: OnceLock<Mutex<Option<tokio::runtime::Handle>>> = OnceLock::new();
+    H.get_or_init(|| Mutex::new(None))
+}
+
+/// tokio 侧注入广播 Handle（spawn_start 每次会话建立时调用——会话建立
+/// 必经此路，保证编码线程抢先初始化 fit 线程时 Handle 仍会被补上）。
+pub fn set_broadcast_handle(handle: tokio::runtime::Handle) {
+    *broadcast_handle().lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
 /// 任意线程可调：窗口尺寸变化 → 重算集体档位（非阻塞入队）。
@@ -84,7 +97,7 @@ pub fn request_window_closed(hwnd: u64) {
     let _ = fit_tx().send(FitMsg::Closed(hwnd));
 }
 
-fn fit_loop(rx: mpsc::Receiver<FitMsg>, handle: Option<tokio::runtime::Handle>) {
+fn fit_loop(rx: mpsc::Receiver<FitMsg>) {
     while let Ok(first) = rx.recv() {
         // debounce：静默窗后一次性吞掉积压（合并为一次重算）。
         std::thread::sleep(DEBOUNCE);
@@ -104,16 +117,12 @@ fn fit_loop(rx: mpsc::Receiver<FitMsg>, handle: Option<tokio::runtime::Handle>) 
                 }
             };
         }
-        refit_blocking(&refits, &closeds, handle.as_ref());
+        refit_blocking(&refits, &closeds);
     }
 }
 
 /// 一次重算：更新需求表 → 集体档位 → 必要时换档 + 广播 + 全窗口重新居中。
-fn refit_blocking(
-    refits: &HashSet<u64>,
-    closeds: &HashSet<u64>,
-    handle: Option<&tokio::runtime::Handle>,
-) {
+fn refit_blocking(refits: &HashSet<u64>, closeds: &HashSet<u64>) {
     let Some(target_fit) = orchestration().with_slot(|_, fit| fit.clone()) else {
         // 没有虚拟屏：只清关窗条目（防泄漏），不选档。
         if !closeds.is_empty() {
@@ -158,7 +167,7 @@ fn refit_blocking(
         match switched {
             Some(Ok(info)) => {
                 tracing::info!(from = current, to = target, "窗口选档联动换档");
-                broadcast_switched(handle, info.width, info.height);
+                broadcast_switched(info.width, info.height);
                 window_session::force_idr_all();
                 recenter_all();
             }
@@ -187,13 +196,20 @@ fn recenter_all() {
 }
 
 /// SWITCHED 广播：发往全部活跃会话（清掉死引用）。fit 线程无 tokio 上下文，
-/// 经启动时捕获的 Handle block_on 发送。
-fn broadcast_switched(handle: Option<&tokio::runtime::Handle>, width: u32, height: u32) {
+/// 经注入的 Handle 逐会话 spawn 发送——单个停滞客户端（发送背压未断开）
+/// 只拖慢自己的任务，不阻塞 fit 调度线程（审查 M-2 修复）。通知为
+/// best-effort：会话已断（send 失败）静默，引用清理交给 unregister_session。
+fn broadcast_switched(width: u32, height: u32) {
     use rd_proto::v0::envelope::Msg;
     use rd_proto::v0::virtual_display_state::Kind;
     use rd_proto::v0::VirtualDisplayState;
 
-    let Some(handle) = handle else {
+    let Some(handle) = broadcast_handle()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
+        tracing::debug!("广播 Handle 未注入（无会话建立过），跳过 SWITCHED 通知");
         return;
     };
     let targets: Vec<std::sync::Arc<SessionCtx>> = {
@@ -209,7 +225,9 @@ fn broadcast_switched(handle: Option<&tokio::runtime::Handle>, width: u32, heigh
     };
     for ctx in targets {
         let state = state.clone();
-        let _ = handle.block_on(async move { ctx.send(Msg::VdisplayState(state), 0).await });
+        handle.spawn(async move {
+            let _ = ctx.send(Msg::VdisplayState(state), 0).await;
+        });
     }
 }
 
