@@ -25,6 +25,14 @@ export interface WindowDto {
   dpi: number;
   resizable: boolean;
   minimized: boolean;
+  /** 窗口外框屏幕矩形（全局物理像素；块 2 轻点关闭核对用，前端不消费）。
+   * 可选：mock/旧 fixture 无此字段。 */
+  frameX?: number;
+  frameY?: number;
+  frameW?: number;
+  frameH?: number;
+  /** 标题栏关闭按钮屏幕矩形（全局；null/缺省 = 无按钮/不可定位）。 */
+  closeButton?: { x: number; y: number; w: number; h: number } | null;
 }
 
 /** 顶层窗口事件种类（proto `WindowEvent.Kind` 枚举名）。 */

@@ -47,7 +47,10 @@ pub trait VDisplayBackend {
 }
 
 /// 测试用假后端：驱动状态 + 显示拓扑都由内存模拟，含「屏出现延迟」与故障注入。
-#[cfg(test)]
+///
+/// rd-vdisplay 自身测试与本 crate 的 `test-util` feature 消费方（rd-agent
+/// 编排层单测，T-049 M-4 清偿）共用。
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default)]
 pub struct FakeBackend {
     /// 驱动登记的 monitor（与 `Notify` 语义一致：全量替换）。
@@ -67,7 +70,7 @@ pub struct FakeBackend {
     pending: u32,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl FakeBackend {
     /// 建一个只有物理屏、驱动状态为空的世界。
     pub fn new() -> Self {
@@ -99,10 +102,10 @@ impl FakeBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 const FAKE_DEVICE: &str = r"\\.\DISPLAY_VD";
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl VDisplayBackend for FakeBackend {
     fn driver_state(&mut self) -> Result<Vec<Monitor>, Error> {
         Ok(self.monitors.clone())

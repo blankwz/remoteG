@@ -26,7 +26,7 @@ vi.mock("../api/bridge", () => ({
   listenStub: vi.fn().mockResolvedValue(() => undefined),
 }));
 
-import { applyWindowEvent, filterWindows, windowEventId } from "./Windows";
+import { appGroups, applyWindowEvent, filterWindows, windowEventId } from "./Windows";
 import {
   listWindows,
   subscribeWindowEvents,
@@ -166,6 +166,45 @@ describe("filterWindows", () => {
   it("不可变：不改入参", () => {
     filterWindows(list, "终端");
     expect(list).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// App 资源库聚合（appGroups，块 3/T-049）
+// ---------------------------------------------------------------------------
+
+describe("appGroups", () => {
+  it("按进程聚合窗口并共享图标", () => {
+    const groups = appGroups([
+      win({ id: "1", title: "A", process: "chrome.exe", icon: "data:a" }),
+      win({ id: "2", title: "B", process: "chrome.exe", icon: null }),
+      win({ id: "3", title: "C", process: "notepad.exe", icon: null }),
+    ]);
+    expect(groups).toHaveLength(2);
+    const chrome = groups.find((g) => g.process === "chrome.exe");
+    expect(chrome?.windows.map((w) => w.id)).toEqual(["1", "2"]);
+    expect(chrome?.icon).toBe("data:a");
+    expect(chrome?.visibleCount).toBe(2);
+  });
+
+  it("运行中（有可见窗口）的应用排前，最小化应用殿后", () => {
+    const groups = appGroups([
+      win({ id: "1", title: "后台", process: "bg.exe", minimized: true }),
+      win({ id: "2", title: "前台", process: "fg.exe" }),
+      win({ id: "3", title: "后台2", process: "bg2.exe", minimized: true }),
+    ]);
+    expect(groups.map((g) => g.process)).toEqual(["fg.exe", "bg.exe", "bg2.exe"]);
+    expect(groups[0]?.visibleCount).toBe(1);
+    expect(groups[1]?.visibleCount).toBe(0);
+  });
+
+  it("全最小化与空列表：保持首次出现序、返回空", () => {
+    const groups = appGroups([
+      win({ id: "1", title: "A", process: "a.exe", minimized: true }),
+      win({ id: "2", title: "B", process: "b.exe", minimized: true }),
+    ]);
+    expect(groups.map((g) => g.process)).toEqual(["a.exe", "b.exe"]);
+    expect(appGroups([])).toEqual([]);
   });
 });
 

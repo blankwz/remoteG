@@ -15,6 +15,13 @@ fn base() -> WindowAttrs {
             w: 1280,
             h: 720,
         },
+        frame: rd_window_win::Rect {
+            x: 92,
+            y: 50,
+            w: 1296,
+            h: 760,
+        },
+        close_button: None,
         dpi: 144,
         resizable: true,
         minimized: false,

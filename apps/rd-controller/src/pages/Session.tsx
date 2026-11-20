@@ -1112,6 +1112,7 @@ export function Session({ deviceId }: { deviceId: string }) {
                 recordCtlRef={recordCtlRef}
                 sessionCtlRef={sessionCtlRef}
                 onRecordingAutoStop={handleRecordingAutoStop}
+                vdisplayWidth={vdisplay !== null && vdisplay.kind !== 3 ? vdisplay.width : null}
                 onRootGone={() => {
                   const title = titleCacheRef.current.get(t.id);
                   closeTab(t.id);

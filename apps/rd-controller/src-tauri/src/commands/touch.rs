@@ -9,18 +9,22 @@
 //!   toPhys/hitAt 换算），`TouchRegion.frame` 即整个窗口客户区；slop 等阈值
 //!   的「物理手指距离」语义由 `region.scale`（远程宽 / 画面 css 宽）保持——
 //!   画面缩得越小阈值越大防误判（snug 语义）。
-//! - CloseWindow 命令控制端不触发：核对 is_frontmost 需要「屏上窗口从前到
-//!   后」列表（snug 的 macOS 窗口服务器语义，Windows 端无对应物），触屏
-//!   关窗走普通点击。防御性忽略该命令。
+//! - 轻点关闭（二期块 2/T-049）：按下批次前向被控端拉一次窗口列表（Z 序），
+//!   把当前窗口的关闭钮矩形（`WindowInfo.close_*`，全局物理像素）换算到
+//!   客户区相对坐标喂给 translator（`CloseButton`）；松手若判定为点关闭，
+//!   用**新鲜列表**核对 `is_frontmost`（该点最前窗口还是它、外框没被拖走）
+//!   ——通过走 `CloseWindow` 消息（免前台门控的语义化关闭），不过照常补发
+//!   点击（漏判无害：点击落在关闭钮上，普通点击 ≡ 关窗口）。核对失败回退
+//!   是安全方向，故列表 RPC 失败一律按「无关闭钮」降级。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use rd_proto::v0::{ContinuousScroll, MouseButton, envelope};
+use rd_proto::v0::{CloseWindow, ContinuousScroll, ListWindows, MouseButton, envelope};
 use rd_touch_translate::scrolling::ScrollStep;
 use rd_touch_translate::translator::{
-    Point, Rect, TouchCommand, TouchInput, TouchKind, TouchRegion, TouchTranslator,
+    CloseButton, Point, Rect, TouchCommand, TouchInput, TouchKind, TouchRegion, TouchTranslator,
 };
 use serde::Deserialize;
 
@@ -45,16 +49,6 @@ pub struct TouchRegionDto {
     pub scale: f64,
 }
 
-impl From<&TouchRegionDto> for TouchRegion {
-    fn from(r: &TouchRegionDto) -> Self {
-        Self {
-            frame: Rect::new(0.0, 0.0, r.w, r.h),
-            scale: r.scale,
-            close_button: None,
-        }
-    }
-}
-
 /// DTO kind 字符串 → 状态机输入种类（未知值按拖动处理，不炸整批）。
 fn kind_of(s: &str) -> TouchKind {
     match s {
@@ -69,7 +63,27 @@ fn kind_of(s: &str) -> TouchKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TouchOutMsg {
     Reliable(envelope::Msg),
-    Move { x: i32, y: i32 },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    /// 轻点疑似落在关闭钮上（块 2）：调用方核对 `is_frontmost` 后决定发
+    /// `CloseWindow` 还是照常补发点击。`button` 为客户区相对快照。
+    CloseIfFrontmost {
+        window_id: u64,
+        at: Point,
+        button: CloseButton,
+    },
+}
+
+/// 按下批次携带的窗口快照（来自被控端 Z 序列表，全部换算到当前窗口客户区
+/// 相对坐标）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WinSnapshot {
+    /// 当前窗口的关闭钮（客户区相对；无按钮 = None）。
+    pub close_button: Option<CloseButton>,
+    /// 屏上窗口外框（从前到后，客户区相对）——核对 `is_frontmost` 用。
+    pub on_screen: Vec<(u32, Rect)>,
 }
 
 /// 单窗口手势翻译状态。一个远程窗口一个实例：窗口切换后 region 变化，
@@ -79,6 +93,8 @@ pub struct TouchSession {
     /// 最近一次按下的位置（窗口相对物理像素）——translator 吞掉的按下不随
     /// 命令回传，ReplayPress/点击类补发位置由此提供。
     press_at: Point,
+    /// 按下批次的窗口快照（块 2 轻点关闭的数据源；跨 press→release 批次持有）。
+    snapshot: Option<WinSnapshot>,
 }
 
 impl Default for TouchSession {
@@ -92,6 +108,7 @@ impl TouchSession {
         Self {
             translator: TouchTranslator::new(),
             press_at: Point::default(),
+            snapshot: None,
         }
     }
 
@@ -101,13 +118,23 @@ impl TouchSession {
     }
 
     /// 喂一批事件，按序产出待发送消息。翻译为纯逻辑（锁内完成，发送在锁外）。
+    /// `snapshot`：按下批次的新窗口快照（None = 沿用上次，或无关闭钮）。
     pub fn feed(
         &mut self,
         region: &TouchRegionDto,
         window_id: u64,
         evs: &[TouchEventDto],
+        snapshot: Option<WinSnapshot>,
     ) -> Vec<TouchOutMsg> {
-        let region = TouchRegion::from(region);
+        if snapshot.is_some() || self.snapshot.is_none() {
+            self.snapshot = snapshot;
+        }
+        let close_button = self.snapshot.as_ref().and_then(|s| s.close_button);
+        let region = TouchRegion {
+            frame: Rect::new(0.0, 0.0, region.w, region.h),
+            scale: region.scale,
+            close_button,
+        };
         let mut out = Vec::new();
         for ev in evs {
             let loc = Point::new(ev.x, ev.y);
@@ -176,8 +203,17 @@ impl TouchSession {
                 btn_msg(window_id, p, 1, false),
             ],
             TouchCommand::Scroll(step) => vec![scroll_msg(window_id, step)],
-            // 控制端不喂 close_button，不会产生；防御性忽略
-            TouchCommand::CloseWindow(_) => Vec::new(),
+            // 轻点关闭：核对交给发送侧（新鲜列表 is_frontmost，见模块文档）
+            TouchCommand::CloseWindow(p) => {
+                let Some(button) = self.snapshot.as_ref().and_then(|s| s.close_button) else {
+                    return Vec::new();
+                };
+                vec![TouchOutMsg::CloseIfFrontmost {
+                    window_id,
+                    at: p,
+                    button,
+                }]
+            }
         }
     }
 }
@@ -219,7 +255,8 @@ fn sessions() -> &'static Mutex<HashMap<String, TouchSession>> {
 }
 
 /// 触控手势批量喂入（前端 pointer 触屏路径）：翻译在锁内纯逻辑完成，
-/// 产出的消息锁外发送。
+/// 产出的消息锁外发送。按下批次先拉被控端 Z 序列表（块 2 轻点关闭的
+/// 定位与核对数据源；拉取失败降级为「无关闭钮」，点击照常）。
 #[tauri::command]
 pub async fn touch_gesture(
     device_id: String,
@@ -237,12 +274,18 @@ pub async fn touch_gesture(
         .ok_or_else(|| "设备未连接".to_string())?;
     let key = format!("{device_id}/{win}");
 
+    let snapshot = if events.iter().any(|e| e.kind == "press") {
+        fetch_snapshot(&conn, win).await
+    } else {
+        None
+    };
+
     let msgs = {
         let mut map = sessions()
             .lock()
             .map_err(|_| "手势状态锁中毒".to_string())?;
         let session = map.entry(key.clone()).or_default();
-        session.feed(&region, win, &events)
+        session.feed(&region, win, &events, snapshot)
     };
     let coasting = {
         let map = sessions()
@@ -257,8 +300,138 @@ pub async fn touch_gesture(
     Ok(())
 }
 
+/// 全局坐标矩形 → 客户区相对（减客户区原点）。
+fn to_client_rel(r: Rect, origin: (i32, i32)) -> Rect {
+    Rect::new(r.x - origin.0 as f64, r.y - origin.1 as f64, r.w, r.h)
+}
+
+/// 拉被控端 Z 序列表并构造当前窗口快照（全部换算到当前窗口客户区相对坐标）。
+/// 失败返回 None（降级：本次手势无轻点关闭）。
+async fn fetch_snapshot(conn: &Arc<DeviceConn>, win: u64) -> Option<WinSnapshot> {
+    let list = fetch_list(conn).await?;
+    let me = list.iter().find(|w| w.id == win)?;
+    // WindowInfo.x/y 即客户区原点（proto 契约）；rel = 全局 - 客户区原点
+    let origin = (me.x, me.y);
+    let close_button = (me.close_w.max(me.close_h) > 0).then_some(CloseButton {
+        frame: to_client_rel(
+            Rect::new(
+                f64::from(me.close_x),
+                f64::from(me.close_y),
+                f64::from(me.close_w),
+                f64::from(me.close_h),
+            ),
+            origin,
+        ),
+        window: win as u32,
+        window_frame: to_client_rel(
+            Rect::new(
+                f64::from(me.frame_x),
+                f64::from(me.frame_y),
+                f64::from(me.frame_w),
+                f64::from(me.frame_h),
+            ),
+            origin,
+        ),
+    });
+    Some(WinSnapshot {
+        close_button,
+        on_screen: list
+            .iter()
+            .map(|w| {
+                (
+                    w.id as u32,
+                    to_client_rel(
+                        Rect::new(
+                            f64::from(w.frame_x),
+                            f64::from(w.frame_y),
+                            f64::from(w.frame_w),
+                            f64::from(w.frame_h),
+                        ),
+                        origin,
+                    ),
+                )
+            })
+            .collect(),
+    })
+}
+
+/// 拉被控端 Z 序窗口列表（失败 = None，调用方降级）。
+async fn fetch_list(conn: &Arc<DeviceConn>) -> Option<Vec<rd_proto::v0::WindowInfo>> {
+    let reply = conn
+        .rpc(envelope::Msg::ListWindows(ListWindows {}))
+        .await
+        .ok()?;
+    match reply.msg {
+        Some(envelope::Msg::WindowList(list)) => Some(list.windows),
+        _ => None,
+    }
+}
+
+/// 轻点关闭核对（块 2）：新鲜 Z 序列表核对 `is_frontmost`——通过回
+/// `CloseWindow`（免前台门控的语义化关闭），失败或拉取失败照常补发点击
+/// （漏判无害：点击落在关闭钮上，普通点击 ≡ 关窗口）。
+async fn resolve_close(
+    conn: &Arc<DeviceConn>,
+    window_id: u64,
+    at: Point,
+    button: CloseButton,
+) -> Result<(), String> {
+    let on_screen = fetch_list(conn).await.and_then(|list| {
+        let me = list.iter().find(|w| w.id == window_id)?;
+        let origin = (me.x, me.y);
+        Some(
+            list.iter()
+                .map(|w| {
+                    (
+                        w.id as u32,
+                        to_client_rel(
+                            Rect::new(
+                                f64::from(w.frame_x),
+                                f64::from(w.frame_y),
+                                f64::from(w.frame_w),
+                                f64::from(w.frame_h),
+                            ),
+                            origin,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let close = match on_screen {
+        // 挂起窗口探不到/列表空 → 保守补发点击
+        Some(on_screen) if button.is_frontmost(at, &on_screen) => true,
+        _ => false,
+    };
+    if close {
+        conn.send(envelope::Msg::CloseWindow(CloseWindow { window_id }))
+            .await
+            .map_err(|e| format!("发送关闭窗口失败：{e:#}"))
+    } else {
+        // 回退普通点击（按下 + 抬起于按下位置；点关闭钮 ≡ 关窗口）
+        conn.send(envelope::Msg::MouseBtn(MouseButton {
+            window_id,
+            x: at.x.round() as i32,
+            y: at.y.round() as i32,
+            button: 0,
+            down: true,
+        }))
+        .await
+        .map_err(|e| format!("发送点击失败：{e:#}"))?;
+        conn.send(envelope::Msg::MouseBtn(MouseButton {
+            window_id,
+            x: at.x.round() as i32,
+            y: at.y.round() as i32,
+            button: 0,
+            down: false,
+        }))
+        .await
+        .map_err(|e| format!("发送点击失败：{e:#}"))
+    }
+}
+
 /// 发送一批产物：可靠消息走控制流；datagram 移动失败静默（低延迟路径与
-/// 鼠标一致，下一帧立即覆盖）。
+/// 鼠标一致，下一帧立即覆盖）；轻点关闭走新鲜列表核对（见 [`resolve_close`]）。
 async fn send_out(
     conn: &Arc<DeviceConn>,
     device_id: &str,
@@ -275,6 +448,13 @@ async fn send_out(
             TouchOutMsg::Move { x, y } => {
                 let seq = next_seq(device_id);
                 let _ = conn.send_datagram(encode_mouse_move(win, x, y, seq).into());
+            }
+            TouchOutMsg::CloseIfFrontmost {
+                window_id,
+                at,
+                button,
+            } => {
+                resolve_close(conn, window_id, at, button).await?;
             }
         }
     }
@@ -309,6 +489,8 @@ fn spawn_coast(conn: Arc<DeviceConn>, key: String, win: u64, device_id: String) 
                     let seq = next_seq(&device_id);
                     let _ = conn.send_datagram(encode_mouse_move(win, x, y, seq).into());
                 }
+                // 惯性帧不产出关闭命令（仅 release 批产出），防御性忽略
+                Some(TouchOutMsg::CloseIfFrontmost { .. }) => {}
                 None => break,
             }
         }
@@ -366,6 +548,7 @@ mod tests {
                 ev("press", 10.0, 20.0, 0.0),
                 ev("release", 11.0, 21.0, 0.05),
             ],
+            None,
         );
         let btns: Vec<_> = msgs.iter().filter_map(btn_of).collect();
         assert_eq!(
@@ -390,7 +573,7 @@ mod tests {
             ));
         }
         evs.push(ev("release", 100.0, 300.0, 0.32));
-        let msgs = s.feed(&region(800.0, 1200.0, 1.0), 7, &evs);
+        let msgs = s.feed(&region(800.0, 1200.0, 1.0), 7, &evs, None);
         let sc = scrolls_of(&msgs);
         assert!(
             sc.len() >= 10,
@@ -419,6 +602,7 @@ mod tests {
             &region(800.0, 600.0, 1.0),
             7,
             &[ev("press", 50.0, 60.0, 0.0), ev("release", 50.0, 60.0, 0.6)],
+            None,
         );
         let btns: Vec<_> = msgs.iter().filter_map(btn_of).collect();
         assert_eq!(
@@ -439,6 +623,7 @@ mod tests {
                 ev("press", 900.0, 20.0, 0.0),
                 ev("release", 900.0, 20.0, 0.05),
             ],
+            None,
         );
         let btns: Vec<_> = msgs.iter().filter_map(btn_of).collect();
         assert_eq!(btns, vec![(900, 20, 0, true), (900, 20, 0, false)]);
@@ -455,6 +640,7 @@ mod tests {
                 ev("press", 100.0, 100.0, 0.0),
                 ev("drag", 105.0, 100.0, 0.03),
             ],
+            None,
         );
         assert!(
             scrolls_of(&msgs).is_empty(),
@@ -476,7 +662,7 @@ mod tests {
             ));
         }
         evs.push(ev("release", 100.0, 300.0, 0.32));
-        let _ = s.feed(&region(800.0, 1200.0, 1.0), 7, &evs);
+        let _ = s.feed(&region(800.0, 1200.0, 1.0), 7, &evs, None);
         let mut saw_end = false;
         while let Some(m) = s.momentum_frame(7) {
             if let TouchOutMsg::Reliable(envelope::Msg::ContinuousScroll(sc)) = &m
@@ -487,5 +673,121 @@ mod tests {
         }
         assert!(saw_end, "惯性帧序列应以 End 相位收尾");
         assert!(s.momentum_frame(7).is_none(), "End 后驱动应自然停止");
+    }
+
+    // ---- 块 2：轻点关闭（T-049）----
+
+    fn close_snapshot() -> WinSnapshot {
+        // 关闭钮客户区相对矩形 (760,103,32,26)；外框 (-8,-30,816,660)
+        WinSnapshot {
+            close_button: Some(CloseButton {
+                frame: Rect::new(760.0, 103.0, 32.0, 26.0),
+                window: 7,
+                window_frame: Rect::new(-8.0, -30.0, 816.0, 660.0),
+            }),
+            on_screen: vec![
+                (7, Rect::new(-8.0, -30.0, 816.0, 660.0)),
+                (9, Rect::new(0.0, 100.0, 400.0, 300.0)),
+            ],
+        }
+    }
+
+    fn close_of(m: &TouchOutMsg) -> Option<(u64, Point)> {
+        match m {
+            TouchOutMsg::CloseIfFrontmost { window_id, at, .. } => Some((*window_id, *at)),
+            _ => None,
+        }
+    }
+
+    /// 轻点落在关闭钮上 → 产出 CloseIfFrontmost（按下/抬起都吞，无补发点击）。
+    #[test]
+    fn tap_on_close_yields_close_command() {
+        let mut s = TouchSession::new();
+        let snap = close_snapshot();
+        let msgs_press = s.feed(
+            &region(800.0, 600.0, 1.0),
+            7,
+            &[ev("press", 776.0, 116.0, 0.0)],
+            Some(snap),
+        );
+        assert!(
+            msgs_press
+                .iter()
+                .all(|m| !matches!(m, TouchOutMsg::Reliable(_))),
+            "关闭钮上的按下应被吞（不补发 MouseBtn）"
+        );
+        let msgs = s.feed(
+            &region(800.0, 600.0, 1.0),
+            7,
+            &[ev("release", 776.0, 116.0, 0.05)],
+            None,
+        );
+        let (win, at) = msgs
+            .iter()
+            .find_map(close_of)
+            .expect("轻点关闭钮应产出 CloseIfFrontmost");
+        assert_eq!(win, 7);
+        assert_eq!((at.x, at.y), (776.0, 116.0));
+        assert!(
+            msgs.iter().all(|m| !matches!(m, TouchOutMsg::Reliable(_))),
+            "关闭命中时不应再补发普通点击"
+        );
+    }
+
+    /// 快照跨批次持有：release 批无 snapshot 也沿用按下时的关闭钮。
+    #[test]
+    fn snapshot_persists_across_batches() {
+        let mut s = TouchSession::new();
+        let _ = s.feed(
+            &region(800.0, 600.0, 1.0),
+            7,
+            &[ev("press", 776.0, 116.0, 0.0)],
+            Some(close_snapshot()),
+        );
+        let msgs = s.feed(
+            &region(800.0, 600.0, 1.0),
+            7,
+            &[ev("release", 776.0, 116.0, 0.05)],
+            None,
+        );
+        assert!(
+            msgs.iter().any(|m| close_of(m).is_some()),
+            "release 批应沿用快照"
+        );
+    }
+
+    /// 关闭钮区域外的轻点 → 普通点击补发，无 CloseIfFrontmost。
+    #[test]
+    fn tap_outside_close_is_plain_click() {
+        let mut s = TouchSession::new();
+        let mut evs = vec![ev("press", 100.0, 100.0, 0.0)];
+        evs.push(ev("release", 100.0, 100.0, 0.05));
+        let msgs = s.feed(&region(800.0, 600.0, 1.0), 7, &evs, Some(close_snapshot()));
+        assert!(
+            msgs.iter().all(|m| close_of(m).is_none()),
+            "关闭钮外轻点不应产出关闭命令"
+        );
+        let btns: Vec<_> = msgs.iter().filter_map(btn_of).collect();
+        assert_eq!(btns, vec![(100, 100, 0, true), (100, 100, 0, false)]);
+    }
+
+    /// 无快照（列表拉取失败降级）→ 轻点全程普通点击，零关闭命令。
+    #[test]
+    fn missing_snapshot_degrades_to_plain_click() {
+        let mut s = TouchSession::new();
+        let mut evs = vec![ev("press", 776.0, 116.0, 0.0)];
+        evs.push(ev("release", 776.0, 116.0, 0.05));
+        let msgs = s.feed(&region(800.0, 600.0, 1.0), 7, &evs, None);
+        assert!(msgs.iter().all(|m| close_of(m).is_none()));
+        let btns: Vec<_> = msgs.iter().filter_map(btn_of).collect();
+        assert_eq!(btns, vec![(776, 116, 0, true), (776, 116, 0, false)]);
+    }
+
+    /// 全局 → 客户区相对换算。
+    #[test]
+    fn to_client_rel_shifts_origin() {
+        let g = Rect::new(100.0, 200.0, 30.0, 20.0);
+        let r = to_client_rel(g, (60, 180));
+        assert_eq!((r.x, r.y, r.w, r.h), (40.0, 20.0, 30.0, 20.0));
     }
 }

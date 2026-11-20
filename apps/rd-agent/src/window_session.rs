@@ -193,6 +193,15 @@ pub(crate) fn force_idr_owned(ctx: &SessionCtx) {
     }
 }
 
+/// 全部管线强制下一帧 IDR（fit 调度线程换档：虚拟屏尺寸变了，全部在途
+/// 参考链作废。跨会话广播，不区分 owner）。
+pub(crate) fn force_idr_all() {
+    let map = pipes().lock().unwrap_or_else(lock_poisoned);
+    for h in map.values() {
+        h.drop_to_idr.store(true, Ordering::Relaxed);
+    }
+}
+
 fn register_pipe(handle: PipeHandle) -> Option<PipeHandle> {
     pipes()
         .lock()
@@ -289,7 +298,7 @@ fn ctx_arc(ctx: &SessionCtx) -> Arc<SessionCtx> {
 }
 
 /// `&SessionCtx` 在进程级注册表中的键（Arc 堆地址，连接生命周期内稳定唯一）。
-fn ctx_key(ctx: &SessionCtx) -> usize {
+pub(crate) fn ctx_key(ctx: &SessionCtx) -> usize {
     std::ptr::from_ref::<SessionCtx>(ctx) as usize
 }
 
@@ -400,7 +409,7 @@ pub fn on_disconnect(ctx: &SessionCtx) {
         owned.into_iter().filter_map(|id| map.remove(&id)).collect()
     };
     for h in mine {
-        h.shutdown(true);
+        h.shutdown(true, true);
     }
 }
 
@@ -447,6 +456,12 @@ fn list_infos() -> anyhow::Result<Vec<WindowInfo>> {
 }
 
 fn to_window_info(a: &WindowAttrs, icon: Option<Vec<u8>>) -> WindowInfo {
+    // 块 2（T-049）：外框与关闭按钮矩形随列表下发（附加字段，线上兼容）。
+    // 关闭钮全 0 = 无按钮（proto3 缺省语义，控制端按「不可轻点关闭」处理）。
+    let (close_x, close_y, close_w, close_h) = match a.close_button {
+        Some(r) => (r.x, r.y, r.w, r.h),
+        None => (0, 0, 0, 0),
+    };
     WindowInfo {
         id: a.hwnd as u64,
         title: a.title.clone(),
@@ -460,6 +475,14 @@ fn to_window_info(a: &WindowAttrs, icon: Option<Vec<u8>>) -> WindowInfo {
         dpi: a.dpi,
         resizable: a.resizable,
         minimized: a.minimized,
+        frame_x: a.frame.x,
+        frame_y: a.frame.y,
+        frame_w: a.frame.w,
+        frame_h: a.frame.h,
+        close_x,
+        close_y,
+        close_w,
+        close_h,
     }
 }
 
@@ -728,10 +751,12 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     let _serial = OPEN_SERIAL.lock().await;
 
     let wid = open.window_id;
-    // 同窗口重复打开：先按关闭语义停掉旧管线（恢复布局，避免覆盖原始 placement）
+    // 同窗口重复打开：先按关闭语义停掉旧管线（恢复布局，避免覆盖原始 placement）。
+    // closed=false：同窗口马上重开（下方 register_pipe 的 request_refit 会重新
+    // 入表），误发 Closed 会造成「回落基准→再升档」抖动（审查 H-1 修复）。
     if let Some(old) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&wid) {
         tracing::info!(window = format!("{wid:#x}"), "窗口已打开，先关闭旧会话");
-        old.shutdown(true);
+        old.shutdown(true, false);
     }
 
     // 校验：不存在/不可捕获 → 10；最小化 → 自动还原再捕获（用户实测反馈 1，
@@ -1112,6 +1137,8 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             fps_cap: Arc::clone(&fps_cap),
             frames: Arc::clone(&frames),
             drop_to_idr: Arc::clone(&drop_to_idr),
+            window_id: wid,
+            is_root: spec.is_root,
         };
         match std::thread::Builder::new()
             .name(format!("rd-enc-{wid:#x}"))
@@ -1193,14 +1220,17 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             "注册时发现同窗口旧管线，兜底关闭"
         );
         // 不恢复布局：恢复归 open 开头的停旧路径 / CloseWindow 负责，避免与
-        // 本次会话刚保存的布局叠加。
-        old.shutdown(false);
+        // 本次会话刚保存的布局叠加。closed=false：同窗口重开顶替，理由同
+        // open_window 开头的停旧路径（审查 H-1 修复）。
+        old.shutdown(false, false);
     }
 
     // 虚拟屏（一期）：根窗口摆到虚拟屏中央（物理屏保持可用）。只在建屏后
-    // 生效，无虚拟屏时静默跳过。
+    // 生效，无虚拟屏时静默跳过。块 1：随后按窗口外框联动集体选档（fit 调度
+    // 线程重算需求表，可升可降；手动 SetDisplayWidth 后的自动事件照常重算）。
     if spec.is_root {
         crate::vdisplay::center_window(wid).await;
+        crate::vdisplay::request_refit(wid);
     }
 
     Ok(PipeStarted {
@@ -1334,7 +1364,7 @@ fn handle_close(close: CloseWindow) -> anyhow::Result<()> {
         .remove(&close.window_id);
     match handle {
         Some(h) => {
-            h.shutdown(true);
+            h.shutdown(true, true);
             tracing::info!(
                 window = format!("{:#x}", close.window_id),
                 "窗口会话已关闭并恢复布局"
@@ -1407,8 +1437,9 @@ async fn apply_viewport(ctx: &SessionCtx, window_id: u64, fit: i32, vp: &Viewpor
                 h = target_h,
                 "窗口客户区已适配视口"
             );
-            // 尺寸变了就重新摆到虚拟屏中央（换档后窗口仍居中）
+            // 尺寸变了就重新摆到虚拟屏中央（换档后窗口仍居中），并联动选档
             crate::vdisplay::center_window(window_id).await;
+            crate::vdisplay::request_refit(window_id);
         }
         Ok(FitResult::Partial { actual_w, actual_h }) => {
             tracing::warn!(
@@ -1418,6 +1449,7 @@ async fn apply_viewport(ctx: &SessionCtx, window_id: u64, fit: i32, vp: &Viewpor
                 "窗口尺寸调整受程序限制，退化本地缩放"
             );
             crate::vdisplay::center_window(window_id).await;
+            crate::vdisplay::request_refit(window_id);
             let _ = send_error(
                 ctx,
                 0,
@@ -1490,8 +1522,15 @@ struct PipeHandle {
 
 impl PipeHandle {
     /// 停止管线：取消令牌 → 捕获 drop（通道关闭）→ join 编码线程。
-    /// `restore` 为 true 时恢复会话前的窗口布局。
-    fn shutdown(mut self, restore: bool) {
+    ///
+    /// `restore`：true 时恢复会话前的窗口布局。
+    /// `closed`：true 时把窗口移出虚拟屏选档需求表（块 1「关窗回落」）。
+    /// **调用方必须按语义传**——只有「窗口对 rd 的参与结束」（显式关窗/
+    /// 断连清理/组销毁/管线自亡兜底）才发，同窗口重开的「停旧建新」两处
+    /// 顶替路径（open_window 开头与 register_pipe 兜底）必须传 false：
+    /// 那两条路径后随 register_pipe 的 request_refit 会重新入表，误发
+    /// Closed 会造成「回落基准→再升档」的抖动（审查 H-1 修复）。
+    fn shutdown(mut self, restore: bool, closed: bool) {
         self.cancel.cancel();
         if let Some(a) = self.deb.abort.lock().unwrap_or_else(lock_poisoned).take() {
             a.abort();
@@ -1505,6 +1544,9 @@ impl PipeHandle {
         }
         if restore {
             restore_saved(self.hwnd as isize, &self.saved);
+        }
+        if closed {
+            crate::vdisplay::request_window_closed(self.hwnd);
         }
     }
 }
@@ -1530,6 +1572,10 @@ struct PipeRun {
     frames: Arc<AtomicU64>,
     /// 陈旧帧丢弃标志：发送任务跳帧后置位，编码循环消费（下帧 force IDR）。
     drop_to_idr: Arc<AtomicBool>,
+    /// 窗口 id 与是否根窗口（块 1：窗口尺寸变化联动虚拟屏选档，仅根窗口
+    /// 参与需求表；组成员窗口跟随主窗口布局，不占独立档位语义）。
+    window_id: u64,
+    is_root: bool,
 }
 
 /// 管线故障槽：编码线程写入，发送任务收尾时读取并转 `Error` 回控制端。
@@ -1579,6 +1625,8 @@ fn encode_loop(run: PipeRun) {
         target_kbps,
         fps_cap,
         frames,
+        window_id,
+        is_root,
     } = run;
     let mut pipe = FramePipeline::new(fps, kbps, refine, true, pixel_format);
     let mut applied_kbps = kbps;
@@ -1645,6 +1693,11 @@ fn encode_loop(run: PipeRun) {
                 let dirty = dirty_rects(frame.dirty);
                 match pipe.process(&raw, dirty.as_deref(), now) {
                     Ok(step) => {
+                        // 块 1（T-049）：窗口尺寸变化联动虚拟屏选档。编码线程
+                        // 无 tokio 上下文，走 fit 调度线程（std mpsc 入队）。
+                        if step.resized && is_root {
+                            crate::vdisplay::request_refit(window_id);
+                        }
                         if let Some(au) = step.au {
                             frames.fetch_add(1, Ordering::Relaxed);
                             last_encode = Some(now);
@@ -1712,6 +1765,8 @@ fn dirty_rects(rects: Option<Vec<rd_capture_win::Rect>>) -> Option<Vec<DirtyRect
 struct FrameStep {
     au: Option<EncodedAu>,
     invalidates: Vec<TileOut>,
+    /// 本帧相对上一帧尺寸变化（块 1：虚拟屏选档联动信号）。
+    resized: bool,
 }
 
 /// 捕获帧 → H.264 AU + 无损瓦片的可测核心（不含捕获/传输 IO）。
@@ -1842,6 +1897,7 @@ impl FramePipeline {
             return Ok(FrameStep {
                 au: None,
                 invalidates,
+                resized: false,
             });
         }
         let enc = self
@@ -1852,7 +1908,11 @@ impl FramePipeline {
         // 输出已流动（返回 Some）则 gating 生效；仍为 None（编码器缓冲中）则
         // 继续喂帧，禁止 gating。
         self.need_feed = au.is_none();
-        Ok(FrameStep { au, invalidates })
+        Ok(FrameStep {
+            au,
+            invalidates,
+            resized: size_changed,
+        })
     }
 
     /// 瓦片 tick：静止成熟的块在预算内编码下发（refine 关闭时恒空）。
@@ -2047,7 +2107,10 @@ async fn tile_send_task(
 async fn pipe_cleanup(ctx: &SessionCtx, window_id: u64, serial: u64, errors: Arc<PipeError>) {
     let handle = unregister_pipe(window_id, serial);
     if let Some(handle) = handle {
-        handle.shutdown(true);
+        // 管线自亡（世代兜底路径：未被显式关窗/断连/组销毁拿走）——窗口对
+        // rd 的参与结束，closed=true 出需求表（移到 shutdown 内统一发，见
+        // PipeHandle::shutdown 文档；审查 H-1 修复）。
+        handle.shutdown(true, true);
     }
     if let Some((code, message)) = errors.take() {
         let _ = ctx.send(Msg::Error(Error { code, message }), 0).await;
@@ -2219,7 +2282,7 @@ async fn poll_groups(ctx: &Arc<SessionCtx>) {
             // 已走推送路径，这里只做资源收场，不再额外通知。
             if let Some(h) = pipes().lock().unwrap_or_else(lock_poisoned).remove(&root) {
                 tracing::info!(root = format!("{root:#x}"), "根窗口已销毁，收场根管线");
-                h.shutdown(false);
+                h.shutdown(false, true);
             }
             continue;
         }
@@ -2363,7 +2426,7 @@ async fn teardown_child(ctx: &Arc<SessionCtx>, root_id: u64, child: isize, notif
         .unwrap_or_else(lock_poisoned)
         .remove(&(child as u64));
     if let Some(h) = handle {
-        h.shutdown(false); // 子窗口无 saved，restore 为 no-op
+        h.shutdown(false, true); // 子窗口无 saved，restore 为 no-op；closed 出表（组成员本不在表，幂等）
     }
     if let Some(set) = child_members()
         .lock()
@@ -2412,6 +2475,15 @@ fn child_window_info(m: &GroupMember) -> WindowInfo {
         dpi: 0,
         resizable: false,
         minimized: false,
+        // 组成员走相对坐标语义，外框/关闭钮矩形不适用（块 2 只服务顶层窗口）
+        frame_x: 0,
+        frame_y: 0,
+        frame_w: 0,
+        frame_h: 0,
+        close_x: 0,
+        close_y: 0,
+        close_w: 0,
+        close_h: 0,
     }
 }
 

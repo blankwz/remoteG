@@ -424,3 +424,115 @@
 .mapWinEdge .mapWinTitle {
   display: none;
 }
+
+/* ---- 应用资源库视图（块 3/T-049）：进程聚合卡片网格 ---- */
+
+.appGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.appCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius);
+  background: var(--rd-bg-deep);
+}
+
+.appCard[data-running="true"] {
+  border-color: var(--rd-accent);
+}
+
+.appHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.appIcon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.appIconLetter {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--rd-radius-sm);
+  background: rgb(255 255 255 / 8%);
+  font-weight: 600;
+  color: var(--rd-text-faint);
+}
+
+.appMeta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.appName {
+  font-weight: 600;
+  color: var(--rd-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.appSub {
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-faint);
+}
+
+.appWins {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.appWinBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--rd-radius-sm);
+  background: rgb(255 255 255 / 4%);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.appWinBtn:hover {
+  border-color: var(--rd-accent);
+  background: var(--rd-accent-soft);
+}
+
+.appWinTitle {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.appWinMin {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-faint);
+}

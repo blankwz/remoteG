@@ -14,9 +14,6 @@
 //! - `Notify` 是全量替换语义（不是增量）：要么带上全部 monitor，要么删掉；
 //! - 同一时刻一个 id 只能有一个 monitor。
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 /// 消息分隔字节。
@@ -92,28 +89,6 @@ pub fn parse_incoming(frame: &[u8]) -> Option<Incoming> {
     None
 }
 
-/// 从输入流里收集的那条入站消息。
-///
-/// 调用方把收到的每个完整帧（按 EOF 切分）送进来，等 `State` 应答时跳过
-/// 无关的 `Changed` 帧。
-pub fn wait_for_incoming(
-    rx: &Receiver<Vec<u8>>,
-    timeout: Duration,
-    mut want: impl FnMut(&Incoming) -> bool,
-) -> Option<Incoming> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let left = deadline.checked_duration_since(std::time::Instant::now())?;
-        match rx.recv_timeout(left) {
-            Ok(frame) => match parse_incoming(&frame) {
-                Some(msg) if want(&msg) => return Some(msg),
-                _ => continue,
-            },
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-}
-
 /// 按 EOF 分隔把字节流切成帧：喂多少切多少，未满一帧的部分留在缓冲里。
 #[derive(Debug, Default)]
 pub struct FrameSplitter {
@@ -151,7 +126,6 @@ impl FrameSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     fn mon(id: u32, width: u32) -> Monitor {
         Monitor {
@@ -258,28 +232,5 @@ mod tests {
         // 连续两个 EOF 之间无内容 → 不产出空帧（脏数据防御）
         let frames = FrameSplitter::new().push(&[EOF, EOF]);
         assert!(frames.is_empty());
-    }
-
-    #[test]
-    fn wait_for_incoming_skips_unrelated_and_times_out() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(br#"{"Changed":[]}"#.to_vec()).unwrap();
-        assert!(
-            wait_for_incoming(&rx, Duration::from_millis(50), |i| matches!(
-                i,
-                Incoming::State(_)
-            ))
-            .is_none()
-        );
-        // 有 State 时命中
-        let (tx, rx) = mpsc::channel();
-        tx.send(br#"{"State":[]}"#.to_vec()).unwrap();
-        assert!(matches!(
-            wait_for_incoming(&rx, Duration::from_millis(50), |i| matches!(
-                i,
-                Incoming::State(_)
-            )),
-            Some(Incoming::State(_))
-        ));
     }
 }
