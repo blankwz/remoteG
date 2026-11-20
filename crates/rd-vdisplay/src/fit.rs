@@ -130,6 +130,30 @@ impl ScreenFit {
         self.widths.contains(&width)
     }
 
+    /// 能装下全部窗口外框的最窄档；空集 = 基准档；全部档位都装不下 → 最宽档封顶。
+    ///
+    /// 与 [`ScreenFit::width_to_fit`]（单窗口、以 current 为锚、只升不降）互补：
+    /// 编排层维护「当前在虚拟屏上的全部 rd 窗口外框」需求表，窗口开/关/resize
+    /// 后对整表重算（可升可降）。判定按窗口**外框**（装得下的硬约束是外框不
+    /// 超屏），容差与 `width_to_fit` 一致（2 点）。
+    pub fn width_for_windows(&self, windows: &[(u32, u32)]) -> u32 {
+        const TOLERANCE: f64 = 2.0;
+        if windows.is_empty() {
+            return self.base_width;
+        }
+        self.widths
+            .iter()
+            .copied()
+            .find(|w| {
+                let (aw, ah) = (f64::from(*w), f64::from(self.size(*w).1));
+                windows.iter().all(|(ww, wh)| {
+                    let (ww, wh) = (f64::from(*ww), f64::from(*wh));
+                    ww <= aw + TOLERANCE && wh <= ah + TOLERANCE
+                })
+            })
+            .unwrap_or(MAX_WIDTH)
+    }
+
     /// 窗口该用哪一档。
     ///
     /// `window` 是按 `current` 档铺过之后读回的实际客户区，`area` 是当档可放
@@ -290,6 +314,32 @@ mod tests {
     fn degenerate_area_returns_current() {
         let fit = ScreenFit::standard();
         assert_eq!(fit.width_to_fit((800, 800), (0, 0), 700), 700);
+    }
+
+    #[test]
+    fn width_for_windows_empty_returns_base() {
+        let fit = ScreenFit::standard();
+        assert_eq!(fit.width_for_windows(&[]), 540);
+    }
+
+    #[test]
+    fn width_for_windows_picks_narrowest_fitting_tier() {
+        let fit = ScreenFit::standard();
+        // 800×600：540 档宽不够 → 800 档（800×1404）装得下。
+        assert_eq!(fit.width_for_windows(&[(800, 600)]), 800);
+        // 两窗口取都能装下的最窄档：520×900 与 700×500 → 700 档（700×1231）。
+        assert_eq!(fit.width_for_windows(&[(520, 900), (700, 500)]), 700);
+        // 容差 2 点内算装得下（与 width_to_fit 同款）。
+        assert_eq!(fit.width_for_windows(&[(542, 952)]), 540);
+    }
+
+    #[test]
+    fn width_for_windows_caps_at_max_and_scales_with_height() {
+        let fit = ScreenFit::standard();
+        // 全部档位装不下 → 封顶 1080。
+        assert_eq!(fit.width_for_windows(&[(5000, 5000)]), 1080);
+        // 宽小高大的窗口按高定档：900×1600 → 需宽 910（910×1601）。
+        assert_eq!(fit.width_for_windows(&[(900, 1600)]), 910);
     }
 
     #[test]

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 # 档位数学与协议编解码为纯逻辑（任何平台可测）；管道与显示系统 API 仅 Windows。
+[features]
+# 暴露 FakeBackend（内存模拟驱动与拓扑）：rd-agent 编排层单测注入用（T-049 M-4）。
+test-util = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -22,6 +22,8 @@ pub mod windows_backend;
 
 use std::time::{Duration, Instant};
 
+#[cfg(any(test, feature = "test-util"))]
+pub use backend::FakeBackend;
 pub use backend::{DisplayInfo, VDisplayBackend};
 pub use fit::{PhoneSpec, ScreenFit};
 pub use protocol::{Mode, Monitor};

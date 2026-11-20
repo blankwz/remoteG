@@ -48,6 +48,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 [dev-dependencies]
 reed-solomon-erasure = "6"
 tempfile = "3"
+rd-vdisplay = { path = "../../crates/rd-vdisplay", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 crossbeam-channel = "0.5"
