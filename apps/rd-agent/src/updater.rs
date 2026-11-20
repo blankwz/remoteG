@@ -31,11 +31,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use rd_update_pack::{compare_versions, verify_bytes, Chunker, Manifest};
 
-/// 更新验签公钥占位（64 个 '0'，非合法曲线点，任何签名都不通过）。
-/// T-039 正式渠道建立后替换为真公钥（对齐 T-036 LICENSE_PUBKEY_HEX 的编译
-/// 锚定思路）。
+/// Agent 自更新验签公钥（ed25519，正式锚定，T-039）。对应 seed 在凭据目录
+/// `rd-update-sign.seed`（绝不进仓库），CI 发布端走 `RD_UPDATE_SIGN_KEY`
+/// secret 同源签名；签名验证失败 = 整个更新拒绝，无旁路。
 pub const UPDATE_SIGN_PUBKEY: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "3fe6b393dab3adc4ac5cd65b45ab3f2a2ffaa9b561ef85285f845f18be35f7a6";
+
+/// 默认更新基址：GitHub Releases latest 资产的平铺地址（GitHub 固定重定向
+/// 到最新 release 的同名资产——`update.json`/`update.json.sig`/pack 同 base
+/// 可取）。COS 国内渠道用 `RD_UPDATE_ENDPOINT` 覆盖为 `…/latest` 同构布局。
+pub const DEFAULT_UPDATE_ENDPOINT: &str =
+    "https://github.com/blankwz/remoteG/releases/latest/download";
 
 /// 更新清单与包的解压暂存目录名（安装目录下）。
 const STAGING_DIR: &str = ".rd-update-staging";
@@ -77,7 +83,8 @@ impl UpdateSettings {
             _ => UPDATE_SIGN_PUBKEY.to_string(),
         };
         Self {
-            endpoint: std::env::var("RD_UPDATE_ENDPOINT").unwrap_or_default(),
+            // 缺省锚定 GitHub 渠道（渠道就绪即小白零配置）；空串覆盖=显式关闭
+            endpoint: std::env::var("RD_UPDATE_ENDPOINT").unwrap_or(DEFAULT_UPDATE_ENDPOINT.to_string()),
             pubkey_hex,
             mode: UpdateMode::from_env(),
         }
@@ -388,32 +395,14 @@ pub fn cleanup_old_files(install: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rd_update_pack::{sign_bytes, Manifest};
     use tempfile::TempDir;
 
-    /// 占位公钥不是合法曲线点：任何签名都必须被拒（fail-closed 锚定）。
+    /// 锚定公钥非占位（T-039 替换后的防回退锚：占位是全 0、任何签名都拒；
+    /// 若有人回退占位会让更新链整体静默失效，此测试立即红）。
     #[test]
-    fn placeholder_pubkey_rejects_everything() {
-        let manifest = rd_update_pack::Manifest {
-            format_version: 1,
-            version: "0.3.0".into(),
-            pack_file: "p.pack".into(),
-            pack_sha256: "aa".repeat(32),
-            pack_size: 1,
-            chunker: rd_update_pack::ChunkerParams {
-                min_size: 64,
-                avg_size: 256,
-                max_size: 1024,
-            },
-            chunks: vec![],
-        };
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        let (seed, pub_hex) = rd_update_pack::generate_keypair();
-        let sig = sign_bytes(&seed, &bytes).unwrap();
-        // 真公钥验真签名 → 通过
-        assert!(verify_bytes(&pub_hex, &bytes, &sig).unwrap());
-        // 占位公钥（内置默认）→ 拒绝
-        assert!(!verify_bytes(UPDATE_SIGN_PUBKEY, &bytes, &sig).unwrap());
+    fn anchored_pubkey_is_not_placeholder() {
+        assert_ne!(UPDATE_SIGN_PUBKEY, &"0".repeat(64));
+        assert!(is_real_key(UPDATE_SIGN_PUBKEY));
     }
 
     /// debug 构建的公钥格式粗验：64 hex 才可注入。
