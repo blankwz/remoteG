@@ -407,6 +407,11 @@ interface GroupViewProps {
   onRootGone: () => void;
   /** 设备名（首帧品牌时刻显示，R14 设计：产品的第二个记忆瞬间）。 */
   deviceName: string | null;
+  /** 虚拟屏当前档位宽（物理像素；null = 未启用虚拟屏）。块 4/T-049：触屏
+   * 手势阈值的 scale 语义在虚拟屏窗口上切为「虚拟屏宽 / 画面 css 宽」——
+   * 虚拟屏换档会改变远程侧的物理宽度，普通「窗口物理宽」语义的阈值会随
+   * 档位漂移，按虚拟屏宽取才与手指所见比例一致。 */
+  vdisplayWidth: number | null;
 }
 
 /** 窗口组视图：一个标签的全部内容。 */
@@ -422,6 +427,7 @@ export function WindowGroupView({
   sessionCtlRef,
   onRecordingAutoStop,
   onRootGone,
+  vdisplayWidth,
 }: GroupViewProps) {
   const snapshot = useSessionSnapshot(store);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -752,15 +758,22 @@ export function WindowGroupView({
     const p = toPhys(e.clientX, e.clientY);
     if (p !== null) {
       // 触控手势路径（改造项 C）：钉住命中窗口，原始事件交控制端翻译；
-      // scale=远程物理宽/画面 css 宽（阈值语义），w/h=窗口客户区尺寸
+      // scale=远程物理宽/画面 css 宽（阈值语义），w/h=窗口客户区尺寸。
+      // 块 4（T-049）：虚拟屏窗口（vdisplayWidth 非 null）改按虚拟屏档位宽
+      // 取——换档改变远程侧物理宽度，普通语义（窗口物理宽/画面宽）的阈值
+      // 会随换档漂移，按虚拟屏宽取才与手指所见比例一致。
       if (e.pointerType === "touch") {
         const hit = hitAt(p);
         if (hit !== null) {
           const el = groupRef.current;
           const rs = rootStatsRef.current;
           const scale =
-            el !== null && rs !== null && el.clientWidth > 0
-              ? rs.width / el.clientWidth
+            el !== null && el.clientWidth > 0
+              ? vdisplayWidth !== null && vdisplayWidth > 0
+                ? vdisplayWidth / el.clientWidth
+                : vdisplayWidth === null && rs !== null && rs.width > 0
+                  ? rs.width / el.clientWidth
+                  : 1
               : 1;
           touchTargetRef.current = {
             winId: hit.id,
