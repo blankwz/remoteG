@@ -62,3 +62,10 @@
 - 决定：全量四批连做——包1 小白可用（allow_lan 默认 true、双击即用、自报地址、HKCU Run 自启、UDP 发现、节点共享引导等）、包2 可靠性（保活、陈旧帧丢弃、持续退避重连、冻结看门狗、UIPI 反馈、销毁收场等）、包3 安全（暂停盖终端、撤销信任入口、连接提示、配对超时等）、包4 协议 v0.1（剪贴板同步、view-only、SessionState 关闭原因、窗口状态事件、码控阈值化、砍 zstd-BGRA 双瓦片格式）。
 - 共识不做（防过度工程）：自建中继/ID 服务器、L1 UIA、M3 DOM 镜像、#32768 菜单真实画面、AV1/SCC、账号体系、窗口缩略图、服务化/UAC 接管（列 M2 决策点）。
 - 改进项全部有 file:line 证据；执行中沿用各专家「已处理好勿改清单」（帧池排空、PIPE_SEQ、DPI 归一化等）。
+
+## D-014 虚拟屏一期路线 A 定稿：master 驱动自编译随包 + Notify 协议直控（2026-11-19 实测定稿）
+- 背景：T-044 预研列两条路线——A（virtual-display-rs master 0.4.0-dev 自编译，NULL DACL 非管理员直控管道）vs B（官方 v0.3.1 + SYSTEM 帮手进程代写管道）。官方 release 的管道默认 DACL 拒普通用户（GENERIC_WRITE 即 0x80070005），官方 GUI 自身 requireAdministrator，B 需要常驻提权帮手。
+- 实测结论（03_architecture/虚拟屏权限实测.md）：master 自编译后 NULL DACL 生效，非管理员 3 轮 21 步全绿——pipe_connect 0ms/建屏 528ms/Notify 在线换档 380ms/CCD 228ms/撤屏 277ms。驱动安装一次 UAC（5.4s、无需 testsigning）。
+- 决定：**路线 A 定稿**——master 驱动自编译随包分发（driver/vdisplay/ 三件套 + nefconw 安装），rd-vdisplay 直控管道（byte 模式 + Notify 全量替换 + CCD 换档择优）；v0.3.1+SYSTEM 帮手仅备选不实施。
+- 关键技术事实（防回改）：v0.3.1 管道=消息模式（客户端须 READMODE_MESSAGE）与 master=byte 模式（补 READMODE_MESSAGE 反而报错 87）——两代驱动语义相反，见实测文档 §5.3 版本限定注记；monitor id 即 ConnectorIndex 限 0~9 且超界遗留脏条目；Add 幂等无在线改档，换档必须 Notify 或 CCD。
+- 遗留：正式证书重签归 T-039（当前随包为开发自签证书，package-agent.ps1 有 -AllowDevCert 守卫拦截静默发布）；编排竞态测试化/卸载器第三方提示归二期（T-044 卡审查遗留节）。
