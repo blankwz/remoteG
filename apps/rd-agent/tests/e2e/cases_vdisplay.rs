@@ -400,17 +400,23 @@ async fn t16_vdisplay_window_fit_auto_select() -> Result<()> {
     );
 
     // ── 3. resize 到 900×1600 → 联动换档（可升）──
+    // 期望档位必须用 resize 后**真实读回的外框**算（与实现的 demand 同源，
+    // 同步骤 2 的 rect0 模式）：跨屏/超屏窗口的实际外框与设定值有出入
+    // （实测 ps1 设 900×1600、窗口被拉回主屏后读回 (900,1427)），按名义值
+    // 算会差一档、误判实现选错档。
     set_testwin_size(900, 1600)?;
-    let want_up = fit.width_for_windows(&[(900, 1600)]);
+    let rect_up = rd_window_win::resize::window_rect(hwnd as isize).context("读窗口矩形失败")?;
+    let want_up = fit.width_for_windows(&[(rect_up.w, rect_up.h)]);
     wait_tier(&created.device_name, &fit, want_up, Duration::from_secs(10)).await?;
     println!(
-        "[t16] resize 900×1600 → 换档 {want_up}（{:?}）",
+        "[t16] resize 900×1600（实际 {rect_up:?}）→ 换档 {want_up}（{:?}）",
         fit.size(want_up)
     );
 
     // ── 4. resize 回 800×600 → 联动降档（集体选档可升可降）──
     set_testwin_size(800, 600)?;
-    let want_down = fit.width_for_windows(&[(800, 600)]);
+    let rect_down = rd_window_win::resize::window_rect(hwnd as isize).context("读窗口矩形失败")?;
+    let want_down = fit.width_for_windows(&[(rect_down.w, rect_down.h)]);
     ensure!(
         want_down < want_up,
         "缩窗后应降档，{want_down} !< {want_up}"
