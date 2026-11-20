@@ -1059,7 +1059,7 @@ export function WindowGroupView({
         if (alive) {
           unlisten = fn;
         } else {
-          fn();
+          fn?.();
         }
       })
       .catch(() => undefined);

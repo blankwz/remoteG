@@ -370,7 +370,7 @@ export function Session({ deviceId }: { deviceId: string }) {
         if (alive) {
           unlisten = fn;
         } else {
-          fn();
+          fn?.();
         }
       })
       .catch(() => undefined);

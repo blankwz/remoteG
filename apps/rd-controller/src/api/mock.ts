@@ -79,6 +79,22 @@ export async function mockInvoke<T>(
   cmd: string,
   _args?: Record<string, unknown>,
 ): Promise<T> {
+  // 订阅/单向类命令：demo 无推送源，直接 resolve null（前端 unlisten?.()/
+  // .catch 均可安全消化）——不进 TABLE，避免「暂不支持」误伤正常预览路径。
+  const ONE_WAY = new Set([
+    "subscribe_vdisplay_state",
+    "subscribe_window_events",
+    "subscribe_session_state",
+    "subscribe_group_events",
+    "subscribe_session_events",
+    "touch_gesture",
+    "set_display_width",
+    "send_clipboard",
+  ]);
+  if (ONE_WAY.has(cmd)) {
+    await new Promise((r) => setTimeout(r, 80));
+    return null as T;
+  }
   const TABLE: Record<string, unknown> = {
     list_devices: DEVICES,
     discover_devices: [

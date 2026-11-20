@@ -146,12 +146,15 @@ export function sessionStateText(s: SessionStateDto): string | null {
   }
 }
 
-/** 订阅 Agent 会话级状态（断开时任务自动退出）。 */
+/** 订阅 Agent 会话级状态（断开时任务自动退出）。demo 无推送源（Channel
+ * 依赖 Tauri internals，浏览器环境不可构造）。 */
 export function subscribeSessionState(
   deviceId: string,
   onState: (s: SessionStateDto) => void,
 ): Promise<() => void> {
   if (!isTauriRuntime()) {
+    void deviceId;
+    void onState;
     return Promise.resolve(() => undefined);
   }
   const ch = new Channel<SessionStateDto>();
@@ -168,12 +171,16 @@ export interface VdisplayStateDto {
   message: string;
 }
 
-/** 订阅虚拟屏状态（建屏/换档/撤屏/失败，断开时任务自动退出）。 */
+/** 订阅虚拟屏状态（建屏/换档/撤屏/失败，断开时任务自动退出）。demo 推一条
+ * CREATED 让更多菜单档位组在预览可见（Channel 依赖 Tauri internals，浏览器
+ * 环境不可构造，故在守卫分支内模拟推送；档位点击静默成功）。 */
 export function subscribeVdisplayState(
   deviceId: string,
   onState: (s: VdisplayStateDto) => void,
 ): Promise<() => void> {
   if (!isTauriRuntime()) {
+    void deviceId;
+    setTimeout(() => onState({ kind: 0, width: 540, height: 950, message: "" }), 300);
     return Promise.resolve(() => undefined);
   }
   const ch = new Channel<VdisplayStateDto>();
