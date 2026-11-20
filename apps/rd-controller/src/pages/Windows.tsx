@@ -86,6 +86,46 @@ export function filterWindows(
 }
 
 /**
+ * App 资源库聚合（块 3/T-049）：按进程把窗口聚合成「应用」卡（图标 + 进程
+ * 名 + 窗口数），有可见窗口（非最小化）的应用排前——「运行中（可立即投屏）
+ * / 全部」的分组语义落在排序与徽标上，不拆两个区（数据同源，分区的唯一
+ * 信息差是 minimized，用排序表达更省一次扫视）。组内窗口保持 Z 序（列表
+ * 顺序即 Z 序，协议契约 §窗口列表）。
+ */
+export interface AppGroup {
+  /** 进程名（分组键，如 chrome.exe）。 */
+  readonly process: string;
+  /** 图标 dataURL（组内任一窗口的图标；应用聚合后唯一）。 */
+  readonly icon: string | null;
+  /** 组内窗口（Z 序）。 */
+  readonly windows: readonly WindowDto[];
+  /** 可见窗口数（>0 = 应用运行中，可立即投屏）。 */
+  readonly visibleCount: number;
+}
+
+export function appGroups(
+  list: readonly WindowDto[],
+): readonly AppGroup[] {
+  const byProcess = new Map<string, WindowDto[]>();
+  for (const w of list) {
+    const group = byProcess.get(w.process);
+    if (group !== undefined) {
+      group.push(w);
+    } else {
+      byProcess.set(w.process, [w]);
+    }
+  }
+  const groups = [...byProcess.entries()].map(([process, windows]) => ({
+    process,
+    icon: windows.find((w) => w.icon !== null)?.icon ?? null,
+    windows,
+    visibleCount: windows.filter((w) => !w.minimized).length,
+  }));
+  // 运行中（有可见窗口）优先；同组内保持首次出现序（Z 序）
+  return groups.sort((a, b) => (b.visibleCount > 0 ? 1 : 0) - (a.visibleCount > 0 ? 1 : 0));
+}
+
+/**
  * 桌面地图布局（R12 设计 P0：窗口页从「进程列表」升级为「那台电脑的桌面」
  * ——WindowDto 已有 x/y/w/h 几何，零后端拿 80% 空间记忆效果）。
  * 虚拟桌面固定 1920×1080 基准，窗口矩形按比例映射为百分比定位（越界裁剪）。
@@ -165,8 +205,8 @@ const SKELETONS = [1, 2, 3, 4, 5, 6, 7, 8];
 export function Windows({ deviceId }: { deviceId: string }) {
   const [windows, setWindows] = useState<readonly WindowDto[]>([]);
   const [query, setQuery] = useState("");
-  /** 视图切换（R12 设计 P0：默认桌面地图，列表降为次视图）。 */
-  const [view, setView] = useState<"map" | "list">("map");
+  /** 视图切换（R12 设计 P0：默认桌面地图；块 3 加「应用」聚合视图）。 */
+  const [view, setView] = useState<"map" | "app" | "list">("map");
   const [status, setStatus] = useState<LoadStatus>("connecting");
   /** 当前设备名（标题上下文：我在谁的窗口里）。 */
   const [deviceName, setDeviceName] = useState<string | null>(null);
@@ -322,6 +362,7 @@ export function Windows({ deviceId }: { deviceId: string }) {
 
   const filtered = filterWindows(windows, query);
   const mapRects = desktopMap(filtered);
+  const apps = appGroups(filtered);
 
   return (
     <main className={styles.page}>
@@ -433,6 +474,14 @@ export function Windows({ deviceId }: { deviceId: string }) {
             </button>
             <button
               type="button"
+              className={view === "app" ? styles.viewBtnOn : styles.viewBtn}
+              aria-pressed={view === "app"}
+              onClick={() => setView("app")}
+            >
+              应用
+            </button>
+            <button
+              type="button"
               className={view === "list" ? styles.viewBtnOn : styles.viewBtn}
               aria-pressed={view === "list"}
               onClick={() => setView("list")}
@@ -491,7 +540,50 @@ export function Windows({ deviceId }: { deviceId: string }) {
         </div>
       )}
 
-      <ul className={styles.grid} style={status === "ready" && view === "map" ? { display: "none" } : undefined}>
+      {status === "ready" && view === "app" && windows.length > 0 && filtered.length > 0 && (
+        <div className={styles.appGrid} aria-label="应用资源库（按进程聚合，运行中的应用排前；点击窗口打开会话）">
+          {apps.map((g) => (
+            <section key={g.process} className={styles.appCard} data-running={g.visibleCount > 0}>
+              <header className={styles.appHead}>
+                {g.icon !== null ? (
+                  <img className={styles.appIcon} src={g.icon} alt="" width={28} height={28} />
+                ) : (
+                  <span className={styles.appIcon} aria-hidden="true">
+                    <span className={styles.appIconLetter}>{fallbackIcon(g.process)}</span>
+                  </span>
+                )}
+                <span className={styles.appMeta}>
+                  <span className={styles.appName}>{g.process.replace(/\.exe$/i, "")}</span>
+                  <span className={styles.appSub}>
+                    {g.visibleCount > 0
+                      ? `运行中 · ${g.windows.length} 个窗口`
+                      : `${g.windows.length} 个窗口（最小化）`}
+                  </span>
+                </span>
+              </header>
+              <ul className={styles.appWins}>
+                {g.windows.map((w) => (
+                  <li key={w.id}>
+                    <button
+                      type="button"
+                      className={styles.appWinBtn}
+                      title={w.title.length > 0 ? w.title : "(无标题窗口)"}
+                      onClick={() => openWindow(w)}
+                    >
+                      <span className={styles.appWinTitle}>
+                        {w.title.length > 0 ? w.title : "(无标题窗口)"}
+                      </span>
+                      {w.minimized && <span className={styles.appWinMin}>最小化</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+
+      <ul className={styles.grid} style={status === "ready" && (view === "map" || view === "app") ? { display: "none" } : undefined}>
         {filtered.map((w) => (
           <li key={w.id}>
             <button
