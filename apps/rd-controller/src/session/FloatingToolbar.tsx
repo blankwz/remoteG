@@ -6,6 +6,7 @@
  * - 更多菜单收纳低频：常用语/虚拟键/发文字/取文字/隐私屏/画面信息/全屏
  */
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDismiss } from "../ui/useDismiss";
 import {
   IconCamera,
@@ -97,11 +98,28 @@ export function FloatingToolbar(props: Props) {
   // 手动收起（无自动收起）：展开是默认态
   const [expanded, setExpanded] = useState(true);
   const [panel, setPanel] = useState<"none" | "phrases" | "vkeys" | "more">("none");
+  /** 弹出面板锚点：触发按钮打开瞬间的视口矩形——面板 fixed 定位在按钮
+   * 上方（§5.11 手测：absolute 锚 toolbarRow 向下弹出视口被视频层遮、向上
+   * 弹被祖先 overflow 裁剪，唯 fixed 视口层无裁剪）。 */
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  /** portal 面板容器 ref：useDismiss 的点外豁免（面板 DOM 直挂 body）。 */
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  /** 触发钮点击 → 记锚点并切换面板（ToolBtn 回传 MouseEvent）。 */
+  function openPanel(e: React.MouseEvent<HTMLButtonElement>, p: "phrases" | "vkeys" | "more"): void {
+    setAnchor(e.currentTarget.getBoundingClientRect());
+    setPanel(panel === p ? "none" : p);
+  }
 
   // 点外/Escape 关闭弹出面板——协议统一走 useDismiss（R11 D08 唯一出口；
   // 早年不依赖 onMouseLeave——鼠标出界丢输入，Walter R2）
-  useDismiss(panel !== "none", rootRef, () => setPanel("none"), { trap: true });
+  useDismiss(
+    panel !== "none",
+    rootRef,
+    () => setPanel("none"),
+    { trap: true, extraRefs: [panelRef] },
+  );
 
   if (!expanded) {
     return (
@@ -187,7 +205,7 @@ export function FloatingToolbar(props: Props) {
         active={panel === "more"}
         ariaExpanded={panel === "more"}
         ariaHaspopup="menu"
-        onClick={() => setPanel(panel === "more" ? "none" : "more")}
+        onClick={(e) => openPanel(e, "more")}
       />
       <button
         type="button"
@@ -197,32 +215,44 @@ export function FloatingToolbar(props: Props) {
       >
         <IconChevronUp size={14} />
       </button>
-      {panel === "phrases" && (
-        <PhrasesPanel
-          onSend={(t) => {
-            props.onSendText(t);
-            setPanel("none");
-          }}
-          onClose={() => setPanel("none")}
-        />
-      )}
-      {panel === "vkeys" && (
-        <VirtualKeysPanel
-          onCombo={(k) => {
-            props.onSendCombo(k);
-            setPanel("none");
-          }}
-          onClose={() => setPanel("none")}
-        />
-      )}
-      {panel === "more" && (
-        <MorePanel
-          {...props}
-          onPhrases={() => setPanel("phrases")}
-          onVkeys={() => setPanel("vkeys")}
-          onClose={() => setPanel("none")}
-        />
-      )}
+      {panel === "phrases" &&
+        createPortal(
+          <PhrasesPanel
+            anchor={anchor}
+            panelRef={panelRef}
+            onSend={(t) => {
+              props.onSendText(t);
+              setPanel("none");
+            }}
+            onClose={() => setPanel("none")}
+          />,
+          document.body,
+        )}
+      {panel === "vkeys" &&
+        createPortal(
+          <VirtualKeysPanel
+            anchor={anchor}
+            panelRef={panelRef}
+            onCombo={(k) => {
+              props.onSendCombo(k);
+              setPanel("none");
+            }}
+            onClose={() => setPanel("none")}
+          />,
+          document.body,
+        )}
+      {panel === "more" &&
+        createPortal(
+          <MorePanel
+            anchor={anchor}
+            panelRef={panelRef}
+            {...props}
+            onPhrases={() => setPanel("phrases")}
+            onVkeys={() => setPanel("vkeys")}
+            onClose={() => setPanel("none")}
+          />,
+          document.body,
+        )}
     </div>
   );
 }
@@ -243,7 +273,7 @@ function ToolBtn({
   title: string;
   active?: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   /** 弹出面板触发钮的展开态语义（R11 D14）。 */
   ariaExpanded?: boolean;
   ariaHaspopup?: "menu";
@@ -270,8 +300,31 @@ function Sep() {
 }
 
 // ── 更多菜单 ──
+/** 面板 fixed 锚定（§5.11 手测修复）：弹在触发按钮**上方**（bottom = 视口高
+ * − 按钮顶 + 8px 间距），右缘对齐按钮右缘；上方空间不足时面板内部滚动
+ * （maxHeight = 按钮顶 − 24）——fixed 视口层无裁剪、不产生页面滚动条。
+ * anchor 缺省（理论不可达）回退 CSS absolute 原位。 */
+function panelStyle(anchor: DOMRect | null): React.CSSProperties {
+  if (anchor === null) {
+    return {};
+  }
+  return {
+    position: "fixed",
+    bottom: window.innerHeight - anchor.top + 8,
+    right: window.innerWidth - anchor.right,
+    maxHeight: anchor.top - 24,
+    overflowY: "auto",
+  };
+}
+
 function MorePanel(
-  props: Props & { onPhrases: () => void; onVkeys: () => void; onClose: () => void },
+  props: Props & {
+    anchor: DOMRect | null;
+    panelRef: React.Ref<HTMLDivElement | null>;
+    onPhrases: () => void;
+    onVkeys: () => void;
+    onClose: () => void;
+  },
 ) {
   const items: Array<{
     key: string;
@@ -356,7 +409,7 @@ function MorePanel(
     },
   ];
   return (
-    <div className={styles.panel} role="menu" aria-label="更多操作">
+    <div ref={props.panelRef} className={styles.panel} style={panelStyle(props.anchor)} role="menu" aria-label="更多操作">
       <b className={styles.panelTitle}>更多操作</b>
       {items.map((it) => (
         <button
@@ -453,9 +506,13 @@ function CustomPhraseRow({
 }
 
 function PhrasesPanel({
+  anchor,
+  panelRef,
   onSend,
   onClose,
 }: {
+  anchor: DOMRect | null;
+  panelRef: React.Ref<HTMLDivElement | null>;
   onSend: (t: string) => void;
   onClose: () => void;
 }) {
@@ -480,7 +537,7 @@ function PhrasesPanel({
   };
 
   return (
-    <div className={styles.panel} role="menu" aria-label="常用语">
+    <div ref={panelRef} className={styles.panel} style={panelStyle(anchor)} role="menu" aria-label="常用语">
       <b className={styles.panelTitle}>常用语（点击发送到远端）</b>
       {PHRASE_DEFAULTS.map((text) => (
         <button
@@ -527,9 +584,13 @@ function PhrasesPanel({
 
 // ── 虚拟按键面板 ──
 function VirtualKeysPanel({
+  anchor,
+  panelRef,
   onCombo,
   onClose,
 }: {
+  anchor: DOMRect | null;
+  panelRef: React.Ref<HTMLDivElement | null>;
   onCombo: (k: string[]) => void;
   onClose: () => void;
 }) {
@@ -579,7 +640,7 @@ function VirtualKeysPanel({
   ];
 
   return (
-    <div className={`${styles.panel} ${styles.panelWide}`} role="menu" aria-label="虚拟按键">
+    <div ref={panelRef} className={`${styles.panel} ${styles.panelWide}`} style={panelStyle(anchor)} role="menu" aria-label="虚拟按键">
       <b className={styles.panelTitle}>虚拟按键（先点修饰键组合，再点目标键）</b>
       <div className={styles.modsRow}>
         {["Ctrl", "Alt", "Shift", "Win"].map((m) => (

@@ -70,14 +70,17 @@
 .panel {
   animation: panelIn var(--rd-dur, 200ms) var(--rd-ease, cubic-bezier(0.2, 0, 0, 1));
   transform-origin: top right;
-  position: absolute; top: calc(100% + 6px); right: 12px;
+  /* 定位由 JS 锚定（panelStyle：fixed 弹在触发钮上方，视口层无裁剪不产滚
+   * 动条）——absolute 锚 toolbarRow 的两种弹向都会出问题：向下弹出视口
+   * 被视频层遮（§5.11 手测），向上弹被祖先 overflow 裁剪（回测）。z-index
+   * 80 压制视频层。 */
   min-width: 240px;
   background: rgb(20 23 28 / 97%);
   backdrop-filter: blur(10px);
   border: 1px solid var(--rd-border);
   border-radius: 10px; padding: 8px;
   box-shadow: var(--rd-shadow-pop);
-  z-index: 60;
+  z-index: 80;
 }
 .panelWide { min-width: 300px; }
 .panelTitle {

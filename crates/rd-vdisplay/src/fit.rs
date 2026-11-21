@@ -23,7 +23,13 @@ pub const MIN_HEIGHT: f64 = 800.0;
 /// 最宽一档。
 pub const MAX_WIDTH: u32 = 1080;
 /// 相邻两档差（点）。
-pub const STEP: u32 = 10;
+///
+/// 180 = 540/720/900/1080 四档（与控制端换档 UI 一致）。原 10（55 档）在
+/// Windows IddCx 驱动上换档时系统逐模式过渡——用户肉眼可见分辨率一点点
+/// 爬、屏幕闪十几次（2026-11-21 手测 §5.11 反馈；agent 侧 CCD 一次到位、
+/// 渐进发生在驱动/系统层的模式表应用）。四档把过渡次数压到 ≤3，选档精度
+/// 损失可接受（内容完整优先，两档之间取大档）。
+pub const STEP: u32 = 180;
 /// 高宽比下限（最方到正方形）。
 pub const RATIO_MIN: f64 = 1.0;
 /// 高宽比上限（最长 2）。
@@ -221,18 +227,19 @@ mod tests {
         assert_eq!(fit.base_width, 540);
         assert_eq!(fit.size(540), (540, 950)); // 17 Pro Max 实测尺寸
         assert!(fit.contains(540) && fit.contains(1080));
-        assert_eq!(fit.widths.len(), 55); // 540..=1080 step 10
+        assert_eq!(fit.widths.len(), 4); // 540/720/900/1080（STEP=180）
         assert_eq!(fit.widths.first(), Some(&540));
         assert_eq!(fit.widths.last(), Some(&1080));
     }
 
     #[test]
     fn squat_ratio_raises_base_width_to_reach_min_height() {
-        // 1:1 手机（折叠屏）：540 只有 540 高，不足 800 → 基准加宽到 800。
+        // 1:1 手机（折叠屏）：540 只有 540 高、720 只有 720 高，均不足 800 →
+        // 基准加宽到 900（STEP=180 的档位栅格上首个达标档）。
         let fit = ScreenFit::for_ratio(1.0);
-        assert_eq!(fit.base_width, 800);
-        assert_eq!(fit.size(800), (800, 800));
-        assert_eq!(*fit.widths.first().unwrap(), 800);
+        assert_eq!(fit.base_width, 900);
+        assert_eq!(fit.size(900), (900, 900));
+        assert_eq!(*fit.widths.first().unwrap(), 900);
     }
 
     #[test]
@@ -324,9 +331,10 @@ mod tests {
     #[test]
     fn fit_does_not_over_round_on_float_noise() {
         let fit = ScreenFit::standard();
-        // 540 × (580/540) = 580.0000000000001；向上取整会多进一档 → 先乘后除后应恰为 580。
-        let w = fit.width_to_fit((580, 950), (540, 950), 540);
-        assert_eq!(w, 580);
+        // 720 × (1080/720) 的浮点噪声场景：先乘后除后应恰为 1080（不因
+        // 1080.0000001 多进一档——四档栅格下即封顶档本身）。
+        let w = fit.width_to_fit((1080, 1900), (720, 1267), 720);
+        assert_eq!(w, 1080);
     }
 
     #[test]
@@ -347,17 +355,17 @@ mod tests {
     #[test]
     fn width_for_windows_tolerates_fitted_frame_overshoot() {
         let fit = ScreenFit::standard();
-        // 铺满 800 档：客户区被 fit 铺到该档客户容量（≈整屏减装饰）
-        let cap = fit.client_capacity(800);
+        // 铺满 720 档：客户区被 fit 铺到该档客户容量（≈整屏减装饰）
+        let cap = fit.client_capacity(720);
         assert_eq!(
             fit.width_for_windows(&[cap]),
-            800,
+            720,
             "铺满客户区应稳定在当前档"
         );
         // 内容真超容量（客户区再大一点）→ 联动升档仍然有效
         assert_eq!(
             fit.width_for_windows(&[(cap.0 + 16, cap.1 + 15)]),
-            820,
+            900,
             "内容超容量应升档"
         );
     }
@@ -366,8 +374,8 @@ mod tests {
     fn width_for_windows_picks_narrowest_fitting_tier() {
         let fit = ScreenFit::standard();
         // 客户区口径（容量 = 整屏 - 装饰 16/62）：800×600 客户区需容量宽
-        // ≥798 → 800 档容量 (784,1345) 不够 → 820 档 (804,1381) 装得下。
-        assert_eq!(fit.width_for_windows(&[(800, 600)]), 820);
+        // ≥798 → 720 档容量 (704,1143) 不够 → 900 档 (884,1337) 装得下。
+        assert_eq!(fit.width_for_windows(&[(800, 600)]), 900);
         // 两窗口取都能装下的最窄档：(520,900) 需高容量 ≥898 → 550 档；
         // (700,500) 需宽容量 ≥698 → 720 档；合取最窄共同档 = 720。
         assert_eq!(fit.width_for_windows(&[(520, 900), (700, 500)]), 720);
@@ -380,9 +388,9 @@ mod tests {
         let fit = ScreenFit::standard();
         // 全部档位容量都装不下 → 封顶 1080。
         assert_eq!(fit.width_for_windows(&[(5000, 5000)]), 1080);
-        // 宽小高大的窗口按高定档：900×1600 客户区需高容量 ≥1598 → 950 档
-        // 容量 (934,1609) 首个装得下（高需求主导时档位跳幅大于 10）。
-        assert_eq!(fit.width_for_windows(&[(900, 1600)]), 950);
+        // 宽小高大的窗口按高定档：900×1600 客户区需高容量 ≥1598 → 1080 档
+        // 容量 (1064,1837) 首个装得下（高需求主导时档位跳幅大）。
+        assert_eq!(fit.width_for_windows(&[(900, 1600)]), 1080);
     }
 
     #[test]

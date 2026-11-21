@@ -19,6 +19,9 @@ export interface DismissOptions {
   /** menu 键控与初始聚焦的作用域（触发钮与菜单同容器的下拉用：键控只在
    * 菜单项间循环，不含触发钮；省略时沿用容器本身）。 */
   readonly menuScope?: RefObject<HTMLElement | null>;
+  /** 额外豁免点击关闭的容器（portal 到 body 的弹出面板：其 DOM 不在主容器
+   * 内，点面板内元素会被误判「点外」秒关——把这些面板容器 ref 传进来）。 */
+  readonly extraRefs?: Array<RefObject<HTMLElement | null>>;
 }
 
 /** 容器内可聚焦元素（菜单项/按钮）。 */
@@ -61,6 +64,14 @@ export function useDismiss(
       const el = ref.current;
       if (el === null || el.contains(e.target as Node)) {
         return;
+      }
+      // portal 面板（body 直挂）豁免：点面板内不算「点外」
+      const extras = opts.extraRefs ?? [];
+      for (const r of extras) {
+        const host = r.current;
+        if (host !== null && host.contains(e.target as Node)) {
+          return;
+        }
       }
       onClose();
     };
