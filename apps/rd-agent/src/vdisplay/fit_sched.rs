@@ -88,10 +88,11 @@ pub fn set_broadcast_handle(handle: tokio::runtime::Handle) {
     *broadcast_handle().lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
-/// 手动换档保持（T-049 二期）：`SetDisplayWidth` 后记下所选档，作为选档
-/// **下限**——竞态窗口里的旧尺寸 refit（换档前的窗口变化滞后处理）不再
-/// 覆盖手动档（t15 真机复现：手动 1080 被旧 refit 拉回 550）；需求真实
-/// 变大仍跟随升档，需求表清空（全部关窗）则失效回落基准。
+/// 手动换档保持（T-049 二期）：`SetDisplayWidth` 后记下所选档，**接管选档**
+/// ——hold 生效期间（需求表非空）refit 一律保持手动档：竞态窗口里的旧尺寸
+/// refit 不覆盖（t15 真机：手动 1080 被拉回 550），手动降档也不被大窗口需求
+/// 弹回（2026-11-21 手测：1080→540 几秒后自动弹回 1080——下限 max 语义错误）。
+/// 需求表清空（全部关窗）则失效回落基准。恢复自动联动 = 关掉全部窗口重开。
 static MANUAL_HOLD: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 
 fn manual_hold() -> &'static Mutex<Option<u32>> {
@@ -111,7 +112,7 @@ pub fn set_manual_hold(width: u32) {
 ///   手动档影响。
 fn resolve_target(natural: u32, hold: Option<u32>, has_windows: bool) -> u32 {
     match hold {
-        Some(held) if has_windows && natural < held => held,
+        Some(held) if has_windows => held,
         _ => natural,
     }
 }
@@ -187,6 +188,14 @@ fn refit_blocking(refits: &HashSet<u64>, closeds: &HashSet<u64>) {
     let target = {
         let d = demands().lock().unwrap_or_else(|e| e.into_inner());
         let has = !d.is_empty();
+        if !has {
+            // 需求表空（全部关窗）：手动档失效——回落基准 + 清 hold（下次
+            // 开窗重新全自动；H-1 关窗回落语义不受手动档影响）
+            manual_hold()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
         let natural = target_fit.width_for_windows(&d.values().copied().collect::<Vec<_>>());
         let hold = *manual_hold().lock().unwrap_or_else(|e| e.into_inner());
         resolve_target(natural, hold, has)
@@ -270,13 +279,14 @@ fn broadcast_switched(width: u32, height: u32) {
 mod tests {
     use super::*;
 
-    /// 手动档裁决三例（T-049）：下限保持 / 需求变大跟随 / 表空失效。
+    /// 手动档裁决三例（T-049）：完全保持 / 无手动档全自动 / 表空失效。
     #[test]
     fn resolve_target_manual_hold_semantics() {
         // 竞态旧尺寸 refit（自然需求 550 < 手动 1080）→ 保持手动档
         assert_eq!(resolve_target(550, Some(1080), true), 1080);
-        // 需求真实变大（自然 1100 封顶前）→ 跟随升档
-        assert_eq!(resolve_target(1080, Some(1080), true), 1080);
+        // 手动降档后大窗口需求（自然 1080 > 手动 540）→ 保持手动档不弹回
+        // （2026-11-21 手测反馈：下限 max 语义会把 540 弹回 1080）
+        assert_eq!(resolve_target(1080, Some(540), true), 540);
         assert_eq!(resolve_target(550, None, true), 550, "无手动档=全自动");
         // 表空（全部关窗）→ 失效回落自然需求（基准档），H-1 回落不受影响
         assert_eq!(resolve_target(540, Some(1080), false), 540);
