@@ -212,3 +212,92 @@
 .relayInput:focus {
   outline: 1px solid rgb(120 170 255 / 0.6);
 }
+
+/* RustDesk 风格设置页：左侧固定分类导航 + 右侧分组卡片 */
+.settingsShell {
+  display: grid;
+  grid-template-columns: 204px minmax(0, 1fr);
+  gap: 24px;
+  max-width: 1080px;
+  margin: 0 auto;
+  align-items: start;
+}
+
+@media (max-width: 780px) {
+  .settingsShell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.settingsNav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--rd-border);
+  border-radius: 12px;
+  background: var(--rd-card);
+}
+
+.navHeading {
+  padding: 4px 10px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--rd-text-faint);
+}
+
+.navBtn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rd-text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.navBtn:hover {
+  background: rgb(255 255 255 / 5%);
+  color: var(--rd-text);
+}
+
+.navBtnActive {
+  background: rgb(61 126 255 / 14%);
+  border-color: rgb(61 126 255 / 35%);
+  color: var(--rd-accent-text);
+  font-weight: 600;
+}
+
+.settingsContent {
+  min-width: 0;
+}
+
+.settingsContent .list {
+  max-width: none;
+  width: 100%;
+}
+
+.settingsContent .section {
+  scroll-margin-top: 16px;
+  padding: 16px 4px 6px;
+  border-bottom: 1px solid rgb(255 255 255 / 7%);
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--rd-text);
+}
+
+.settingsContent .section:first-child {
+  padding-top: 0;
+}

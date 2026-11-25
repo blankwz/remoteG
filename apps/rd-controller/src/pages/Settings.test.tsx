@@ -275,14 +275,14 @@ describe("EasyTier 组网设置（T-043）", () => {
 describe("简洁模式与高级模式 + SSH 一键部署中继（宪法 #2/#3）", () => {
   it("默认简洁模式隐藏底层网络与实验室；切换高级模式后立即展开并持久化", async () => {
     render(<Settings />);
-    expect(screen.queryByLabelText("原生中继地址")).toBeNull();
+    // 自建中继地址在网络分类中常驻可配；底层 SSH 一键部署与 EasyTier 仅高级模式展开
+    expect(screen.getByLabelText("原生中继地址")).toBeTruthy();
     expect(screen.queryByLabelText("SSH 服务器地址")).toBeNull();
 
     const modeSwitch = screen.getByRole("switch", { name: "高级模式（极客调优）" });
     fireEvent.click(modeSwitch);
 
     expect(window.localStorage.getItem("rd.advancedMode")).toBe("1");
-    expect(await screen.findByLabelText("原生中继地址")).toBeTruthy();
     expect(await screen.findByLabelText("SSH 服务器地址")).toBeTruthy();
   });
 

@@ -157,6 +157,39 @@ export function Settings() {
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [licenseBusy, setLicenseBusy] = useState(false);
 
+  /** RustDesk 风格设置分类锚点高亮 */
+  const [activeCat, setActiveCat] = useState<string>("sec-general");
+  const jumpCat = useCallback((id: string) => {
+    setActiveCat(id);
+    const el = document.getElementById(id);
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, []);
+
+  /** RustDesk 风格安全与密码配置（一次性码 / 固定无人值守密码 / 两者皆可） */
+  type AuthMode = "both" | "one-time" | "fixed";
+  const [authMode, setAuthMode] = useState<AuthMode>(() => {
+    const v = window.localStorage.getItem("rd.authMode");
+    return v === "one-time" || v === "fixed" ? v : "both";
+  });
+  const [fixedPwd, setFixedPwd] = useState<string>(
+    () => window.localStorage.getItem("rd.fixedPassword") ?? "",
+  );
+  const [fixedPwdMsg, setFixedPwdMsg] = useState<string | null>(null);
+  const [relayKey, setRelayKey] = useState<string>(
+    () => window.localStorage.getItem("rd.relayKey") ?? "",
+  );
+  const [listenPort, setListenPort] = useState<string>(
+    () => window.localStorage.getItem("rd.listenPort") ?? "21118",
+  );
+  const [confirmIncoming, setConfirmIncoming] = useState<boolean>(
+    () => window.localStorage.getItem("rd.confirmIncoming") === "1",
+  );
+  const [allowPty, setAllowPty] = useState<boolean>(
+    () => window.localStorage.getItem("rd.allowPty") !== "0",
+  );
+
   void call<boolean>("get_media_fec")
     .then(setFec)
     .catch(() => setFec(null));
@@ -410,154 +443,289 @@ export function Settings() {
 
   return (
     <main className={styles.page}>
-      <h1 className={styles.title}>设置</h1>
-      <ul className={styles.list}>
-        <li className={styles.section}>使用模式</li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>高级模式（极客调优）</b>
-            <span className={styles.hint}>
-              {advancedMode
-                ? "当前为高级模式：已解锁自建中继 SSH 一键部署、EasyTier 组网、FEC 纠错与方案实验室（144Hz/200Mbps 调优）。"
-                : "当前为简洁模式（默认）：只保留日常高频设置，隐藏底层网络与实验室参数；高手可随时开启高级模式。"}
-            </span>
-          </span>
-          <Switch
-            checked={advancedMode}
-            onChange={onToggleAdvancedMode}
-            label="高级模式（极客调优）"
-          />
-        </li>
-        <li className={styles.section}>外观</li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>界面缩放</b>
-            <span className={styles.hint}>
-              放大整个界面的文字与控件（低视力 / 高分屏适用）；选完立即生效
-            </span>
-          </span>
-          <select
-            className={styles.select}
-            value={uiScale}
-            aria-label="界面缩放"
-            onChange={(e) =>
-              onUiScale(Number(e.currentTarget.value) as UiScale)
-            }
-          >
-            {UI_SCALES.map((s) => (
-              <option key={s} value={s}>
-                {Math.round(s * 100)}%
-              </option>
-            ))}
-          </select>
-        </li>
-        <li className={styles.section}>连接画质</li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>新连接默认画质</b>
-            <span className={styles.hint}>
-              会话内可随时切换；此处决定下次连接的初始档位
-            </span>
-          </span>
-          <select
-            className={styles.select}
-            value={quality}
-            aria-label="新连接默认画质"
-            onChange={(e) => onQuality(e.currentTarget.value as Quality)}
-          >
-            {(Object.keys(QUALITY_LABEL) as Quality[]).map((q) => (
-              <option key={q} value={q}>
-                {QUALITY_LABEL[q]}
-              </option>
-            ))}
-          </select>
-        </li>
-        {IS_MAC && <li className={styles.section}>输入映射</li>}
-        {IS_MAC && (
-          <li className={styles.row}>
-            <label className={styles.label}>
-              <b>macOS：Cmd 组合键映射为远端 Ctrl</b>
-              <span className={styles.hint}>
-                与会话内画面信息面板的开关保持同步
-              </span>
-            </label>
-            <Switch
-              checked={cmdToCtrl}
-              onChange={onCmdToCtrl}
-              label="Cmd 组合键映射为远端 Ctrl"
-            />
-          </li>
-        )}
-        {advancedMode && (
-          <>
-        <li className={styles.section}>网络</li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>弱网纠错（FEC）</b>
-            <span className={styles.hint}>
-              信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效
-              {fecError !== null && ` · 保存失败：${fecError}`}
-            </span>
-          </span>
-          <Switch
-            checked={fec === true}
-            disabled={fec === null}
-            onChange={(v) => void onFec(v)}
-            label="弱网纠错（FEC）"
-          />
-        </li>
-        <li className={styles.section}>远程访问（跨网中继）</li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>使用自建中继</b>
-            <span className={styles.hint}>
-              跨网打洞失败时的兜底通道（本机作为被控端使用）。支持 Cloudflare
-              Workers（https://xxx.workers.dev）或 VPS 直连地址（ip:21118）；
-              连接时直连优先，失败自动走中继；中继只见密文。
-              {relayMsg !== null && ` · ${relayMsg}`}
-            </span>
-            {relayReadFailed && (
-              <span className={styles.hint}>
-                未能读取当前中继设置（被控服务未启动）——可直接填写并保存，重启后生效
-              </span>
-            )}
-            {relayError !== null && (
-              <span className={styles.hintError} role="alert">
-                {relayError}
-              </span>
-            )}
-          </span>
-          <span className={styles.relayEdit}>
-            <input
-              className={styles.relayInput}
-              value={relayAddr}
-              placeholder="https://xxx.workers.dev 或 1.2.3.4:21118"
-              spellCheck={false}
-              aria-label="原生中继地址"
-              aria-invalid={relayError !== null}
-              onChange={(e) => {
-                setRelayAddrState(e.currentTarget.value);
-                setRelayDirty(true);
-                setRelayError(null);
-              }}
-            />
+      <div className={styles.settingsShell}>
+        {/* RustDesk 风格左侧设置分类导航 */}
+        <nav className={styles.settingsNav} aria-label="设置分类">
+          <span className={styles.navHeading}>设置分类</span>
+          {[
+            { id: "sec-general", label: "⚙️ 常规与外观" },
+            { id: "sec-security", label: "🛡️ 安全与密码" },
+            { id: "sec-network", label: "🌐 网络与中转" },
+            { id: "sec-display", label: "🖥️ 显示与画质" },
+            { id: "sec-control", label: "⌨️ 键鼠与终端" },
+            { id: "sec-about", label: "ℹ️ 授权与关于" },
+          ].map((item) => (
             <button
+              key={item.id}
               type="button"
-              className={styles.stepBtn}
-              disabled={!relayDirty}
-              onClick={() => void onSaveRelay()}
+              className={`${styles.navBtn} ${
+                activeCat === item.id ? styles.navBtnActive : ""
+              }`}
+              onClick={() => jumpCat(item.id)}
             >
-              保存
+              {item.label}
             </button>
-          </span>
-        </li>
-        <li className={styles.row}>
-          <span className={styles.label}>
-            <b>SSH 一键部署自建中转服务器</b>
-            <span className={styles.hint}>
-              填入 Linux 服务器 SSH 信息（建议提前配好免密密钥或指定私钥文件），点击一键上传并部署
-              systemd 守护 + 防火墙放行，成功后自动回填上方中继地址。
-            </span>
+          ))}
+        </nav>
+
+        <div className={styles.settingsContent}>
+          <h1 className={styles.title}>设置</h1>
+          <ul className={styles.list}>
+            <li id="sec-general" className={styles.section}>⚙️ 常规与外观</li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>高级模式（极客调优）</b>
+                <span className={styles.hint}>
+                  {advancedMode
+                    ? "当前为高级模式：已解锁 EasyTier 虚拟局域网、FEC 底层调优与方案实验室（144Hz/200Mbps 压测）。"
+                    : "当前为简洁模式（默认）：保留高频设置与自建中转；开启高级模式可解锁 EasyTier 与方案实验室。"}
+                </span>
+              </span>
+              <Switch
+                checked={advancedMode}
+                onChange={onToggleAdvancedMode}
+                label="高级模式（极客调优）"
+              />
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>界面缩放</b>
+                <span className={styles.hint}>
+                  放大整个界面的文字与控件（低视力 / 高分屏适用）；选完立即生效
+                </span>
+              </span>
+              <select
+                className={styles.select}
+                value={uiScale}
+                aria-label="界面缩放"
+                onChange={(e) =>
+                  onUiScale(Number(e.currentTarget.value) as UiScale)
+                }
+              >
+                {UI_SCALES.map((s) => (
+                  <option key={s} value={s}>
+                    {Math.round(s * 100)}%
+                  </option>
+                ))}
+              </select>
+            </li>
+
+            <li id="sec-security" className={styles.section}>🛡️ 安全与密码（对标 RustDesk）</li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>密码认证方式</b>
+                <span className={styles.hint}>
+                  一次性配对码可直接在首页左侧「你的桌面」一键生成与刷新（无需去系统托盘找）；搭配固定密码可用于无人值守。
+                </span>
+              </span>
+              <select
+                className={styles.select}
+                aria-label="密码认证方式"
+                value={authMode}
+                onChange={(e) => {
+                  const v = e.currentTarget.value as AuthMode;
+                  setAuthMode(v);
+                  window.localStorage.setItem("rd.authMode", v);
+                }}
+              >
+                <option value="both">一次性配对码 + 固定密码（推荐）</option>
+                <option value="one-time">仅使用一次性配对码</option>
+                <option value="fixed">仅使用固定访问密码</option>
+              </select>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>固定访问密码（无人值守）</b>
+                <span className={styles.hint}>
+                  设置后可配合「本机 ID / IP」直接远程连接本机，无需有人在旁点击生成 6 位码。
+                  {fixedPwdMsg !== null && ` · ${fixedPwdMsg}`}
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  type="password"
+                  className={styles.relayInput}
+                  value={fixedPwd}
+                  placeholder="输入 6 位以上无人值守密码"
+                  aria-label="固定访问密码"
+                  onChange={(e) => {
+                    setFixedPwd(e.currentTarget.value);
+                    setFixedPwdMsg(null);
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.stepBtn}
+                  onClick={() => {
+                    const v = fixedPwd.trim();
+                    if (v.length === 0) {
+                      window.localStorage.removeItem("rd.fixedPassword");
+                      setFixedPwdMsg("已清除固定密码");
+                    } else if (v.length < 6) {
+                      setFixedPwdMsg("密码至少 6 位");
+                    } else {
+                      window.localStorage.setItem("rd.fixedPassword", v);
+                      setFixedPwdMsg("已保存固定密码");
+                    }
+                  }}
+                >
+                  保存密码
+                </button>
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>新设备连接前需本机确认</b>
+                <span className={styles.hint}>
+                  开启后，陌生/新设备接入本机时弹出确认提示，防止未经允许的连接。
+                </span>
+              </span>
+              <Switch
+                checked={confirmIncoming}
+                onChange={(v) => {
+                  setConfirmIncoming(v);
+                  window.localStorage.setItem("rd.confirmIncoming", v ? "1" : "0");
+                }}
+                label="新设备连接前需本机确认"
+              />
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>允许远程原生终端（PTY）</b>
+                <span className={styles.hint}>
+                  关闭后，远端控制端将无法在本机打开原生命令行终端标签。
+                </span>
+              </span>
+              <Switch
+                checked={allowPty}
+                onChange={(v) => {
+                  setAllowPty(v);
+                  window.localStorage.setItem("rd.allowPty", v ? "1" : "0");
+                }}
+                label="允许远程原生终端"
+              />
+            </li>
+
+            <li id="sec-display" className={styles.section}>🖥️ 显示与画质</li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>新连接默认画质</b>
+                <span className={styles.hint}>
+                  局域网自动解锁 4K@144Hz / 200Mbps 高刷上限，会话内可随时切换
+                </span>
+              </span>
+              <select
+                className={styles.select}
+                value={quality}
+                aria-label="新连接默认画质"
+                onChange={(e) => onQuality(e.currentTarget.value as Quality)}
+              >
+                {(Object.keys(QUALITY_LABEL) as Quality[]).map((q) => (
+                  <option key={q} value={q}>
+                    {QUALITY_LABEL[q]}
+                  </option>
+                ))}
+              </select>
+            </li>
+
+            <li id="sec-network" className={styles.section}>🌐 网络与自建中转（开启中转自动启用 ID 连接）</li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>使用自建中继（开启 9 位设备 ID 直连）</b>
+                <span className={styles.hint}>
+                  配置中继地址后，首页左侧将自动显示「本机 9 位设备 ID」，对方可像 RustDesk 一样用「ID + 密码/配对码」跨网连接（直连优先，打洞失败自动走中继，端到端加密中继只见密文）。
+                  {relayMsg !== null && ` · ${relayMsg}`}
+                </span>
+                {relayReadFailed && (
+                  <span className={styles.hint}>
+                    未能读取当前中继设置（被控服务未启动）——可直接填写并保存，重启后生效
+                  </span>
+                )}
+                {relayError !== null && (
+                  <span className={styles.hintError} role="alert">
+                    {relayError}
+                  </span>
+                )}
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={relayAddr}
+                  placeholder="https://xxx.workers.dev 或 1.2.3.4:21118"
+                  spellCheck={false}
+                  aria-label="原生中继地址"
+                  aria-invalid={relayError !== null}
+                  onChange={(e) => {
+                    setRelayAddrState(e.currentTarget.value);
+                    setRelayDirty(true);
+                    setRelayError(null);
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.stepBtn}
+                  disabled={!relayDirty}
+                  onClick={() => void onSaveRelay()}
+                >
+                  保存
+                </button>
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>中转服务器鉴权 Key 与默认监听端口</b>
+                <span className={styles.hint}>
+                  默认监听端口 21118（连接时无需填写端口）；如自建中转启用了私有 Key，可在此填入。
+                </span>
+              </span>
+              <span className={styles.relayEdit}>
+                <input
+                  className={styles.relayInput}
+                  value={relayKey}
+                  placeholder="中转 Key（选填）"
+                  spellCheck={false}
+                  aria-label="中转服务器 Key"
+                  onChange={(e) => {
+                    setRelayKey(e.currentTarget.value);
+                    window.localStorage.setItem("rd.relayKey", e.currentTarget.value);
+                  }}
+                />
+                <input
+                  className={styles.relayInput}
+                  style={{ maxWidth: "88px" }}
+                  value={listenPort}
+                  placeholder="21118"
+                  aria-label="监听端口"
+                  onChange={(e) => {
+                    setListenPort(e.currentTarget.value);
+                    window.localStorage.setItem("rd.listenPort", e.currentTarget.value);
+                  }}
+                />
+              </span>
+            </li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>弱网纠错（FEC）</b>
+                <span className={styles.hint}>
+                  信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效
+                  {fecError !== null && ` · 保存失败：${fecError}`}
+                </span>
+              </span>
+              <Switch
+                checked={fec === true}
+                disabled={fec === null}
+                onChange={(v) => void onFec(v)}
+                label="弱网纠错（FEC）"
+              />
+            </li>
+            {advancedMode && (
+              <>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>SSH 一键部署自建中转服务器</b>
+                <span className={styles.hint}>
+                  填入 Linux 服务器 SSH 信息，点击一键上传并部署 systemd 守护 + 防火墙放行，成功后自动回填上方中继地址。
+                </span>
             {sshError !== null && (
               <span className={styles.hintError} role="alert">
                 {sshError}
@@ -846,9 +1014,9 @@ export function Settings() {
             </li>
           </>
         )}
-          </>
-        )}
-        <li className={styles.section}>版本与授权</li>
+              </>
+            )}
+        <li id="sec-about" className={styles.section}>ℹ️ 授权与关于</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>
@@ -976,7 +1144,7 @@ export function Settings() {
         </li>
           </>
         )}
-        <li className={styles.section}>终端与常用语</li>
+        <li id="sec-control" className={styles.section}>⌨️ 键鼠与终端</li>
         <li className={styles.row}>
           <span className={styles.label}>
             <b>终端默认字号</b>
@@ -1052,9 +1220,24 @@ export function Settings() {
             </span>
           </span>
         </li>
+        {IS_MAC && (
+          <li className={styles.row}>
+            <label className={styles.label}>
+              <b>macOS：Cmd 组合键映射为远端 Ctrl</b>
+              <span className={styles.hint}>
+                与会话内画面信息面板的开关保持同步
+              </span>
+            </label>
+            <Switch
+              checked={cmdToCtrl}
+              onChange={onCmdToCtrl}
+              label="Cmd 组合键映射为远端 Ctrl"
+            />
+          </li>
+        )}
         {advancedMode && (
           <>
-            <li className={styles.section}>高级与调试</li>
+            <li className={styles.section}>🧪 高级与调试</li>
             <li className={styles.row}>
               <span className={styles.label}>
                 <b>方案实验室（开发者工具）</b>
@@ -1069,6 +1252,8 @@ export function Settings() {
           </>
         )}
       </ul>
+        </div>
+      </div>
     </main>
   );
 }

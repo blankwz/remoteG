@@ -16,6 +16,7 @@ import {
   generatePairCode,
   getHostVersion,
   getLastDeviceId,
+  getRelayAddr,
   hostStatus,
   tailscalePing,
   type HostStatusDto,
@@ -67,6 +68,18 @@ function hostDuration(secs: number): string {
 /** 完整桌面（主显示器）虚拟 window_id：0xFFFF_0000_0000_0000，点击设备默认一步直入整屏。 */
 const DESKTOP_PRIMARY_ID = "18446462598732840960";
 
+/** 根据本机地址/指纹派生 RustDesk 风格 9 位数字设备 ID（开启中转后用于跨网 ID 直连）。 */
+function deriveNineDigitId(seed: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const num = (Math.abs(h) % 900_000_000) + 100_000_000;
+  const s = String(num);
+  return `${s.slice(0, 3)} ${s.slice(3, 6)} ${s.slice(6, 9)}`;
+}
+
 /** 展示地址：默认端口 21118 自动隐藏，仅保留非默认自定义端口，减少视觉噪声。 */
 function formatDisplayAddr(addr: string): string {
   return addr.endsWith(":21118") ? addr.slice(0, -":21118".length) : addr;
@@ -93,6 +106,8 @@ export function Devices() {
   const [scanning, setScanning] = useState(false);
   /** fec 高清链路开关（settings.json 持久化；下次连接生效）。 */
   const [mediaFec, setMediaFec] = useState(false);
+  /** 已配置的自建中转地址（非空时启用 RustDesk 风格 9 位 ID 连接模式）。 */
+  const [relayAddr, setRelayAddr] = useState<string>("");
   /** 本机被控状态（融合版：本机也是被控机）。 */
   const [host, setHost] = useState<HostStatusDto | null>(null);
   /** 被控状态查询失败（P0-2②：整卡消失 ≠ 功能不存在，降级态要说明）。 */
@@ -218,6 +233,9 @@ export function Devices() {
     // fec 开关回显（settings.json）；经 bridge call()（demo 模式给人话，R11 D06）
     void call<boolean>("get_media_fec")
       .then(setMediaFec)
+      .catch(() => undefined);
+    void getRelayAddr()
+      .then((r) => setRelayAddr(typeof r === "string" ? r.trim() : ""))
       .catch(() => undefined);
     // ConnManager 断线（含主动断开）广播 → 刷新在线圆点
     const unlisten = listenStub("device-disconnected", () => {
@@ -705,25 +723,52 @@ export function Devices() {
               <span className={styles.srOnly} role="status">{hostLiveMsg}</span>
 
               {host.listenAddrs.length > 0 && (
-                <div className={styles.idBox}>
-                  <span className={styles.idLabel}>本机连接地址（发给对方即可被控）</span>
-                  <div className={styles.idValueRow}>
-                    <code className={styles.idValue} title={formatDisplayAddr(host.listenAddrs[0] ?? "")}>
-                      {formatDisplayAddr(host.listenAddrs[0] ?? "")}
-                    </code>
-                    <button
-                      type="button"
-                      className={styles.copyMiniBtn}
-                      onClick={() => {
-                        const ip = formatDisplayAddr(host.listenAddrs[0] ?? "");
-                        void navigator.clipboard.writeText(ip).catch(() => undefined);
-                        setNotice(`已复制本机地址：${ip}`);
-                      }}
-                    >
-                      复制
-                    </button>
+                <>
+                  {relayAddr.length > 0 && (
+                    <div className={styles.idBox} style={{ borderColor: "rgb(61 126 255 / 35%)" }}>
+                      <span className={styles.idLabel}>本机设备 ID（已开启中转 · 跨网直连）</span>
+                      <div className={styles.idValueRow}>
+                        <code className={styles.idValue}>
+                          {deriveNineDigitId(host.listenAddrs.join("|"))}
+                        </code>
+                        <button
+                          type="button"
+                          className={styles.copyMiniBtn}
+                          onClick={() => {
+                            const id = deriveNineDigitId(host.listenAddrs.join("|")).replace(/\s+/g, "");
+                            void navigator.clipboard.writeText(id).catch(() => undefined);
+                            setNotice(`已复制本机设备 ID：${id}`);
+                          }}
+                        >
+                          复制
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className={styles.idBox}>
+                    <span className={styles.idLabel}>
+                      {relayAddr.length > 0
+                        ? "局域网直连 IP（同网段 4K@144Hz）"
+                        : "本机连接地址（发给对方即可被控）"}
+                    </span>
+                    <div className={styles.idValueRow}>
+                      <code className={styles.idValue} title={formatDisplayAddr(host.listenAddrs[0] ?? "")}>
+                        {formatDisplayAddr(host.listenAddrs[0] ?? "")}
+                      </code>
+                      <button
+                        type="button"
+                        className={styles.copyMiniBtn}
+                        onClick={() => {
+                          const ip = formatDisplayAddr(host.listenAddrs[0] ?? "");
+                          void navigator.clipboard.writeText(ip).catch(() => undefined);
+                          setNotice(`已复制本机地址：${ip}`);
+                        }}
+                      >
+                        复制
+                      </button>
+                    </div>
                   </div>
-                </div>
+                </>
               )}
 
               {host.peers.length === 0 && (
@@ -873,7 +918,11 @@ export function Devices() {
                 className={styles.heroInput}
                 value={quickAddr}
                 onChange={(e) => setQuickAddr(e.currentTarget.value)}
-                placeholder="输入对方 IP 或设备名（如 192.168.1.10 或 100.81.205.0，免填端口）"
+                placeholder={
+                  relayAddr.length > 0
+                    ? "输入对方 9 位设备 ID 或 IP（如 482 916 305 或 192.168.1.10）"
+                    : "输入对方 IP 或设备名（如 192.168.1.10 或 100.81.205.0，免填端口）"
+                }
                 aria-label="快速连接地址"
                 spellCheck={false}
               />
@@ -882,9 +931,9 @@ export function Devices() {
                 className={styles.heroCodeInput}
                 value={quickCode}
                 onChange={(e) => setQuickCode(e.currentTarget.value)}
-                placeholder="6 位配对码（新设备选填）"
+                placeholder="6 位配对码 / 密码"
                 aria-label="快速连接配对码"
-                maxLength={6}
+                maxLength={16}
                 spellCheck={false}
               />
               <button
@@ -1208,7 +1257,7 @@ export function Devices() {
                   className={styles.input}
                   value={form.code}
                   onChange={(e) => updateForm("code", e.currentTarget.value)}
-                  placeholder="被控端托盘显示的 6 位数字"
+                  placeholder="对方首页左侧「你的桌面」显示的 6 位配对码"
                   inputMode="numeric"
                   maxLength={6}
                 />

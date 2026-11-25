@@ -64,7 +64,7 @@ const WINDOWS = [
 
 const HOST_STATUS = {
   listenAddrs: ["100.101.43.7:21118", "192.168.1.10:21118"],
-  peers: [{ name: "iPad Pro", sinceSecs: 3720 }],
+  peers: [] as { name: string; sinceSecs: number }[],
   paused: false,
 };
 
