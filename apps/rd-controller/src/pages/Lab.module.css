@@ -13,7 +13,8 @@
   min-height: 0;
   background: var(--rd-bg);
   color: var(--rd-text);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .labDrawer {
@@ -30,7 +31,8 @@
   border-left: 1px solid var(--rd-border-strong);
   box-shadow: var(--rd-shadow-pop);
   color: var(--rd-text);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* ---- 顶部极客状态栏 (Header + Target + Profile + Panic Reset) ---- */

@@ -523,6 +523,9 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       // ignore
     }
   }, []);
+  const [poolExpanded, setPoolExpanded] = useState(false);
+  const [logsExpanded, setLogsExpanded] = useState(true);
+  const logBoxRef = useRef<HTMLDivElement | null>(null);
   const [poolFilter, setPoolFilter] = useState<"all" | "stun" | "easytier" | "relay">("all");
   const [fetchingPublic, setFetchingPublic] = useState(false);
   const [showSubInput, setShowSubInput] = useState(false);
@@ -533,11 +536,18 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       return "";
     }
   });
-  const [showManualNode, setShowManualNode] = useState(false);
-  const [manualNodeName, setManualNodeName] = useState("");
-  const [manualNodeKind, setManualNodeKind] = useState<"stun" | "easytier" | "relay">("stun");
-  const [manualNodeAddr, setManualNodeAddr] = useState("");
+  const [showBatchAdd, setShowBatchAdd] = useState(false);
+  const [batchNodeKind, setBatchNodeKind] = useState<"auto" | "stun" | "easytier" | "relay">("auto");
+  const [batchNodeText, setBatchNodeText] = useState("");
   const [probingPool, setProbingPool] = useState(false);
+  const [smartDiscovering, setSmartDiscovering] = useState(false);
+  const [smartHint, setSmartHint] = useState<{
+    level: "ok" | "suggest" | "warn";
+    title: string;
+    detail: string;
+    candidateNode?: RelayNodeItem;
+    boundPlan?: RealTestPlanDto;
+  } | null>(null);
   const [showSshDeploy, setShowSshDeploy] = useState(false);
   const [sshName, setSshName] = useState("");
   const [sshHost, setSshHost] = useState("");
@@ -562,6 +572,11 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     const id = logSeqRef.current++;
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     setEventLogs((prev) => [...prev, { id, time, level, text }].slice(-120));
+    requestAnimationFrame(() => {
+      if (logBoxRef.current) {
+        logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -1028,39 +1043,77 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     setProbingPool(false);
   }, [poolFilter, pushLog, saveServerPool, serverPool]);
 
-  const handleAddManualNode = useCallback(() => {
-    const addr = manualNodeAddr.trim();
-    if (!addr) {
-      showToast("请输入节点地址");
+  const handleBatchAddNodes = useCallback(() => {
+    const lines = batchNodeText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("#") && !l.startsWith("//"));
+    if (lines.length === 0) {
+      showToast("请先粘贴节点列表（一行一个）");
       return;
     }
-    if (serverPool.some((n) => n.addr.toLowerCase() === addr.toLowerCase())) {
-      showToast("该节点地址已在池中");
-      return;
+    const existing = new Set(serverPool.map((n) => n.addr.toLowerCase()));
+    const added: RelayNodeItem[] = [];
+    let skipped = 0;
+
+    for (const line of lines) {
+      let name = "";
+      let addr = line;
+      // 支持「名称,地址」或「名称 地址」或纯「地址」
+      if (line.includes(",")) {
+        const parts = line.split(",").map((s) => s.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          name = parts[0] ?? "";
+          addr = parts[1] ?? "";
+        }
+      } else if (line.includes(" ") || line.includes("\t")) {
+        const parts = line.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) {
+          // 含 : 或 :// 的那段作为地址
+          const addrIdx = parts.findIndex((p) => p.includes(":") || p.includes("://"));
+          if (addrIdx >= 0) {
+            addr = parts[addrIdx] ?? line;
+            name = parts.filter((_, idx) => idx !== addrIdx).join(" ");
+          }
+        }
+      }
+      if (!addr || existing.has(addr.toLowerCase())) {
+        skipped += 1;
+        continue;
+      }
+      existing.add(addr.toLowerCase());
+      const lower = addr.toLowerCase();
+      const autoKind: "stun" | "easytier" | "relay" =
+        batchNodeKind !== "auto"
+          ? batchNodeKind
+          : lower.includes("stun") || lower.endsWith(":3478") || lower.endsWith(":19302") || lower.endsWith(":18000")
+            ? "stun"
+            : lower.startsWith("tcp://") || lower.startsWith("udp://") || lower.includes("easytier")
+              ? "easytier"
+              : "relay";
+      const hostHint = addr.replace(/^[a-z]+:\/\//i, "").split(":")[0] ?? addr;
+      added.push({
+        id: `batch-${Date.now()}-${added.length}`,
+        name: name || `${autoKind.toUpperCase()} · ${hostHint}`,
+        addr,
+        kind: autoKind,
+        source: "批量导入",
+        lastRttMs: null,
+        mappedAddr: null,
+        status: "idle",
+      });
     }
-    const name =
-      manualNodeName.trim() ||
-      (manualNodeKind === "stun"
-        ? `自定义 STUN`
-        : manualNodeKind === "easytier"
-          ? `自定义 EasyTier`
-          : `自建中转`);
-    const next: RelayNodeItem = {
-      id: `manual-${Date.now()}`,
-      name,
-      addr,
-      kind: manualNodeKind,
-      source: "手动添加",
-      lastRttMs: null,
-      mappedAddr: null,
-      status: "idle",
-    };
-    saveServerPool(sortServerPool([next, ...serverPool]));
-    setManualNodeName("");
-    setManualNodeAddr("");
-    setShowManualNode(false);
-    pushLog("ok", `已手动添加节点「${name}」(${addr}) 到共用节点池`);
-  }, [manualNodeAddr, manualNodeKind, manualNodeName, pushLog, saveServerPool, serverPool, showToast]);
+
+    if (added.length > 0) {
+      saveServerPool(sortServerPool([...added, ...serverPool]));
+      setBatchNodeText("");
+      setShowBatchAdd(false);
+      showToast(`已批量添加 ${added.length} 个节点${skipped > 0 ? `（跳过 ${skipped} 个重复）` : ""}`);
+      pushLog("ok", `✓ 批量导入 ${added.length} 个节点到共用池${skipped > 0 ? `（跳过 ${skipped} 个重复）` : ""}`);
+    } else {
+      showToast(`没有新节点可添加（${skipped} 个已存在或格式无效）`);
+    }
+  }, [batchNodeKind, batchNodeText, pushLog, saveServerPool, serverPool, showToast]);
 
   const handleBindNodeToTarget = useCallback(
     (node: RelayNodeItem) => {
@@ -1078,8 +1131,137 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       savePlansForTarget([...activePlans, plan]);
       showToast(`已将「${node.name}」绑定到当前目标方案`);
       pushLog("ok", `已一键绑定节点「${node.name}」(${node.addr}) 到目标「${effectiveTargetLabel}」`);
+      return plan;
     },
     [activePlans, baseTargetIp, effectiveTargetLabel, pushLog, savePlansForTarget, showToast],
+  );
+
+  // 智能寻优：同时测试「当前已绑定方案」+「未建立的候选公共/自建节点」，自动诊断并一键推荐最优解
+  const runSmartDiscovery = useCallback(async () => {
+    setSmartDiscovering(true);
+    setSmartHint(null);
+    pushLog("info", `✨ 开始为「${effectiveTargetLabel}」执行智能全网寻优（测已绑定方案 + 未建立的候选公共节点）…`);
+
+    // 1) 实测现有已绑定方案
+    const boundResults: { plan: RealTestPlanDto; res: RealPlanProbeResultDto }[] = [];
+    for (const plan of activePlans) {
+      const res = await runSinglePlanReal(plan);
+      if (res) boundResults.push({ plan, res });
+    }
+    const bestBound = boundResults
+      .filter((x) => x.res.ok && x.res.avgRttMs !== null)
+      .sort((a, b) => a.res.lossPct - b.res.lossPct || (a.res.avgRttMs ?? 9999) - (b.res.avgRttMs ?? 9999))[0];
+
+    // 2) 准备候选节点池（若池为空，自动拉取公共 STUN / EasyTier 节点）
+    let poolNow = [...serverPool];
+    if (poolNow.length === 0) {
+      pushLog("info", "节点池为空，正在自动拉取国内高速公共 STUN 与 EasyTier 候选节点…");
+      try {
+        const fetched = await labFetchPublicNodes(customSubUrl);
+        poolNow = fetched.nodes.map((item, idx) => ({
+          id: `auto-${item.kind}-${Date.now()}-${idx}`,
+          name: item.name,
+          addr: item.addr,
+          kind: item.kind,
+          region: item.region,
+          source: item.source,
+          lastRttMs: null,
+          mappedAddr: null,
+          status: "idle" as const,
+        }));
+        saveServerPool(poolNow);
+        pushLog("ok", `✓ 自动载入 ${poolNow.length} 个公共候选节点`);
+      } catch (e) {
+        pushLog("warn", `自动拉取公共节点失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // 3) 过滤出尚未绑定为方案的候选节点，并发测速
+    const boundAddrs = new Set(
+      activePlans.map((p) => (p.relayAddr || p.targetAddr).trim().toLowerCase()),
+    );
+    const candidates = poolNow.filter((n) => !boundAddrs.has(n.addr.trim().toLowerCase()));
+    const poolMap = new Map(poolNow.map((n) => [n.id, { ...n }]));
+
+    if (candidates.length > 0) {
+      pushLog("info", `🔍 正在并发探测 ${candidates.length} 个未建立的候选方案节点…`);
+      for (let i = 0; i < candidates.length; i += 5) {
+        const chunk = candidates.slice(i, i + 5);
+        await Promise.all(
+          chunk.map(async (node) => {
+            const kind = inferNodeKind(node);
+            try {
+              const res = await labProbeNode(kind, node.addr);
+              poolMap.set(node.id, {
+                ...node,
+                kind,
+                lastRttMs: res.rttMs,
+                mappedAddr: res.mappedAddr,
+                status: res.ok ? "ok" : "fail",
+              });
+              if (res.ok) {
+                pushLog("ok", `[候选 ${kind.toUpperCase()} · ${node.name}] ✓ ${res.detail}`);
+              }
+            } catch {
+              poolMap.set(node.id, { ...node, kind, lastRttMs: null, status: "fail" });
+            }
+          }),
+        );
+      }
+      const sortedPool = sortServerPool(Array.from(poolMap.values()));
+      saveServerPool(sortedPool);
+      poolNow = sortedPool;
+    }
+
+    const bestCandidate = poolNow
+      .filter((n) => !boundAddrs.has(n.addr.trim().toLowerCase()) && n.status === "ok" && n.lastRttMs !== null)
+      .sort((a, b) => (a.lastRttMs ?? 9999) - (b.lastRttMs ?? 9999))[0];
+
+    // 4) 智能结论与诊断
+    const bestBoundRtt = bestBound?.res.avgRttMs ?? null;
+    const tailscaleSlow =
+      bestBound?.plan.mode === "tailscale" && bestBoundRtt !== null && bestBoundRtt > 180;
+
+    if (bestCandidate && (bestBoundRtt === null || (bestCandidate.lastRttMs ?? 9999) + 15 < bestBoundRtt)) {
+      const reason = tailscaleSlow
+        ? `检测到现有「${bestBound.plan.planName}」延迟高达 ${bestBoundRtt}ms（疑似绕道海外 DERP 中继）；`
+        : bestBoundRtt !== null
+          ? `现有最优「${bestBound?.plan.planName}」延迟 ${bestBoundRtt}ms；`
+          : "当前已绑定方案均不可达；";
+      setSmartHint({
+        level: "suggest",
+        title: `✨ 发现更优未建方案：${bestCandidate.name}（${bestCandidate.lastRttMs}ms）`,
+        detail: `${reason}实测候选节点「${bestCandidate.name}」仅 ${bestCandidate.lastRttMs}ms${bestCandidate.mappedAddr ? `（公网映射 ${bestCandidate.mappedAddr}）` : ""}，建议一键采纳！`,
+        candidateNode: bestCandidate,
+      });
+      pushLog("ok", `✨ 智能推荐：未建候选「${bestCandidate.name}」(${bestCandidate.lastRttMs}ms) 显著优于现有方案，可直接点上方「一键采纳并启用」`);
+    } else if (bestBound) {
+      setSmartHint({
+        level: "ok",
+        title: `✅ 现有方案「${bestBound.plan.planName}」已是当前最优（${bestBoundRtt}ms）`,
+        detail: `已对比所有候选公共节点，现有「${bestBound.plan.planName}」（均延迟 ${bestBoundRtt}ms / 丢包 ${bestBound.res.lossPct}%）表现最佳。`,
+        boundPlan: bestBound.plan,
+      });
+      pushLog("ok", `✅ 智能寻优结论：现有方案「${bestBound.plan.planName}」(${bestBoundRtt}ms) 已是最优解`);
+    } else {
+      setSmartHint({
+        level: "warn",
+        title: "⚠ 暂未找到低延迟直连或公共候选方案",
+        detail: "建议展开下方节点池，使用「🚀 SSH 一键部署」搭建独享国内 VPS 中转，或批量粘贴新的公共节点。",
+      });
+      pushLog("warn", "智能寻优未发现可用低延迟路径，建议部署独享中转或导入更多节点");
+    }
+
+    setSmartDiscovering(false);
+  }, [activePlans, customSubUrl, effectiveTargetLabel, pushLog, runSinglePlanReal, saveServerPool, serverPool]);
+
+  const handleAdoptCandidate = useCallback(
+    async (node: RelayNodeItem) => {
+      const plan = handleBindNodeToTarget(node);
+      await handleConfirmPlan(plan);
+      setSmartHint(null);
+    },
+    [handleBindNodeToTarget, handleConfirmPlan],
   );
 
   // 内联 SSH 一键上传代码、启动打洞/中转服务器并自动入池+实测连通
@@ -1434,13 +1616,78 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           </button>
           <button
             type="button"
-            className={`${styles.btn} ${styles.btnPrimary}`}
-            disabled={runningRealBatch || testingPlanId !== null}
+            className={styles.btn}
+            disabled={runningRealBatch || smartDiscovering || testingPlanId !== null}
             onClick={() => void runAllTargetPlansReal()}
+            title="只测试当前目标已经绑定好的方案"
           >
-            {runningRealBatch ? "⏳ 正在自动实测…" : "▶ 一键自动实测全部方案"}
+            {runningRealBatch ? "⏳ 测速中…" : "▶ 测已绑定方案"}
+          </button>
+          <button
+            type="button"
+            className={`${styles.btn} ${styles.btnPrimary}`}
+            disabled={runningRealBatch || smartDiscovering || testingPlanId !== null}
+            onClick={() => void runSmartDiscovery()}
+            title="同时测试已绑定方案 + 节点池中未建立的公共/自建候选节点，自动推荐最快方案"
+          >
+            {smartDiscovering ? "⏳ 智能寻优中…" : "✨ 智能寻优（含候选）"}
           </button>
         </div>
+
+        {/* 智能诊断与一键采纳推荐横幅（测完自动出现，点 1 下直接切换最优线路） */}
+        {smartHint && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "10px",
+              padding: "10px 14px",
+              borderRadius: "10px",
+              border:
+                smartHint.level === "warn"
+                  ? "1px solid rgba(248, 81, 73, 0.45)"
+                  : "1px solid rgba(63, 185, 80, 0.55)",
+              background:
+                smartHint.level === "warn"
+                  ? "rgba(248, 81, 73, 0.08)"
+                  : "rgba(63, 185, 80, 0.1)",
+            }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: "3px", flex: "1 1 320px" }}>
+              <strong style={{ fontSize: "13px" }}>{smartHint.title}</strong>
+              <span style={{ fontSize: "12px", opacity: 0.86 }}>{smartHint.detail}</span>
+            </div>
+            <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+              {smartHint.candidateNode && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={() => void handleAdoptCandidate(smartHint.candidateNode!)}
+                >
+                  ⚡ 一键采纳并启用
+                </button>
+              )}
+              {smartHint.boundPlan && confirmedPlanByTarget[targetKey] !== smartHint.boundPlan.planId && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={() => void handleConfirmPlan(smartHint.boundPlan!)}
+                >
+                  确定使用该方案
+                </button>
+              )}
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setSmartHint(null)}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 新增绑定方案表单（1 个目标可绑定任意多个方案） */}
         {showAddPlan && (
@@ -1567,10 +1814,10 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           </div>
         )}
 
-        {/* 共用打洞 (STUN) / EasyTier / 自建中转服务器节点池（实时拉取公共源 + 并发测速排序 + 分类管理 + SSH 一键自建） */}
+        {/* 共用打洞 (STUN) / EasyTier / 自建中转服务器节点池（默认收起为 1 行摘要，点开即可批量添加/拉取/测速/SSH 部署） */}
         <div
           style={{
-            padding: "12px",
+            padding: "10px 12px",
             borderRadius: "10px",
             background: "rgba(255, 255, 255, 0.025)",
             border: "1px solid rgba(255, 255, 255, 0.09)",
@@ -1580,50 +1827,80 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           }}
         >
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-            <strong style={{ fontSize: "13px" }}>
-              🌐 公共 & 自建服务器节点池（{serverPool.length} 个节点 · 公共 STUN 零隐私风险）
-            </strong>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+              <strong style={{ fontSize: "13px" }}>
+                🌐 公共 & 自建节点池（{serverPool.length} 个）
+              </strong>
+              {(() => {
+                const fastest = serverPool.find((n) => n.status === "ok" && n.lastRttMs !== null);
+                return fastest ? (
+                  <span style={{ fontSize: "11.5px", color: "#3fb950" }}>
+                    最快：{fastest.name} ({fastest.lastRttMs}ms)
+                  </span>
+                ) : (
+                  <span style={{ fontSize: "11.5px", opacity: 0.65 }}>
+                    公共 STUN 零隐私风险 · 展开可批量粘贴或一键拉取
+                  </span>
+                );
+              })()}
+            </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
               <button
                 type="button"
-                className={`${styles.btn} ${styles.btnPrimary}`}
+                className={styles.btn}
                 disabled={fetchingPublic}
-                onClick={() => void handleFetchPublicNodes()}
+                onClick={() => {
+                  setPoolExpanded(true);
+                  void handleFetchPublicNodes();
+                }}
               >
                 {fetchingPublic ? "⏳ 拉取中…" : "🌐 实时获取公共节点"}
               </button>
               <button
                 type="button"
                 className={styles.btn}
-                disabled={probingPool || serverPool.length === 0}
-                onClick={() => void handleProbeServerPool()}
+                aria-expanded={poolExpanded}
+                onClick={() => setPoolExpanded((v) => !v)}
               >
-                {probingPool ? "⏳ 测速中…" : "🔍 一键全池测速"}
-              </button>
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => setShowManualNode((v) => !v)}
-              >
-                {showManualNode ? "收起手动添加" : "+ 手动添加"}
-              </button>
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => setShowSubInput((v) => !v)}
-                title="配置自定义 EasyTier 公共节点订阅源 URL"
-              >
-                订阅源
-              </button>
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => setShowSshDeploy((v) => !v)}
-              >
-                {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署"}
+                {poolExpanded ? "▲ 收起节点池" : "▼ 展开管理 / 批量添加"}
               </button>
             </div>
           </div>
+
+          {poolExpanded && (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  disabled={probingPool || serverPool.length === 0}
+                  onClick={() => void handleProbeServerPool()}
+                >
+                  {probingPool ? "⏳ 测速中…" : "🔍 一键全池测速"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => setShowBatchAdd((v) => !v)}
+                >
+                  {showBatchAdd ? "收起批量添加" : "+ 批量添加（一行一个）"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => setShowSubInput((v) => !v)}
+                  title="配置自定义 EasyTier 公共节点订阅源 URL"
+                >
+                  订阅源
+                </button>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => setShowSshDeploy((v) => !v)}
+                >
+                  {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署"}
+                </button>
+              </div>
 
           {/* 分类筛选 + 清理超时节点 */}
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
@@ -1695,48 +1972,61 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             </div>
           )}
 
-          {/* 手动添加节点 */}
-          {showManualNode && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", padding: "8px", borderRadius: "8px", background: "rgba(88,166,255,0.06)", border: "1px solid rgba(88,166,255,0.25)" }}>
-              <select
-                className={styles.select}
-                aria-label="手动节点类型"
-                value={manualNodeKind}
-                onChange={(e) => setManualNodeKind(e.target.value as "stun" | "easytier" | "relay")}
-              >
-                <option value="stun">公共 STUN 打洞</option>
-                <option value="easytier">EasyTier 节点</option>
-                <option value="relay">自建中转 (VPS/Workers)</option>
-              </select>
-              <input
-                type="text"
-                value={manualNodeName}
-                onChange={(e) => setManualNodeName(e.currentTarget.value)}
-                placeholder="节点名称（如：阿里云上海）"
-                aria-label="手动节点名称"
-                style={{ flex: "1 1 130px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+          {/* 批量添加节点（一行一个节点，自动识别 STUN / EasyTier / 自建中转） */}
+          {showBatchAdd && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "10px", borderRadius: "8px", background: "rgba(88,166,255,0.06)", border: "1px solid rgba(88,166,255,0.28)" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                  📋 批量粘贴节点（一行一个，支持纯地址或「名称,地址」，自动去重）
+                </span>
+                <select
+                  className={styles.select}
+                  aria-label="批量节点类型"
+                  value={batchNodeKind}
+                  onChange={(e) => setBatchNodeKind(e.target.value as "auto" | "stun" | "easytier" | "relay")}
+                >
+                  <option value="auto">自动识别类型（推荐）</option>
+                  <option value="stun">全部作为 公共 STUN</option>
+                  <option value="easytier">全部作为 EasyTier</option>
+                  <option value="relay">全部作为 自建中转</option>
+                </select>
+              </div>
+              <textarea
+                rows={4}
+                value={batchNodeText}
+                onChange={(e) => setBatchNodeText(e.currentTarget.value)}
+                placeholder={"一行一个节点，例如：\nstun.miwifi.com:3478\nstun.chat.bilibili.com:3478\ntcp://public.easytier.top:11010\n阿里云上海, 45.x.x.x:21118"}
+                aria-label="批量节点输入框"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "8px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(0,0,0,0.32)",
+                  color: "inherit",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  fontSize: "12px",
+                  lineHeight: 1.5,
+                  resize: "vertical",
+                }}
               />
-              <input
-                type="text"
-                value={manualNodeAddr}
-                onChange={(e) => setManualNodeAddr(e.currentTarget.value)}
-                placeholder={
-                  manualNodeKind === "stun"
-                    ? "stun.miwifi.com:3478"
-                    : manualNodeKind === "easytier"
-                      ? "tcp://xxx:11010"
-                      : "45.x.x.x:21118 或 https://..."
-                }
-                aria-label="手动节点地址"
-                style={{ flex: "1.4 1 200px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnPrimary}`}
-                onClick={handleAddManualNode}
-              >
-                加入节点池
-              </button>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => setShowBatchAdd(false)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  onClick={handleBatchAddNodes}
+                >
+                  批量加入节点池
+                </button>
+              </div>
             </div>
           )}
 
@@ -1925,6 +2215,8 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                 {sshBusy ? "⏳ 正在上传并启动…" : "🚀 上传启动并测速"}
               </button>
             </div>
+          )}
+            </>
           )}
         </div>
 
@@ -2143,7 +2435,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           })}
         </div>
 
-        {/* 4) 实时动态测试日志（逐轮真实输出） */}
+        {/* 4) 实时动态测试日志（固定高度内部滚动 + 可一键折叠，绝不拉长挤压页面） */}
         <div
           style={{
             display: "flex",
@@ -2151,54 +2443,70 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             gap: "6px",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: "13px" }}>📋 实时动态测试日志（真实探测逐轮输出）</strong>
-            <button
-              type="button"
-              className={styles.btn}
-              onClick={() => setEventLogs([])}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+            <strong style={{ fontSize: "13px" }}>
+              📋 实时动态测试日志（{eventLogs.length} 条 · 固定高度可滚动）
+            </strong>
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button
+                type="button"
+                className={styles.btn}
+                aria-expanded={logsExpanded}
+                onClick={() => setLogsExpanded((v) => !v)}
+              >
+                {logsExpanded ? "▲ 收起日志" : "▼ 展开日志"}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setEventLogs([])}
+              >
+                清空日志
+              </button>
+            </div>
+          </div>
+          {logsExpanded && (
+            <div
+              ref={logBoxRef}
+              role="log"
+              aria-live="polite"
+              style={{
+                height: "150px",
+                maxHeight: "150px",
+                overflowY: "auto",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                fontSize: "12px",
+                lineHeight: 1.55,
+                background: "rgba(0, 0, 0, 0.32)",
+                border: "1px solid rgba(255, 255, 255, 0.08)",
+                borderRadius: "8px",
+                padding: "8px 12px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "3px",
+              }}
             >
-              清空日志
-            </button>
-          </div>
-          <div
-            role="log"
-            aria-live="polite"
-            style={{
-              maxHeight: "220px",
-              overflowY: "auto",
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-              fontSize: "12px",
-              lineHeight: 1.6,
-              background: "rgba(0, 0, 0, 0.32)",
-              border: "1px solid rgba(255, 255, 255, 0.08)",
-              borderRadius: "8px",
-              padding: "10px 12px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "3px",
-            }}
-          >
-            {eventLogs.length === 0 ? (
-              <span style={{ opacity: 0.55 }}>暂无日志，点击「一键自动实测全部方案」开始真实探测。</span>
-            ) : (
-              eventLogs.map((entry) => (
-                <div
-                  key={entry.id}
-                  style={{
-                    color:
-                      entry.level === "ok"
-                        ? "#3fb950"
-                        : entry.level === "warn"
-                          ? "#f85149"
-                          : "inherit",
-                  }}
-                >
-                  <span style={{ opacity: 0.55 }}>[{entry.time}]</span> {entry.text}
-                </div>
-              ))
-            )}
-          </div>
+              {eventLogs.length === 0 ? (
+                <span style={{ opacity: 0.55 }}>暂无日志，点击「✨ 智能寻优（含候选）」或「▶ 测已绑定方案」开始真实探测。</span>
+              ) : (
+                eventLogs.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={{
+                      color:
+                        entry.level === "ok"
+                          ? "#3fb950"
+                          : entry.level === "warn"
+                            ? "#f85149"
+                            : "inherit",
+                    }}
+                  >
+                    <span style={{ opacity: 0.55 }}>[{entry.time}]</span> {entry.text}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
 
