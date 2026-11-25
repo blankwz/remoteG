@@ -152,6 +152,13 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      - name: Flatten nested artifact subdirs (e.g. dmg/, macos/) into dist/
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Recurse -File | Where-Object { $_.DirectoryName -ne (Resolve-Path dist).Path } | ForEach-Object {
+            Move-Item $_.FullName -Destination dist -Force
+          }
+          Get-ChildItem dist -File | Select-Object Name, Length
       - name: Generate updater latest.json（M-3：updater 查询端点）
         shell: pwsh
         run: |
