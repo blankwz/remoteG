@@ -556,6 +556,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [selectedEtNodeIds, setSelectedEtNodeIds] = useState<string[]>([]);
   const [natBusy, setNatBusy] = useState(false);
   const [natResult, setNatResult] = useState<NatDiagnosisDto | null>(null);
+  const [stunDrawerOpen, setStunDrawerOpen] = useState(false);
   const [relayIdInfo, setRelayIdInfo] = useState<RelayIdStatusDto | null>(null);
   const [peerNumericIdInput, setPeerNumericIdInput] = useState("");
   const [selectedRelayNodeAddr, setSelectedRelayNodeAddr] = useState("");
@@ -2159,6 +2160,17 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               <button
                 type="button"
                 className={styles.btn}
+                aria-expanded={stunDrawerOpen}
+                onClick={() => setStunDrawerOpen((v) => !v)}
+                title="查看、拉取、测速或批量管理公共 STUN 源"
+              >
+                {stunDrawerOpen
+                  ? "收起 STUN 源"
+                  : `STUN 源 (${serverPool.filter((n) => inferNodeKind(n) === "stun").length})`}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
                 aria-expanded={modeBodyOpen}
                 onClick={() => setModeBodyOpen((v) => !v)}
               >
@@ -2166,6 +2178,148 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               </button>
             </div>
           </div>
+
+          {/* 轻量化公共 STUN 源管理抽屉（平时隐藏，点「STUN 源」展开查看/拉取/批量粘贴/单点测速） */}
+          {stunDrawerOpen && (() => {
+            const stunNodes = serverPool.filter((n) => inferNodeKind(n) === "stun");
+            return (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                  padding: "10px",
+                  borderRadius: "8px",
+                  background: "rgba(0, 0, 0, 0.24)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                }}
+              >
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                  <strong style={{ fontSize: "12px" }}>
+                    公共 STUN 源管理（共用：NAT 体检 / 智能寻优，零流量经过）
+                  </strong>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      disabled={fetchingPublic}
+                      onClick={() => void handleFetchPublicNodes()}
+                    >
+                      {fetchingPublic ? "拉取中…" : "拉取公共 STUN"}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      disabled={probingPool || stunNodes.length === 0}
+                      onClick={() => {
+                        setPoolFilter("stun");
+                        void handleProbeServerPool();
+                      }}
+                    >
+                      {probingPool ? "测速中…" : "测全部 STUN"}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      onClick={() => {
+                        setBatchNodeKind("stun");
+                        setShowBatchAdd((v) => !v);
+                      }}
+                    >
+                      + 批量粘贴 STUN
+                    </button>
+                  </div>
+                </div>
+                {showBatchAdd && batchNodeKind === "stun" && !modeBodyOpen && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <textarea
+                      rows={3}
+                      value={batchNodeText}
+                      onChange={(e) => setBatchNodeText(e.currentTarget.value)}
+                      placeholder={"一行一个 STUN 地址，例如：\nstun.miwifi.com:3478\nstun.chat.bilibili.com:3478"}
+                      aria-label="批量 STUN 输入框"
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "6px 8px",
+                        borderRadius: "6px",
+                        border: "1px solid rgba(255,255,255,0.16)",
+                        background: "rgba(0,0,0,0.32)",
+                        color: "inherit",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        fontSize: "12px",
+                      }}
+                    />
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
+                      <button type="button" className={styles.btn} onClick={() => setShowBatchAdd(false)}>
+                        取消
+                      </button>
+                      <button type="button" className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleBatchAddNodes}>
+                        批量加入
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {stunNodes.length === 0 ? (
+                  <div style={{ fontSize: "12px", opacity: 0.7 }}>
+                    暂无自定义 STUN 节点（体检时会自动使用内置国内大厂 STUN）。可点「拉取公共 STUN」或「+ 批量粘贴 STUN」管理。
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(235px, 1fr))", gap: "6px", maxHeight: "155px", overflowY: "auto" }}>
+                    {stunNodes.map((node) => (
+                      <div
+                        key={node.id}
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "3px",
+                          padding: "7px 9px",
+                          borderRadius: "7px",
+                          fontSize: "12px",
+                          border: node.status === "ok" ? "1px solid rgba(63,185,80,0.45)" : "1px solid rgba(255,255,255,0.12)",
+                          background: "rgba(0,0,0,0.28)",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                          <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
+                          <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              title="点击单独测速并刷新延迟"
+                              disabled={probingPool || probingNodeId === node.id}
+                              onClick={() => void handleProbeSingleNode(node)}
+                              style={{
+                                cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
+                                background: "rgba(255,255,255,0.06)",
+                                border: "1px solid rgba(255,255,255,0.14)",
+                                borderRadius: "4px",
+                                padding: "1px 6px",
+                                fontWeight: 700,
+                                fontSize: "11px",
+                                color: node.status === "ok" ? "#3fb950" : node.status === "fail" ? "#f85149" : "inherit",
+                              }}
+                            >
+                              {probingNodeId === node.id ? "…" : node.lastRttMs !== null ? `${node.lastRttMs}ms` : node.status === "fail" ? "超时" : "测速"}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`移除 STUN ${node.name}`}
+                              onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                              style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 2px" }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                        <code style={{ opacity: 0.78, fontSize: "11px" }}>{node.addr}</code>
+                        {node.mappedAddr && <div style={{ fontSize: "11px", color: "#58a6ff" }}>公网映射：{node.mappedAddr}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* 共用 NAT 体检结论条（EasyTier 与自建中转打洞共用，点击 NAT 穿透体检后显示，可关闭） */}
           {natResult && (
