@@ -253,6 +253,53 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
                 tracing::warn!("刷新 last_seen 失败: {err:#}");
             }
         }
+        // 同指纹重连：先踢掉该设备可能残留的旧连接（避免 QUIC 空闲超时前自占并发名额）
+        {
+            let stale_ids: Vec<u64> = state
+                .peers
+                .lock()
+                .expect("peers 锁中毒")
+                .iter()
+                .filter(|(_, p)| p.fp == peer_fp)
+                .map(|(id, _)| *id)
+                .collect();
+            for stale_id in stale_ids {
+                if let Some(old) = state.peers.lock().expect("peers 锁中毒").remove(&stale_id) {
+                    tracing::info!(
+                        peer = peer_fp.short_hex(),
+                        old_conn = stale_id,
+                        "同设备重连，清理旧会话"
+                    );
+                    old.cancel.cancel();
+                }
+            }
+        }
+        // 并发上限检查必须在回 HelloAck 之前完成，且复用 hello_req_id 回 Error，
+        // 避免控制端误以为握手成功随后瞬间被关闭只看到「离线」。
+        let is_pro = state
+            .license
+            .as_ref()
+            .is_some_and(|l| l.plan == rd_security::Plan::Pro);
+        if !is_pro
+            && state.peers.lock().expect("peers 锁中毒").len()
+                >= rd_security::license::FREE_CONN_MAX
+        {
+            tracing::info!(peer = peer_fp.short_hex(), "免费版并发连接已达上限,拒绝");
+            crate::audit::log(
+                "license_reject_conn",
+                &hello.device_name,
+                &peer_fp.short_hex(),
+                serde_json::json!({}),
+            );
+            ctl_tx
+                .send(&error_env(
+                    hello_req_id,
+                    ERR_LICENSE_LIMIT,
+                    "免费版同一时间只能 1 台电脑连接（当前已有其他设备连着这台电脑，请先断开或升级 Pro）",
+                ))
+                .await?;
+            return Ok(());
+        }
         // 沿用 Hello 的 req_id:控制端以 RPC(等响应)方式握手
         ctl_tx
             .send(&hello_ack(hello_req_id, hello.media_fec))
@@ -299,32 +346,6 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
     let cancel = CancellationToken::new();
     // 自控自判定（conn move 前取地址）：loopback 连接豁免「本机优先」挂起
     let is_loopback = conn.peer_addr().ip().is_loopback();
-
-    // 免费版门控 1/2:并发控制端连接数(T-029;Pro 不限)。在注册与任何
-    // 能力授予前拒绝,提示大白话 + 升级路径。
-    let is_pro = state
-        .license
-        .as_ref()
-        .is_some_and(|l| l.plan == rd_security::Plan::Pro);
-    if !is_pro
-        && state.peers.lock().expect("peers 锁中毒").len() >= rd_security::license::FREE_CONN_MAX
-    {
-        tracing::info!(peer = peer_fp.short_hex(), "免费版并发连接已达上限,拒绝");
-        crate::audit::log(
-            "license_reject_conn",
-            &hello.device_name,
-            &peer_fp.short_hex(),
-            serde_json::json!({}),
-        );
-        ctl_tx
-            .send(&error_env(
-                0,
-                ERR_LICENSE_LIMIT,
-                "免费版同一时间只能 1 台电脑连接。请在被控端放入授权码升级(托盘→授权)。",
-            ))
-            .await?;
-        return Ok(());
-    }
 
     // 控制流发送端 Arc:SessionCtx(分发回包)与 PeerInfo(托盘推 SessionState)共享
     let ctl_shared = Arc::new(tokio::sync::Mutex::new(ctl_tx));

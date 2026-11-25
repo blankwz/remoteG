@@ -597,11 +597,14 @@ pub async fn connect_device(
     // EasyTier 转发入口（T-043，no_tun 组网）：本机节点配置了转发规则时，
     // 直连失败快试 127.0.0.1:转发端口 → mesh → 对端 rd
     let extra_addrs = easytier_forward_addrs();
-    // 握手超时（D-013 包2）：纯直连 3s 快速失败让退避节奏生效；配置了
-    // 原生中继或 EasyTier 转发时放宽到 30s——直连失败后还要走这些兜底
+    // 握手超时（D-013 包2）：纯局域网直连 3s 快速失败；Tailscale (100.x) 放宽到 8s
+    // 容纳 DERP/WireGuard 冷启动；配置了原生中继或 EasyTier 转发时放宽到 30s
     let has_relay = entry.relay.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let is_tailscale = entry.addr.starts_with("100.");
     let secs = if has_relay || !extra_addrs.is_empty() {
         30
+    } else if is_tailscale {
+        8
     } else {
         3
     };
@@ -623,8 +626,10 @@ pub async fn connect_device(
     let ack = match conn.handshake(state.decode_caps()).await {
         Ok(ack) => ack,
         Err(e) => {
+            let msg = describe_handshake_error(e);
+            tracing::warn!(device = %id, addr = %entry.addr, "握手失败: {msg}");
             conn.close(0, "handshake failed");
-            return Err(describe_handshake_error(e));
+            return Err(msg);
         }
     };
     state.put_device(id, conn, app);

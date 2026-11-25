@@ -64,6 +64,11 @@ function hostDuration(secs: number): string {
   return `${secs} 秒`;
 }
 
+/** 展示地址：默认端口 21118 自动隐藏，仅保留非默认自定义端口，减少视觉噪声。 */
+function formatDisplayAddr(addr: string): string {
+  return addr.endsWith(":21118") ? addr.slice(0, -":21118".length) : addr;
+}
+
 /**
  * 设备页（#/devices）。
  *
@@ -79,7 +84,7 @@ export function Devices() {
   const [showAdd, setShowAdd] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
-  const [form, setForm] = useState({ addr: "127.0.0.1:21118", code: "", name: "", relay: "" });
+  const [form, setForm] = useState({ addr: "", code: "", name: "", relay: "" });
   /** 局域网扫描结果（发现 ≠ 信任，点击仅预填添加对话框）。 */
   const [discovered, setDiscovered] = useState<DiscoveredDeviceDto[] | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -277,11 +282,16 @@ export function Devices() {
         const msg = errText(e);
         // 指纹不匹配（对端重装/换证书）→ 一键重配对：预填地址打开添加对话框
         if (msg.includes("指纹不匹配")) {
-          openAddDialog({ addr: d.addr, name: d.name });
+          openAddDialog({ addr: formatDisplayAddr(d.addr), name: d.name });
           setFormError(
             "对端证书已变化：可能是对方重装了系统/rd-agent，也可能是网络被劫持。" +
               "若对方确认刚重装过，请对方在托盘点「生成配对码」，你再输入新码完成重新配对；" +
               "若对方没有重装，请勿输入配对码，先通过其他渠道核实对方身份。",
+          );
+        } else if (msg.includes("尚未信任") || msg.includes("未鉴权")) {
+          openAddDialog({ addr: formatDisplayAddr(d.addr), name: d.name });
+          setFormError(
+            "对方电脑尚未信任本机（可能是对方重装或清空了信任列表）。请让对方点「生成配对码」，输入 6 位码重新配对即可连接。",
           );
         } else {
           setError(msg);
@@ -946,7 +956,7 @@ export function Devices() {
                     </span>
                   </span>
                   <span className={styles.addr}>
-                    {d.addr}
+                    {formatDisplayAddr(d.addr)}
                     {lastConnectedAt(d.id) !== null && (
                       <span title="上次成功连接时间"> · 上次连接 {relativeTime(lastConnectedAt(d.id) as number)}</span>
                     )}
@@ -1168,12 +1178,12 @@ export function Devices() {
               {editing !== null ? `编辑设备：${editing.name}` : "添加设备"}
             </h2>
             <label className={styles.field}>
-              <span>地址</span>
+              <span>对方 IP 地址</span>
               <input
                 className={styles.input}
                 value={form.addr}
                 onChange={(e) => updateForm("addr", e.currentTarget.value)}
-                placeholder="托盘弹窗里的地址，如 100.x.y.z:21118 或 192.168.1.10"
+                placeholder="如 192.168.1.10 或 100.81.205.0（默认端口无需填写）"
                 spellCheck={false}
                 autoFocus
               />

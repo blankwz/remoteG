@@ -34,6 +34,12 @@ import {
 } from "../api/lab";
 import { isTauriRuntime } from "../api/bridge";
 import {
+  listDevices,
+  probeDevice,
+  tailscalePing,
+  type DeviceDto,
+} from "../api/devices";
+import {
   CanvasTileSurface,
   FRAME_INVALIDATE,
   FRAME_TILE,
@@ -437,9 +443,117 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   }, [codec.tileEnabled, codec.bitrateKbps, refreshMagnifier]);
 
   // 操控域 ① & ②：选路与传输层应用
+  const [savedDevices, setSavedDevices] = useState<DeviceDto[]>([]);
+  const [targetDeviceId, setTargetDeviceId] = useState<string>(deviceId ?? "");
+  const [customIp, setCustomIp] = useState<string>("");
+  const [probingTarget, setProbingTarget] = useState(false);
+  const [probeSummary, setProbeSummary] = useState<string | null>(null);
+  const [eventLogs, setEventLogs] = useState<
+    { id: number; time: string; level: "info" | "ok" | "warn"; text: string }[]
+  >(() => [
+    {
+      id: 1,
+      time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+      level: "info",
+      text: "实验室已就绪：选择目标设备/输入 IP → 点「实测连通」或「全方案一键选最优」，每次调参都会在下方记录具体影响。",
+    },
+  ]);
+  const logSeqRef = useRef(2);
+  const pushLog = useCallback((level: "info" | "ok" | "warn", text: string) => {
+    const id = logSeqRef.current++;
+    const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    setEventLogs((prev) => [{ id, time, level, text }, ...prev].slice(0, 40));
+  }, []);
+
+  useEffect(() => {
+    void listDevices()
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setSavedDevices(list);
+          if (!targetDeviceId && list.length > 0 && list[0]) {
+            setTargetDeviceId(list[0].id);
+          }
+        }
+      })
+      .catch(() => undefined);
+  }, [targetDeviceId]);
+
+  const selectedDevice =
+    savedDevices.find((d) => d.id === targetDeviceId) ?? null;
+  const effectiveTargetLabel =
+    customIp.trim().length > 0
+      ? customIp.trim()
+      : selectedDevice
+        ? `${selectedDevice.name} (${selectedDevice.addr.replace(/:21118$/, "")})`
+        : live?.activeAddr
+          ? live.activeAddr.replace(/:21118$/, "")
+          : "本机真栈沙盒";
+
+  const handleProbeTarget = useCallback(async () => {
+    setProbingTarget(true);
+    setProbeSummary(null);
+    const rawIp = customIp.trim();
+    const targetAddr =
+      rawIp.length > 0
+        ? rawIp
+        : selectedDevice?.addr ?? live?.activeAddr ?? "";
+    const hostOnly = targetAddr.replace(/:21118$/, "").split(":")[0] ?? "";
+    pushLog("info", `开始实测目标「${effectiveTargetLabel}」的连通性与链路质量…`);
+    const t0 = performance.now();
+    try {
+      if (selectedDevice && rawIp.length === 0) {
+        const reachable = await probeDevice(selectedDevice.id);
+        const ms = Math.round(performance.now() - t0);
+        if (reachable) {
+          let extra = "";
+          if (hostOnly.startsWith("100.")) {
+            try {
+              const ts = await tailscalePing(selectedDevice.addr);
+              extra = ` · Tailscale: ${ts}`;
+            } catch {
+              // ignore optional tailscale ping failure
+            }
+          }
+          const summary = `可达 · 握手响应 ${ms}ms${extra}`;
+          setProbeSummary(summary);
+          pushLog("ok", `目标 ${effectiveTargetLabel} 连通成功：${summary}`);
+        } else {
+          const summary = `不可达（耗时 ${ms}ms，请检查对方 rd-agent 是否运行或端口 21118 放行）`;
+          setProbeSummary(summary);
+          pushLog("warn", `目标 ${effectiveTargetLabel} ${summary}`);
+        }
+      } else if (hostOnly.startsWith("100.")) {
+        const ts = await tailscalePing(rawIp);
+        setProbeSummary(`Tailscale 实测：${ts}`);
+        pushLog("ok", `Tailscale 实测 ${rawIp}：${ts}`);
+      } else {
+        const summary =
+          rawIp.length > 0
+            ? `已锁定目标 IP ${rawIp}（默认端口 21118），可点击「全方案一键选最优」压测最优传输策略`
+            : "当前未选择远端设备，正在本机真栈沙盒运行（可先在设备页添加设备或上方输入 IP）";
+        setProbeSummary(summary);
+        pushLog("info", summary);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setProbeSummary(`探测异常：${msg}`);
+      pushLog("warn", `探测 ${effectiveTargetLabel} 失败：${msg}`);
+    } finally {
+      setProbingTarget(false);
+    }
+  }, [customIp, effectiveTargetLabel, live?.activeAddr, pushLog, selectedDevice]);
+
   const applyTransportNow = useCallback(
     async (next: LabTransportConfig) => {
       setTransport(next);
+      const impact = [
+        `路径=${next.routeMode.toUpperCase()}`,
+        `拥塞=${next.congestion === "bbr" ? "BBR(跨网抗抖动)" : "Cubic(传统退避)"}`,
+        next.mediaFec
+          ? `RS-FEC 开启(+${next.fecOverheadPct}% 冗余，弱网防花屏)`
+          : "QUIC 可靠流(零冗余，局域网低开销)",
+      ].join(" · ");
+      pushLog("info", `调整传输层 → ${impact}`);
       try {
         const msg = await labApplyTransport(
           live?.activeDeviceId ?? deviceId ?? null,
@@ -450,13 +564,21 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         showToast(e instanceof Error ? e.message : String(e));
       }
     },
-    [deviceId, live?.activeDeviceId, showToast],
+    [deviceId, live?.activeDeviceId, pushLog, showToast],
   );
 
   // 操控域 ③：编码与瓦片毫秒级热调
   const applyCodecNow = useCallback(
     async (next: LabCodecConfig, forceIdr = false) => {
       setCodec(next);
+      pushLog(
+        "info",
+        `调整编码参数 → ${(next.bitrateKbps / 1000).toFixed(1)} Mbps / ${next.maxFps}fps / ${
+          next.preferHw ? "硬编优先" : "软编"
+        } / ${next.request444 ? "YUV444(文字锐利)" : "YUV420(省带宽)"} / QOI瓦片${
+          next.tileEnabled ? "开(静态1:1无损)" : "关"
+        }`,
+      );
       try {
         await labApplyTuning(
           live?.activeDeviceId ?? deviceId ?? null,
@@ -471,13 +593,19 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         showToast(e instanceof Error ? e.message : String(e));
       }
     },
-    [deviceId, live?.activeDeviceId, showToast, transport.fecOverheadPct],
+    [deviceId, live?.activeDeviceId, pushLog, showToast, transport.fecOverheadPct],
   );
 
   // 操控域 ④：可编程 Netem 阀门
   const applyNetemNow = useCallback(
     async (next: NetemConfigDto) => {
       setNetem(next);
+      pushLog(
+        next.enabled ? "warn" : "ok",
+        next.enabled
+          ? `开启弱网模拟：额外延迟 +${next.delayMs}ms、抖动 ${next.jitterMs}ms、丢包 ${next.lossPct}%（用于模拟跨网/烂WiFi测试抗丢包效果）`
+          : "已关闭弱网模拟：恢复真实网络直通（0 额外延迟/丢包）",
+      );
       try {
         const res = await labSetNetem(next);
         setNetem(res);
@@ -485,7 +613,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         showToast(e instanceof Error ? e.message : String(e));
       }
     },
-    [showToast],
+    [pushLog, showToast],
   );
 
   // 载入 Profile 并立刻应用
@@ -571,16 +699,23 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
 
   const handleBenchmarkAll = useCallback(async () => {
     setAllBenchRunning(true);
+    pushLog("info", `开始对「${effectiveTargetLabel}」执行全方案自动测速与综合打分…`);
     try {
       const res = await labBenchmarkAllRoutes(profiles);
       setAllBenchResult(res);
       showToast(`已测完 ${res.ranked.length} 套方案，最优：${res.bestName}`);
+      pushLog(
+        "ok",
+        `全方案测速完成（共 ${res.ranked.length} 套）→ 最优推荐：${res.bestName}（${res.verdict}）`,
+      );
     } catch (e) {
-      showToast(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(msg);
+      pushLog("warn", `全方案测速失败：${msg}`);
     } finally {
       setAllBenchRunning(false);
     }
-  }, [profiles, showToast]);
+  }, [effectiveTargetLabel, profiles, pushLog, showToast]);
 
   const onStageMouseMove = (e: MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -651,6 +786,174 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         </div>
       </header>
 
+      {/* ── 可视化网络拓扑图 + 目标实测条（控制端 → 中转/节点 → 被控端） ── */}
+      <div
+        style={{
+          margin: "0 0 12px",
+          padding: "12px 14px",
+          borderRadius: "10px",
+          background: "rgba(255, 255, 255, 0.03)",
+          border: "1px solid rgba(255, 255, 255, 0.09)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "10px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            alignItems: "center",
+          }}
+        >
+          <strong style={{ fontSize: "13px" }}>🎯 测试目标：</strong>
+          <select
+            className={styles.select}
+            aria-label="选择要测试的被控设备"
+            value={targetDeviceId}
+            onChange={(e) => {
+              setTargetDeviceId(e.target.value);
+              setCustomIp("");
+              pushLog("info", "已切换测试目标设备");
+            }}
+          >
+            <option value="">本机真栈沙盒（免连外机）</option>
+            {savedDevices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.addr.replace(/:21118$/, "")}){d.online ? " · 在线" : ""}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={customIp}
+            onChange={(e) => setCustomIp(e.currentTarget.value)}
+            placeholder="或直接输入目标 IP（如 100.81.205.0，免填端口）"
+            aria-label="自定义测试目标 IP"
+            style={{
+              flex: "1 1 200px",
+              minWidth: 0,
+              padding: "6px 10px",
+              borderRadius: "6px",
+              border: "1px solid rgba(255, 255, 255, 0.14)",
+              background: "rgba(0, 0, 0, 0.25)",
+              color: "inherit",
+              fontSize: "12px",
+            }}
+          />
+          <button
+            type="button"
+            className={styles.btn}
+            disabled={probingTarget}
+            onClick={() => void handleProbeTarget()}
+          >
+            {probingTarget ? "⏳ 实测中…" : "🔍 实测连通与延迟"}
+          </button>
+          <button
+            type="button"
+            className={`${styles.btn} ${styles.btnPrimary}`}
+            disabled={allBenchRunning}
+            onClick={() => void handleBenchmarkAll()}
+          >
+            {allBenchRunning ? "⏳ 全方案测速中…" : "🚀 全方案自动测速优选"}
+          </button>
+        </div>
+
+        {/* 3 节点直观拓扑图：控制端 ──► 中转/链路节点 ──► 被控端 */}
+        <div
+          aria-label="控制端到被控端网络拓扑图"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr auto 1.2fr auto 1fr",
+            alignItems: "center",
+            gap: "8px",
+            padding: "10px",
+            borderRadius: "8px",
+            background: "rgba(0, 0, 0, 0.22)",
+          }}
+        >
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: "8px",
+              border: "1px solid rgba(88, 166, 255, 0.45)",
+              background: "rgba(88, 166, 255, 0.08)",
+            }}
+          >
+            <div style={{ fontSize: "12px", fontWeight: 600 }}>💻 控制端（本机）</div>
+            <div style={{ fontSize: "11px", opacity: 0.8, marginTop: "2px" }}>
+              WebCodecs 解码 · {decodeStats.decodeMs.toFixed(1)}ms
+            </div>
+            <div style={{ fontSize: "11px", opacity: 0.7 }}>
+              目标 {codec.maxFps}fps · {(codec.bitrateKbps / 1000).toFixed(1)} Mbps
+            </div>
+          </div>
+
+          <div style={{ textAlign: "center", fontSize: "11px", opacity: 0.85 }}>
+            <div>━━►</div>
+            <div>{transport.congestion.toUpperCase()}</div>
+          </div>
+
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: "8px",
+              border: netem.enabled
+                ? "1px solid rgba(248, 81, 73, 0.6)"
+                : "1px solid rgba(63, 185, 80, 0.45)",
+              background: netem.enabled
+                ? "rgba(248, 81, 73, 0.1)"
+                : "rgba(63, 185, 80, 0.08)",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: "12px", fontWeight: 600 }}>
+              🌐 传输节点：{live?.routeTag ?? transport.routeMode.toUpperCase()}
+            </div>
+            <div style={{ fontSize: "11px", opacity: 0.85, marginTop: "2px" }}>
+              延迟 RTT {live?.rttMs ?? 1}ms · 实测 {((live?.videoKbps ?? 0) / 1000).toFixed(1)} Mbps ·{" "}
+              {transport.mediaFec ? `RS-FEC +${transport.fecOverheadPct}%` : "QUIC 可靠流"}
+            </div>
+            <div style={{ fontSize: "11px", opacity: 0.72 }}>
+              {netem.enabled
+                ? `⚠️ 弱网模拟中：+${netem.delayMs}ms / 丢包 ${netem.lossPct}%`
+                : "真实链路直通（未叠加人为丢包）"}
+            </div>
+          </div>
+
+          <div style={{ textAlign: "center", fontSize: "11px", opacity: 0.85 }}>
+            <div>━━►</div>
+            <div>{live?.hardwareEnc === false ? "软件编码" : "硬件编码"}</div>
+          </div>
+
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: "8px",
+              border: "1px solid rgba(188, 140, 255, 0.45)",
+              background: "rgba(188, 140, 255, 0.08)",
+            }}
+          >
+            <div style={{ fontSize: "12px", fontWeight: 600 }}>🖥️ 被控端</div>
+            <div style={{ fontSize: "11px", opacity: 0.85, marginTop: "2px" }}>
+              {effectiveTargetLabel}
+            </div>
+            <div style={{ fontSize: "11px", opacity: 0.7 }}>
+              {live?.is444 ? "YUV444 锐利" : "YUV420 高效"} · QOI 瓦片
+              {codec.tileEnabled ? "开" : "关"}
+            </div>
+          </div>
+        </div>
+
+        {probeSummary && (
+          <div style={{ fontSize: "12px", opacity: 0.9 }}>
+            <strong>📡 最近实测结果：</strong>
+            {probeSummary}
+          </div>
+        )}
+      </div>
+
       {/* ── 实时链路解剖拓扑条 (Live Pipeline Anatomy) ── */}
       <div className={styles.anatomyBar} role="status" aria-label="实时链路拓扑解剖">
         <div className={styles.stageBox}>
@@ -718,6 +1021,9 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               <h2 className={styles.knobTitle}>① 选路与传输强制接管</h2>
               <span className={styles.knobTag}>ROUTE &amp; CC</span>
             </div>
+            <p className={styles.oscSub} style={{ margin: "0 0 8px" }}>
+              决定流量走局域网直连、打洞还是中继；BBR 适合跨网防卡顿，Cubic 适合极简内网。
+            </p>
 
             <div className={styles.fieldRow}>
               <span className={styles.fieldLabel}>物理路径锁定</span>
@@ -768,6 +1074,9 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               <h2 className={styles.knobTitle}>② 抗丢包与 RS-FEC 通道</h2>
               <span className={styles.knobTag}>MOONLIGHT FEC-RS</span>
             </div>
+            <p className={styles.oscSub} style={{ margin: "0 0 8px" }}>
+              跨网/WiFi 丢包时开启 RS-FEC 可瞬间救回丢帧避免卡死；冗余越高越抗丢包，但会多占相应带宽。
+            </p>
 
             <div className={styles.segGroup} role="group" aria-label="视频承载通道">
               <button
@@ -825,6 +1134,9 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               <h2 className={styles.knobTitle}>③ 编码与 1:1 无损瓦片微操</h2>
               <span className={styles.knobTag}>CODEC &amp; QOI TILE</span>
             </div>
+            <p className={styles.oscSub} style={{ margin: "0 0 8px" }}>
+              局域网可拉高码率至 50~200 Mbps + 144fps；开启 QOI 瓦片会在画面静止时自动把文字补成 1:1 像素无损。
+            </p>
 
             <div className={styles.segGroup} role="group" aria-label="码率控制模式">
               <button
@@ -1332,6 +1644,61 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                 </table>
               </>
             )}
+          </div>
+
+          {/* 📋 实时诊断与调参日志流 */}
+          <div className={styles.abCard}>
+            <div className={styles.magHeader}>
+              <div>
+                <h2 className={styles.knobTitle}>📋 实时测速与调参消息日志</h2>
+                <span className={styles.oscSub}>
+                  记录每次探测、选路切换与参数调节的具体效果，方便回看发生了什么
+                </span>
+              </div>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setEventLogs([])}
+              >
+                清空日志
+              </button>
+            </div>
+            <div
+              role="log"
+              aria-live="polite"
+              style={{
+                maxHeight: "180px",
+                overflowY: "auto",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                fontSize: "12px",
+                background: "rgba(0, 0, 0, 0.25)",
+                borderRadius: "6px",
+                padding: "8px 10px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "4px",
+              }}
+            >
+              {eventLogs.length === 0 ? (
+                <span style={{ opacity: 0.6 }}>暂无日志，点击上方「实测连通」或拨动任意参数即可查看记录。</span>
+              ) : (
+                eventLogs.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={{
+                      color:
+                        entry.level === "ok"
+                          ? "#3fb950"
+                          : entry.level === "warn"
+                            ? "#f85149"
+                            : "inherit",
+                    }}
+                  >
+                    <span style={{ opacity: 0.65 }}>[{entry.time}]</span> {entry.text}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>
