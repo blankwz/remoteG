@@ -3,7 +3,7 @@
 # 开发消失。产物路径相应变为 <root>/target/release/(bat2/CI 同步)。
 [package]
 name = "rd-controller"
-version = "0.4.0"
+version = "0.4.2"
 description = "rd window-level remote control - controller app"
 edition = "2024"
 
