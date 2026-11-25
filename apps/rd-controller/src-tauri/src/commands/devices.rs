@@ -2071,6 +2071,197 @@ pub async fn relay_resolve_id(
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EasyTierAutoInstallDto {
+    pub ok: bool,
+    pub version: String,
+    pub binary_path: String,
+    pub tools_dir: String,
+    pub detail: String,
+}
+
+/// 一键自动从 GitHub Releases 下载并解压当前平台对应的官方 `easytier-core` 到配置目录 `tools/`。
+#[tauri::command]
+pub async fn easytier_auto_install() -> Result<EasyTierAutoInstallDto, String> {
+    let target_prefix = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "easytier-windows-x86_64-"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "easytier-windows-arm64-"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "easytier-macos-aarch64-"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "easytier-macos-x86_64-"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "easytier-linux-x86_64-"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "easytier-linux-aarch64-"
+    } else {
+        return Err("当前系统架构暂不支持自动下载，请点击链接手动下载 EasyTier".into());
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("rd-controller")
+        .build()
+        .map_err(|e| format!("初始化下载客户端失败：{e}"))?;
+
+    let raw = client
+        .get("https://api.github.com/repos/EasyTier/EasyTier/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("访问 GitHub Releases 失败（可尝试手动下载链接）：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub API 返回异常：{e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("读取 Release 列表失败：{e}"))?;
+    let rel: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("解析 Release 列表失败：{e}"))?;
+
+    let version = rel
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("latest")
+        .to_string();
+
+    let assets = rel
+        .get("assets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Release 缺少资源列表".to_string())?;
+
+    let asset = assets
+        .iter()
+        .find(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.starts_with(target_prefix) && n.ends_with(".zip"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| format!("未在 {version} 中找到匹配 {target_prefix}*.zip 的安装包"))?;
+
+    let download_url = asset
+        .get("browser_download_url")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| "缺少下载地址".to_string())?;
+
+    let tools_dir = agent_config_file()
+        .parent()
+        .ok_or_else(|| "无法定位配置目录".to_string())?
+        .join("tools");
+    std::fs::create_dir_all(&tools_dir).map_err(|e| format!("创建 tools 目录失败：{e}"))?;
+
+    let zip_path = tools_dir.join("easytier-download.zip");
+    let bytes = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载 EasyTier 失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("下载返回异常：{e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("读取安装包失败：{e}"))?;
+
+    std::fs::write(&zip_path, &bytes).map_err(|e| format!("保存压缩包失败：{e}"))?;
+
+    let extract_dir = tools_dir.join("_extract_tmp");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+
+    #[cfg(windows)]
+    {
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                zip_path.display(),
+                extract_dir.display()
+            ),
+        ]);
+        cmd.creation_flags(0x0800_0000);
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| format!("调用 PowerShell 解压失败：{e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("解压失败：{err}"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let out = tokio::process::Command::new("unzip")
+            .args([
+                "-o",
+                &zip_path.to_string_lossy(),
+                "-d",
+                &extract_dir.to_string_lossy(),
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("调用 unzip 解压失败：{e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("解压失败：{err}"));
+        }
+    }
+
+    // 递归把解压出的核心文件平铺拷贝到 tools/
+    let mut stack = vec![extract_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Some(fname) = p.file_name() {
+                    let dst = tools_dir.join(fname);
+                    let _ = std::fs::copy(&p, &dst);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let s = fname.to_string_lossy();
+                        if s.starts_with("easytier-") {
+                            let _ = std::fs::set_permissions(
+                                &dst,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    let _ = std::fs::remove_file(&zip_path);
+
+    let core_name = if cfg!(windows) {
+        "easytier-core.exe"
+    } else {
+        "easytier-core"
+    };
+    let core_path = tools_dir.join(core_name);
+    if !core_path.is_file() {
+        return Err(format!("解压完成但未找到 {core_name}，请手动检查压缩包"));
+    }
+
+    Ok(EasyTierAutoInstallDto {
+        ok: true,
+        version: version.clone(),
+        binary_path: core_path.to_string_lossy().to_string(),
+        tools_dir: tools_dir.to_string_lossy().to_string(),
+        detail: format!(
+            "已自动下载并安装 EasyTier {version} 到 {}！现在可以直接生成/加入组网口令。",
+            tools_dir.display()
+        ),
+    })
+}
+
 #[cfg(test)]
 mod easytier_invite_tests {
     use super::*;

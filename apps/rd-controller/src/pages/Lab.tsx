@@ -42,6 +42,7 @@ import {
 import { isTauriRuntime } from "../api/bridge";
 import {
   connectDevice,
+  easytierAutoInstall,
   easytierDetectStatus,
   easytierGenerateInvite,
   easytierJoinInvite,
@@ -564,6 +565,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [relayLookupRes, setRelayLookupRes] = useState<RelayResolveIdResultDto | null>(null);
   const [etStatus, setEtStatus] = useState<EasyTierStatusDto | null>(null);
   const [etBusy, setEtBusy] = useState(false);
+  const [etInstalling, setEtInstalling] = useState(false);
   const [etJoinInput, setEtJoinInput] = useState("");
   const [etInviteCode, setEtInviteCode] = useState("");
   const [smartDiscovering, setSmartDiscovering] = useState(false);
@@ -2582,8 +2584,50 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
 
                     {/* EasyTier 口令生成 / 粘贴加入 / 在线成员 */}
                     {etStatus && !etStatus.installed && (
-                      <div style={{ fontSize: "12px", padding: "7px 10px", borderRadius: "6px", background: "rgba(229, 181, 103, 0.1)", border: "1px solid rgba(229, 181, 103, 0.35)" }}>
-                        未检测到本机 <code>easytier-core</code>：请下载官方 EasyTier 放入配置目录 <code>tools/</code> 或系统 PATH 即可自动识别。
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", fontSize: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(229, 181, 103, 0.1)", border: "1px solid rgba(229, 181, 103, 0.35)" }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                          <strong>本机尚未安装 easytier-core（组网核心引擎）</strong>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                            <button
+                              type="button"
+                              className={`${styles.btn} ${styles.btnPrimary}`}
+                              disabled={etInstalling}
+                              onClick={async () => {
+                                setEtInstalling(true);
+                                pushLog("info", "[EasyTier] 正在从 GitHub Releases 自动下载并安装当前平台对应的 easytier-core…");
+                                try {
+                                  const res = await easytierAutoInstall();
+                                  showToast(res.detail);
+                                  pushLog("ok", `[EasyTier] ${res.detail}`);
+                                  const st = await easytierDetectStatus().catch(() => null);
+                                  if (st) setEtStatus(st);
+                                } catch (e) {
+                                  const msg = e instanceof Error ? e.message : String(e);
+                                  showToast(`自动下载失败：${msg}`);
+                                  pushLog("warn", `[EasyTier] 自动下载失败：${msg}`);
+                                } finally {
+                                  setEtInstalling(false);
+                                }
+                              }}
+                            >
+                              {etInstalling ? "正在下载并解压…" : "一键自动下载安装"}
+                            </button>
+                            <a
+                              href="https://github.com/EasyTier/EasyTier/releases/latest"
+                              target="_blank"
+                              rel="noreferrer"
+                              className={styles.btn}
+                              style={{ textDecoration: "none" }}
+                            >
+                              手动前往 GitHub 下载
+                            </a>
+                          </div>
+                        </div>
+                        <div style={{ opacity: 0.85, lineHeight: 1.6 }}>
+                          手动下载说明（不要下带 <code>gui</code> 的版本）：
+                          Windows 选 <code>easytier-windows-x86_64-v*.zip</code>（解压全部文件放入 <code>C:\tools\</code>）；
+                          macOS M 芯片选 <code>easytier-macos-aarch64-v*.zip</code>，Intel 选 <code>easytier-macos-x86_64-v*.zip</code>（放入 <code>~/Library/Application Support/rd/app/tools/</code>）。
+                        </div>
                       </div>
                     )}
                     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>

@@ -291,6 +291,13 @@ export async function mockInvoke<T>(
       binaryPath: "C:\\tools\\easytier-core.exe",
       hint: "已加入组网「rd-mesh-1a2b3c」！重启后自动分配 10.126.x.x 内网 IP。",
     },
+    easytier_auto_install: {
+      ok: true,
+      version: "v2.2.4",
+      binaryPath: "C:\\tools\\easytier-core.exe",
+      toolsDir: "C:\\tools",
+      detail: "已自动下载并安装 EasyTier v2.2.4 到 C:\\tools！",
+    },
     lab_diagnose_nat: {
       natType: "cone",
       label: "圆锥型 NAT（极易 P2P 打洞直连）",

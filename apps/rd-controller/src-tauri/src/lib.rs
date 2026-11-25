@@ -207,6 +207,7 @@ pub fn run() {
             commands::devices::easytier_detect_status,
             commands::devices::easytier_generate_invite,
             commands::devices::easytier_join_invite,
+            commands::devices::easytier_auto_install,
             // 方案 A：自建中转 9 位 ID 码状态与在线探测
             commands::devices::relay_id_status,
             commands::devices::relay_resolve_id,

@@ -378,6 +378,18 @@ export function easytierJoinInvite(
   return call("easytier_join_invite", { inviteCode });
 }
 
+export interface EasyTierAutoInstallDto {
+  ok: boolean;
+  version: string;
+  binaryPath: string;
+  toolsDir: string;
+  detail: string;
+}
+
+export function easytierAutoInstall(): Promise<EasyTierAutoInstallDto> {
+  return call("easytier_auto_install");
+}
+
 export interface RelayIdStatusDto {
   numericId: string;
   rawId: number;
