@@ -17,6 +17,7 @@ import type { DecodeStats } from "./video/decoder";
 import { H264Decoder } from "./video/decoder";
 import { VideoCanvas } from "./video/VideoCanvas";
 import { IconGear } from "./ui/Icon";
+import { MacPermissionBanner } from "./ui/MacPermissionBanner";
 import { UpdateBanner } from "./ui/UpdateBanner";
 import { loadAdvancedMode, subscribeAdvancedMode } from "./ui/advancedMode";
 import styles from "./App.module.css";
@@ -152,6 +153,7 @@ export default function App() {
   return (
     <div className={styles.app}>
       <Nav active={route.page} />
+      <MacPermissionBanner />
       <UpdateBanner />
       {route.page === "spike" && <SpikePage />}
       {route.page === "devices" && <Devices />}

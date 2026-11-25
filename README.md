@@ -17,6 +17,19 @@ cargo fmt --all --check
 
 控制端 `apps/rd-controller/` 为独立 Cargo workspace（Tauri 2 + Node/pnpm），由根 workspace 排除（见 DECISIONS.md D-008）。
 
+## macOS 安装与首次权限说明
+
+1. **解决“已损坏，无法打开，你应该将它移到废纸篓”提示**：
+   由于当前开源免费版未购买苹果付费开发者证书公证（Notarization），下载后的 `.dmg` 会被 macOS Gatekeeper 标记隔离。请先将 `rd-controller.app` 拖入「应用程序」文件夹，再在「终端」执行：
+   ```bash
+   xattr -cr /Applications/rd-controller.app
+   ```
+   即可正常双击打开。
+2. **首次启用被控（让别人远程控制你的 Mac）**：
+   打开软件后，若缺少系统权限顶部会自动弹出引导横幅，点击按钮直达 **系统设置 → 隐私与安全性** 勾选以下两项并重启应用：
+   - **屏幕录制**（允许捕获窗口画面）
+   - **辅助功能**（允许远程键鼠与滚轮注入）
+
 ## 目录
 
 | 路径 | 说明 |

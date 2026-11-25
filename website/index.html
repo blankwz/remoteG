@@ -335,10 +335,15 @@
           </div>
           <div class="dl-item">
             <div class="dl-name">
-              <b>macOS / 移动端控制端</b>
-              <span>当前版本仅支持 Windows 双端，macOS 与移动端控制端正在规划中</span>
+              <b>macOS 融合版（Apple Silicon · 控制端 + 被控端）</b>
+              <span>支持双向远控。因未做苹果付费公证，安装后若提示“已损坏”，请拖入「应用程序」并在终端执行 <code>xattr -cr /Applications/rd-controller.app</code>；首次打开请按顶部提示前往「系统设置 → 隐私与安全性」开启「屏幕录制」与「辅助功能」。</span>
             </div>
-            <span class="btn btn-disabled" aria-disabled="true">开发中</span>
+            <a
+              class="btn btn-primary"
+              data-release-asset="aarch64.dmg"
+              href="https://github.com/blankwz/remoteG/releases/latest"
+              >下载 macOS 安装包</a
+            >
           </div>
           <div id="dl-status"></div>
           <p class="dl-note">

@@ -66,6 +66,63 @@ pub fn forward_bind_addrs(forwards: &[String]) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// macOS 隐私与安全性权限状态 DTO（非 macOS 恒为 `isMac: false`）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacPermissionsDto {
+    pub is_mac: bool,
+    pub screen_recording: bool,
+    pub accessibility: bool,
+}
+
+/// 查询当前系统的 macOS 权限状态（屏幕录制 + 辅助功能）。
+#[tauri::command]
+pub fn get_mac_permissions() -> MacPermissionsDto {
+    #[cfg(target_os = "macos")]
+    {
+        MacPermissionsDto {
+            is_mac: true,
+            screen_recording: rd_mac::permissions::has_screen_recording(),
+            accessibility: rd_mac::permissions::has_accessibility(),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MacPermissionsDto {
+            is_mac: false,
+            screen_recording: true,
+            accessibility: true,
+        }
+    }
+}
+
+/// 一键打开 macOS《系统设置 → 隐私与安全性》对应面板（"screen" / "accessibility" / "security"）。
+#[tauri::command]
+pub fn open_mac_privacy_settings(pane: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match pane.as_str() {
+            "screen" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            "accessibility" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+            _ => "x-apple.systempreferences:com.apple.preference.security?Privacy",
+        };
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开系统设置失败：{e}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

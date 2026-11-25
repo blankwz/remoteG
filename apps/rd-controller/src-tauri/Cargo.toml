@@ -55,6 +55,10 @@ tauri-plugin-updater = "2"
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rd-agent = { path = "../../../apps/rd-agent" }
 
+# macOS 专属：隐私权限实时检测（屏幕录制 / 辅助功能）。
+[target.'cfg(target_os = "macos")'.dependencies]
+rd-mac = { path = "../../../crates/rd-mac" }
+
 # Windows 专属：托盘开机自启（winreg / Win32）。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10"

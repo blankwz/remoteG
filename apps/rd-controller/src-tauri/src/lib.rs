@@ -181,6 +181,9 @@ pub fn run() {
             commands::term::term_resize,
             // T-038：更新
             commands::update::restart_app,
+            // macOS 首次隐私权限检测与一键直达《隐私与安全性》
+            platform::get_mac_permissions,
+            platform::open_mac_privacy_settings,
             // 宪法 #3：SSH 一键部署自建中转服务器
             commands::relay_deploy::deploy_relay_ssh,
             // v0.4：方案实验室（RD Geek Lab 原生极客台）
