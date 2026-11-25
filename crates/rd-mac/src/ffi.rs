@@ -18,6 +18,7 @@ pub type CGDataProviderRef = *const c_void;
 pub type CGEventRef = *const c_void;
 pub type CGEventSourceRef = *const c_void;
 pub type CGWindowID = u32;
+pub type CGDirectDisplayID = u32;
 pub type CGKeyCode = u16;
 pub type CGFloat = f64;
 
@@ -101,6 +102,8 @@ extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     pub static CGRectNull: CGRect;
+    pub fn CGMainDisplayID() -> CGDirectDisplayID;
+    pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGRequestScreenCaptureAccess() -> bool;
     pub fn CGWindowListCopyWindowInfo(option: u32, relativeToWindow: CGWindowID) -> CFArrayRef;

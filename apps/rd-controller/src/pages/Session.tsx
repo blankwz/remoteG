@@ -147,14 +147,39 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [lockArmedAt, setLockArmedAt] = useState(0);
   /** 激活标签注册的录屏控制器（WindowGroupView 挂载时写入）。 */
   const recordCtlRef = useRef<RecordControl | null>(null);
-  /** 窗口列表侧边栏显隐（T-028 F4；默认展开）。 */
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem("rd.sidebar") !== "closed";
-    } catch {
-      return true;
+  /** 完整桌面（主显示器）虚拟 window_id：0xFFFF_0000_0000_0000。 */
+const DESKTOP_PRIMARY_ID = "18446462598732840960";
+
+/** 根据 windowId 生成可读兜底标题（完整桌面显示友好名称而非 20 位数字）。 */
+function defaultWindowTitle(id: string): string {
+  if (id === DESKTOP_PRIMARY_ID) {
+    return "🖥️ 完整桌面";
+  }
+  try {
+    const n = BigInt(id);
+    const base = 0xffff000000000000n;
+    if (n >= base && n < base + 64n) {
+      const idx = Number(n - base);
+      return idx === 0 ? "🖥️ 完整桌面" : `🖥️ 显示器 ${idx + 1}`;
     }
-  });
+  } catch {
+    // non-numeric id
+  }
+  return `窗口 ${id}`;
+}
+
+/** 窗口列表侧边栏显隐（完整桌面默认收起，保证 RustDesk 式大视野；用户记忆优先）。 */
+function readInitialSidebarOpen(): boolean {
+  try {
+    const saved = window.localStorage.getItem("rd.sidebar");
+    if (saved === "open") return true;
+    if (saved === "closed") return false;
+  } catch {
+    // ignore
+  }
+  return !window.location.hash.includes(`open=${DESKTOP_PRIMARY_ID}`);
+}
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(readInitialSidebarOpen);
   /** 自控自会话（设备地址是 loopback）：注入类操作停用并提示（2026-10-27
    * 鼠标拉扯反馈——同机注入与控制端光标互斥，输入功能由双机场景验证）。 */
   const [loopback, setLoopback] = useState(false);
@@ -817,7 +842,7 @@ export function Session({ deviceId }: { deviceId: string }) {
               tab={tab}
               tabId={tab.id}
               fallbackTitle={
-                titleCacheRef.current.get(tab.id) ?? `窗口 ${tab.id}`
+                titleCacheRef.current.get(tab.id) ?? defaultWindowTitle(tab.id)
               }
               active={tab.id === activeId}
               onSelect={() => setActiveId(tab.id)}
@@ -1066,6 +1091,13 @@ export function Session({ deviceId }: { deviceId: string }) {
               点击左侧窗口即在远端打开会话；或直接开一个终端。
             </p>
             <div className={styles.emptyActions}>
+              <button
+                type="button"
+                className={styles.toolBtn}
+                onClick={() => openTab(DESKTOP_PRIMARY_ID)}
+              >
+                🖥️ 打开完整桌面
+              </button>
               <button
                 type="button"
                 className={styles.toolBtn}

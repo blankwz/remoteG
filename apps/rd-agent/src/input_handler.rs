@@ -220,6 +220,15 @@ fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if let Some(origin) = ctx.windows.desktop_origin(m.window_id) {
+        return ctx
+            .state
+            .injector
+            .lock()
+            .expect("injector 锁中毒")
+            .mouse_button_screen(origin, m.x, m.y, m.button, m.down)
+            .map_err(|err| anyhow::anyhow!("完整桌面注入鼠标按键失败: {err:#}"));
+    }
     if m.down {
         record_active_window(ctx, m.window_id);
         if !ensure_fg(m.window_id) {
@@ -257,6 +266,15 @@ fn mouse_wheel(ctx: &SessionCtx, m: &MouseWheel) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if let Some(origin) = ctx.windows.desktop_origin(m.window_id) {
+        return ctx
+            .state
+            .injector
+            .lock()
+            .expect("injector 锁中毒")
+            .wheel_screen(origin, m.x, m.y, m.dx, m.dy)
+            .map_err(|err| anyhow::anyhow!("完整桌面注入滚轮失败: {err:#}"));
+    }
     ctx.state
         .injector
         .lock()
@@ -284,6 +302,21 @@ fn continuous_scroll(ctx: &SessionCtx, m: &ContinuousScroll) -> anyhow::Result<(
         );
         return Ok(());
     }
+    if let Some(origin) = ctx.windows.desktop_origin(m.window_id) {
+        return ctx
+            .state
+            .injector
+            .lock()
+            .expect("injector 锁中毒")
+            .scroll_pixel_screen(
+                origin,
+                m.x.round() as i32,
+                m.y.round() as i32,
+                m.pixels_x,
+                m.pixels_y,
+            )
+            .map_err(|err| anyhow::anyhow!("完整桌面注入连续滚动失败: {err:#}"));
+    }
     ctx.state
         .injector
         .lock()
@@ -302,16 +335,18 @@ fn continuous_scroll(ctx: &SessionCtx, m: &ContinuousScroll) -> anyhow::Result<(
 /// (只看不控窗口丢弃)。若当前前台暂未切到目标窗口,尝试将最近点击的已打开窗口
 /// 置前一次,减少跨平台操控时“点了但打不了字”的挫败感。
 fn key_event(ctx: &SessionCtx, m: &KeyEvent) -> anyhow::Result<()> {
-    if foreground_view_only(ctx) {
-        tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口为只看不控");
-        return Ok(());
-    }
-    if !foreground_open(ctx) {
-        try_focus_last_active(ctx);
-    }
-    if !foreground_open(ctx) {
-        tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口不属于本会话");
-        return Ok(());
+    if !ctx.windows.has_open_desktop() {
+        if foreground_view_only(ctx) {
+            tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口为只看不控");
+            return Ok(());
+        }
+        if !foreground_open(ctx) {
+            try_focus_last_active(ctx);
+        }
+        if !foreground_open(ctx) {
+            tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口不属于本会话");
+            return Ok(());
+        }
     }
     ctx.state
         .injector
@@ -323,16 +358,18 @@ fn key_event(ctx: &SessionCtx, m: &KeyEvent) -> anyhow::Result<()> {
 
 /// 文本(IME 结果/软键盘):准入条件同 [`key_event`]。
 fn text_input(ctx: &SessionCtx, m: &TextInput) -> anyhow::Result<()> {
-    if foreground_view_only(ctx) {
-        tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口为只看不控");
-        return Ok(());
-    }
-    if !foreground_open(ctx) {
-        try_focus_last_active(ctx);
-    }
-    if !foreground_open(ctx) {
-        tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口不属于本会话");
-        return Ok(());
+    if !ctx.windows.has_open_desktop() {
+        if foreground_view_only(ctx) {
+            tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口为只看不控");
+            return Ok(());
+        }
+        if !foreground_open(ctx) {
+            try_focus_last_active(ctx);
+        }
+        if !foreground_open(ctx) {
+            tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口不属于本会话");
+            return Ok(());
+        }
     }
     ctx.state
         .injector
@@ -437,6 +474,15 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     // 只看不控窗口丢弃移动(严格只读;datagram 高频只记 debug 防刷屏)
     if ctx.windows.is_view_only(mv.window_id) {
         return Ok(());
+    }
+    if let Some(origin) = ctx.windows.desktop_origin(mv.window_id) {
+        return ctx
+            .state
+            .injector
+            .lock()
+            .expect("injector 锁中毒")
+            .mouse_move_screen(origin, mv.x, mv.y)
+            .map_err(|err| anyhow::anyhow!("完整桌面注入鼠标移动失败: {err:#}"));
     }
     ctx.state
         .injector

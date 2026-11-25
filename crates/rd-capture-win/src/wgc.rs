@@ -20,7 +20,7 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::{IDirect3DDevice, IDirect3DSurface};
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{HMODULE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
@@ -30,7 +30,9 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
@@ -93,12 +95,106 @@ pub struct WindowCapture {
     _shared: Arc<Shared>,
 }
 
+/// 已连接的显示器信息（主显示器排在索引 0）。
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    /// 排序后的显示器序号（0 = 主显示器）。
+    pub index: u32,
+    /// Win32 `HMONITOR` 句柄值。
+    pub hmonitor: isize,
+    /// 显示名称（如 `主显示器`、`显示器 2`）。
+    pub name: String,
+    /// 屏幕物理像素坐标与尺寸。
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// 枚举当前所有活动显示器（Per-Monitor-V2 物理像素；主显示器固定排首位）。
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    let old = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let mut raw: Vec<MonitorInfo> = Vec::new();
+    unsafe extern "system" fn enum_proc(
+        hmon: HMONITOR,
+        _hdc: HDC,
+        _rc: *mut RECT,
+        data: LPARAM,
+    ) -> windows::core::BOOL {
+        let out = &mut *(data.0 as *mut Vec<MonitorInfo>);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(hmon, &mut info.monitorInfo as *mut _ as *mut _).as_bool() {
+            let r = info.monitorInfo.rcMonitor;
+            let primary = (info.monitorInfo.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY = 1
+            let w = (r.right - r.left).max(0) as u32;
+            let h = (r.bottom - r.top).max(0) as u32;
+            if w > 0 && h > 0 {
+                out.push(MonitorInfo {
+                    index: 0,
+                    hmonitor: hmon.0 as isize,
+                    name: String::new(),
+                    x: r.left,
+                    y: r.top,
+                    width: w,
+                    height: h,
+                    primary,
+                });
+            }
+        }
+        windows::core::BOOL(1)
+    }
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_proc),
+            LPARAM(&mut raw as *mut Vec<MonitorInfo> as isize),
+        );
+        SetThreadDpiAwarenessContext(old);
+    }
+    raw.sort_by(|a, b| {
+        b.primary
+            .cmp(&a.primary)
+            .then(a.x.cmp(&b.x))
+            .then(a.y.cmp(&b.y))
+    });
+    for (i, m) in raw.iter_mut().enumerate() {
+        m.index = i as u32;
+        m.name = if m.primary {
+            format!("完整桌面（主显示器 {}×{}）", m.width, m.height)
+        } else {
+            format!("完整桌面（显示器 {} · {}×{}）", i + 1, m.width, m.height)
+        };
+    }
+    raw
+}
+
 /// WGC 是否可用（Win10 1903+ 且未被策略禁用）。
 pub fn is_supported() -> bool {
     GraphicsCaptureSession::IsSupported().unwrap_or(false)
 }
 
 impl WindowCapture {
+    /// 开始捕获整块显示器（完整桌面模式，宪法 #5）。返回会话句柄与帧接收端。
+    pub fn start_monitor(
+        hmonitor: isize,
+        opts: CaptureOptions,
+    ) -> Result<(Self, Receiver<CapturedFrame>)> {
+        if !is_supported() {
+            bail!("Windows.Graphics.Capture 不受支持（需 Windows 10 1903+）");
+        }
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let hmon = HMONITOR(hmonitor as *mut core::ffi::c_void);
+        let (device, context) = create_d3d11_device()?;
+        let winrt_device = create_winrt_device(&device)?;
+        let item = create_item_for_monitor(hmon)?;
+        Self::start_with_item(item, device, context, winrt_device, 0, true, opts)
+    }
+
     /// 开始捕获 `hwnd` 的客户区。返回会话句柄与帧接收端。
     ///
     /// 最小化窗口不视为错误：会话正常建立，但窗口还原前不产出帧。
@@ -123,7 +219,26 @@ impl WindowCapture {
         let (device, context) = create_d3d11_device()?;
         let winrt_device = create_winrt_device(&device)?;
         let item = create_item_for_window(hwnd)?;
+        Self::start_with_item(
+            item,
+            device,
+            context,
+            winrt_device,
+            hwnd.0 as isize,
+            false,
+            opts,
+        )
+    }
 
+    fn start_with_item(
+        item: GraphicsCaptureItem,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        winrt_device: IDirect3DDevice,
+        hwnd: isize,
+        is_monitor: bool,
+        opts: CaptureOptions,
+    ) -> Result<(Self, Receiver<CapturedFrame>)> {
         let item_size = item.Size().context("获取 GraphicsCaptureItem.Size 失败")?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
@@ -136,9 +251,9 @@ impl WindowCapture {
             .CreateCaptureSession(&item)
             .context("创建 CaptureSession 失败")?;
 
-        // 光标由控制端本地绘制；Win11 去黄框；脏区报告（Win11 24H2+）。
-        // 三者在不支持的系统上失败均忽略。
-        let _ = session.SetIsCursorCaptureEnabled(false);
+        // 完整桌面模式保留原生系统光标（缩放/文本/手型光标更跟手）；单窗口模式由控制端绘制。
+        // Win11 去黄框；脏区报告（Win11 24H2+）。不支持的系统上失败均忽略。
+        let _ = session.SetIsCursorCaptureEnabled(is_monitor);
         let _ = session.SetIsBorderRequired(false);
         let _ = session.SetDirtyRegionMode(GraphicsCaptureDirtyRegionMode::ReportOnly);
 
@@ -150,7 +265,8 @@ impl WindowCapture {
             tx,
             // crossbeam 为 MPMC：回调在通道满时用它丢最旧一帧（用户端 recv 与之竞争，正常只有一个消费端）。
             rx: rx.clone(),
-            hwnd: hwnd.0 as isize,
+            hwnd,
+            is_monitor,
             min_interval: Duration::from_secs_f64(1.0 / opts.max_fps.max(1) as f64),
             state: Mutex::new(State {
                 staging: None,
@@ -211,6 +327,7 @@ struct Shared {
     tx: Sender<CapturedFrame>,
     rx: Receiver<CapturedFrame>,
     hwnd: isize,
+    is_monitor: bool,
     min_interval: Duration,
     state: Mutex<State>,
 }
@@ -385,11 +502,20 @@ fn process_frame(
         return false;
     }
 
-    let client = client_rect_physical(
-        HWND(shared.hwnd as *mut core::ffi::c_void),
-        desc.Width,
-        desc.Height,
-    );
+    let client = if shared.is_monitor {
+        Some(Rect {
+            x: 0,
+            y: 0,
+            w: desc.Width,
+            h: desc.Height,
+        })
+    } else {
+        client_rect_physical(
+            HWND(shared.hwnd as *mut core::ffi::c_void),
+            desc.Width,
+            desc.Height,
+        )
+    };
     let Some(rect) = client else {
         unsafe { shared.context.Unmap(&staging, 0) };
         tracing::debug!("窗口最小化/无效，跳帧");
@@ -644,6 +770,13 @@ fn create_item_for_window(hwnd: HWND) -> Result<GraphicsCaptureItem> {
         factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
             .context("获取 IGraphicsCaptureItemInterop 工厂失败")?;
     unsafe { interop.CreateForWindow(hwnd) }.context("CreateForWindow 失败")
+}
+
+fn create_item_for_monitor(hmon: HMONITOR) -> Result<GraphicsCaptureItem> {
+    let interop: IGraphicsCaptureItemInterop =
+        factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+            .context("获取 IGraphicsCaptureItemInterop 工厂失败")?;
+    unsafe { interop.CreateForMonitor(hmon) }.context("CreateForMonitor 失败")
 }
 
 #[cfg(test)]

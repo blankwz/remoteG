@@ -403,6 +403,25 @@ impl WindowSessions {
             .get(&id)
             .is_some_and(|h| h.view_only)
     }
+
+    /// 是否存在至少一个非只看的完整桌面（整屏）会话处于打开状态。
+    /// 完整桌面模式下，键盘/文本输入直接注入到远端当前聚焦窗口（支持 Alt+Tab/所有弹窗）。
+    pub fn has_open_desktop(&self) -> bool {
+        pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .iter()
+            .any(|(id, h)| rd_proto::is_desktop_window_id(*id) && !h.view_only)
+    }
+
+    /// 若 `id` 是已打开的完整桌面显示器会话，返回其屏幕原点 `(x, y)`。
+    pub fn desktop_origin(&self, id: u64) -> Option<(i32, i32)> {
+        pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .get(&id)
+            .and_then(|h| h.monitor_origin)
+    }
 }
 
 /// 处理一条窗口消息。业务错误回 `Error{code:10/11/12}`（异步）；
@@ -493,17 +512,45 @@ fn handle_list(ctx: &SessionCtx, req_id: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 枚举可捕获顶层窗口并构造协议 `WindowInfo`（含图标缓存），同步刷新顶层集合。
+/// 枚举完整桌面显示器 + 可捕获顶层窗口并构造协议 `WindowInfo`（含图标缓存）。
+/// 显示器条目排在最前面，控制端默认直连主显示器（`desktop_window_id(0)`）。
 fn list_infos() -> anyhow::Result<Vec<WindowInfo>> {
+    let monitors = sys_capture::list_monitors();
     let wins = list_windows()?;
     {
         let mut top = top_windows().lock().unwrap_or_else(lock_poisoned);
         *top = wins.iter().map(|w| w.hwnd as u64).collect();
     }
-    Ok(wins
-        .iter()
-        .map(|a| to_window_info(a, icon_png_cached(a.hwnd as u64)))
-        .collect())
+    let mut out: Vec<WindowInfo> = monitors
+        .into_iter()
+        .map(|m| WindowInfo {
+            id: rd_proto::desktop_window_id(m.index),
+            title: m.name,
+            process: "desktop".to_string(),
+            pid: 0,
+            icon_png: Vec::new(),
+            x: m.x,
+            y: m.y,
+            w: m.width,
+            h: m.height,
+            dpi: 96,
+            resizable: false,
+            minimized: false,
+            frame_x: m.x,
+            frame_y: m.y,
+            frame_w: m.width,
+            frame_h: m.height,
+            close_x: 0,
+            close_y: 0,
+            close_w: 0,
+            close_h: 0,
+        })
+        .collect();
+    out.extend(
+        wins.iter()
+            .map(|a| to_window_info(a, icon_png_cached(a.hwnd as u64))),
+    );
+    Ok(out)
 }
 
 fn to_window_info(a: &WindowAttrs, icon: Option<Vec<u8>>) -> WindowInfo {
@@ -812,82 +859,121 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
 
     // 校验：不存在/不可捕获 → 10；最小化 → 自动还原再捕获（用户实测反馈 1，
     // 行业标准做法 RustDesk 同款；列表页 UI 已提示"将被还原"），不再拒绝。
-    let mut attrs = {
-        let wins = list_windows().context("枚举窗口失败")?;
-        wins.into_iter().find(|a| a.hwnd as u64 == wid)
-    };
-    // 布局快照先于还原（D-013 包2）：还原后 showCmd 已变为普通态，
-    // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
-    // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
-    let saved = match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
-        Ok(p) => {
-            // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
-            if let Err(err) = sys_window::ledger::OperationLedger::open(&ledger_dir()).record(
-                wid as isize,
-                "remote-session",
-                &p,
-            ) {
-                tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
-            }
-            Some(p)
-        }
-        Err(err) => {
-            tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
-            None
-        }
-    };
-    // 最小化自动还原（用户实测反馈 1：任何状态必须可控制）。最小化有两条
-    // 呈现路径，都必须还原后再捕获：
-    // - 在可捕获列表中（如资源管理器，最小化后客户区仍非 0）→ `minimized`
-    //   字段为 true；
-    // - 不在列表中（多数窗口最小化后客户区塌缩为 0×0，被 rd-window-win 的
-    //   尺寸过滤排除）→ 以 `IsIconic` 直接判定（不在列表即无字段可看）。
-    let minimized_now = match &attrs {
-        Some(a) => a.minimized,
-        None => is_iconic_window(wid as isize),
-    };
-    if minimized_now {
-        tracing::info!(
-            window = format!("{wid:#x}"),
-            "窗口处于最小化，自动还原后捕获"
-        );
-        restore_minimized(attrs.as_ref().map_or(wid as isize, |a| a.hwnd));
-        match after_restore(wid).await {
-            AfterRestore::Ready(a) => attrs = Some(a),
-            AfterRestore::Gone => {
-                return send_error(
-                    ctx,
-                    req_id,
-                    ERR_NO_WINDOW,
-                    format!("窗口 {wid:#x} 在还原前已关闭"),
-                )
-                .await;
-            }
-            AfterRestore::Pending => {
-                tracing::warn!(
-                    window = format!("{wid:#x}"),
-                    "还原未在限时内生效，仍按计划捕获（还原生效后 WGC 即出帧）"
-                );
-                // 最小化 rect 是 -32000 哨兵值/0×0；用布局快照的还原矩形兜底，
-                // 避免错误的 ack 尺寸与码率面积权重。
-                if let Some(a) = attrs.as_mut() {
-                    if let Ok(p) = save_placement(a.hwnd) {
-                        a.rect = p.normal_position();
+    let mut monitor_handle: Option<isize> = None;
+    let mut monitor_origin: Option<(i32, i32)> = None;
+    let saved: Option<SavedPlacement>;
+    let attrs: WindowAttrs;
+
+    if let Some(mon_idx) = rd_proto::desktop_monitor_index(wid) {
+        let monitors = sys_capture::list_monitors();
+        let mon = monitors
+            .iter()
+            .find(|m| m.index == mon_idx)
+            .or_else(|| (mon_idx == 0).then(|| monitors.first()).flatten())
+            .cloned();
+        let Some(mon) = mon else {
+            return send_error(
+                ctx,
+                req_id,
+                ERR_NO_WINDOW,
+                format!("显示器 #{mon_idx} 不存在或不可捕获"),
+            )
+            .await;
+        };
+        monitor_handle = Some(mon.hmonitor);
+        monitor_origin = Some((mon.x, mon.y));
+        saved = None;
+        let rect = sys_window::Rect {
+            x: mon.x,
+            y: mon.y,
+            w: mon.width,
+            h: mon.height,
+        };
+        attrs = WindowAttrs {
+            hwnd: 0,
+            title: mon.name,
+            process: "desktop".to_string(),
+            pid: 0,
+            rect,
+            frame: rect,
+            close_button: None,
+            dpi: 96,
+            resizable: false,
+            minimized: false,
+            style: 0,
+            ex_style: 0,
+            cloaked: false,
+            class: String::new(),
+        };
+    } else {
+        let mut found_attrs = {
+            let wins = list_windows().context("枚举窗口失败")?;
+            wins.into_iter().find(|a| a.hwnd as u64 == wid)
+        };
+        // 布局快照先于还原（D-013 包2）：还原后 showCmd 已变为普通态，
+        // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
+        // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
+        saved =
+            match save_placement(found_attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
+                Ok(p) => {
+                    // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
+                    if let Err(err) = sys_window::ledger::OperationLedger::open(&ledger_dir())
+                        .record(wid as isize, "remote-session", &p)
+                    {
+                        tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
+                    }
+                    Some(p)
+                }
+                Err(err) => {
+                    tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
+                    None
+                }
+            };
+        let minimized_now = match &found_attrs {
+            Some(a) => a.minimized,
+            None => is_iconic_window(wid as isize),
+        };
+        if minimized_now {
+            tracing::info!(
+                window = format!("{wid:#x}"),
+                "窗口处于最小化，自动还原后捕获"
+            );
+            restore_minimized(found_attrs.as_ref().map_or(wid as isize, |a| a.hwnd));
+            match after_restore(wid).await {
+                AfterRestore::Ready(a) => found_attrs = Some(a),
+                AfterRestore::Gone => {
+                    return send_error(
+                        ctx,
+                        req_id,
+                        ERR_NO_WINDOW,
+                        format!("窗口 {wid:#x} 在还原前已关闭"),
+                    )
+                    .await;
+                }
+                AfterRestore::Pending => {
+                    tracing::warn!(
+                        window = format!("{wid:#x}"),
+                        "还原未在限时内生效，仍按计划捕获（还原生效后 WGC 即出帧）"
+                    );
+                    if let Some(a) = found_attrs.as_mut() {
+                        if let Ok(p) = save_placement(a.hwnd) {
+                            a.rect = p.normal_position();
+                        }
                     }
                 }
             }
         }
+        let Some(a) = found_attrs else {
+            return send_error(
+                ctx,
+                req_id,
+                ERR_NO_WINDOW,
+                format!("窗口 {wid:#x} 不存在或不可捕获"),
+            )
+            .await;
+        };
+        attrs = a;
     }
-    let Some(attrs) = attrs else {
-        // 含：还原超时后窗口始终不在可捕获列表（隐藏/cloaked 等）。
-        return send_error(
-            ctx,
-            req_id,
-            ERR_NO_WINDOW,
-            format!("窗口 {wid:#x} 不存在或不可捕获"),
-        )
-        .await;
-    };
 
     let cfg = &ctx.state.config;
     // max_fps = min(请求, 配置)；请求 0 视为未指定，用配置默认
@@ -933,7 +1019,10 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
 
     let area = u64::from(attrs.rect.w).saturating_mul(u64::from(attrs.rect.h));
     let spec = PipeSpec {
+        window_id: wid,
         hwnd: attrs.hwnd,
+        monitor_handle,
+        monitor_origin,
         fps,
         kbps,
         refine,
@@ -1061,7 +1150,13 @@ struct SendAccounting {
 
 /// 一条窗口管线的搭建参数（根窗口 OpenWindow 与窗口组成员共用）。
 struct PipeSpec {
+    /// 协议层 window_id（单窗口为 hwnd，完整桌面为 `desktop_window_id(idx)`）。
+    window_id: u64,
     hwnd: isize,
+    /// 完整桌面模式下的显示器句柄（`Some` = 走 `start_monitor` 整屏捕获）。
+    monitor_handle: Option<isize>,
+    /// 完整桌面显示器屏幕原点 `(x, y)`，用于全屏键鼠坐标直注。
+    monitor_origin: Option<(i32, i32)>,
     fps: u32,
     /// 初始码率（kbps）；随后由会话 RateController 动态覆盖。
     kbps: u32,
@@ -1095,11 +1190,16 @@ struct PipeStarted {
 /// 失败时清理已建资源（捕获/流 finish）并把错误原样上抛；错误回包由
 /// 调用方决定（根窗口回 `Error{11}`，子窗口仅记日志降级）。
 async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result<PipeStarted> {
-    let wid = spec.hwnd as u64;
+    let wid = spec.window_id;
     let serial = PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
     let restore_on_fail = |s: &PipeSpec| restore_saved(s.hwnd, &s.saved);
-    let started_capture = WindowCapture::start(spec.hwnd, CaptureOptions { max_fps: spec.fps })
-        .with_context(|| format!("启动捕获失败（hwnd {wid:#x}）"));
+    let started_capture = if let Some(hmon) = spec.monitor_handle {
+        WindowCapture::start_monitor(hmon, CaptureOptions { max_fps: spec.fps })
+            .with_context(|| format!("启动整屏捕获失败（monitor {wid:#x}）"))
+    } else {
+        WindowCapture::start(spec.hwnd, CaptureOptions { max_fps: spec.fps })
+            .with_context(|| format!("启动捕获失败（hwnd {wid:#x}）"))
+    };
     let (capture, frame_rx) = match started_capture {
         Ok(v) => v,
         Err(err) => {
@@ -1166,8 +1266,8 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     let fps_cap = Arc::new(AtomicU32::new(spec.fps));
     // 陈旧帧丢弃→IDR 恢复(D-013 包2):视频发送任务置位、编码循环消费
     let drop_to_idr = Arc::new(AtomicBool::new(false));
-    // 根窗口预置组快照（仅含根自身）：首次轮询 diff 时根不会误报为新增。
-    let group_snapshot = spec.is_root.then(|| {
+    // 根窗口预置组快照（仅单窗口需要；完整桌面已含全部弹窗/菜单，不做子窗口组轮询）。
+    let group_snapshot = (spec.is_root && spec.monitor_handle.is_none()).then(|| {
         Arc::new(Mutex::new(HashMap::from([(
             spec.hwnd,
             GroupMember {
@@ -1258,6 +1358,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         enc_thread: Some(enc_thread),
         saved: spec.saved,
         hwnd: wid,
+        monitor_origin: spec.monitor_origin,
         fit: spec.fit,
         deb: Arc::new(ViewportDeb::default()),
         owner: spec.owner,
@@ -1287,7 +1388,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     // 虚拟屏（一期）：根窗口摆到虚拟屏中央（物理屏保持可用）。只在建屏后
     // 生效，无虚拟屏时静默跳过。块 1：随后按窗口外框联动集体选档（fit 调度
     // 线程重算需求表，可升可降；手动 SetDisplayWidth 后的自动事件照常重算）。
-    if spec.is_root {
+    if spec.is_root && spec.monitor_handle.is_none() {
         crate::vdisplay::center_window(wid).await;
         crate::vdisplay::request_refit(wid);
     }
@@ -1620,6 +1721,8 @@ struct PipeHandle {
     enc_thread: Option<JoinHandle<()>>,
     saved: Option<SavedPlacement>,
     hwnd: u64,
+    /// 完整桌面模式显示器屏幕原点 `(x, y)`；单窗口为 `None`。
+    monitor_origin: Option<(i32, i32)>,
     /// 打开时的适配模式（proto 枚举原始 i32）。
     fit: i32,
     deb: Arc<ViewportDeb>,
@@ -2596,7 +2699,10 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
             .unwrap_or((Codec::H264420, false))
     };
     let spec = PipeSpec {
+        window_id: m.hwnd as u64,
         hwnd: m.hwnd,
+        monitor_handle: None,
+        monitor_origin: None,
         fps: cfg.max_fps.max(1),
         kbps: cfg.start_kbps.max(1),
         refine: cfg.refine_enabled && !is_menu,
@@ -3412,6 +3518,7 @@ mod tests {
             enc_thread: None,
             saved: None,
             hwnd,
+            monitor_origin: None,
             fit: 0,
             deb: Arc::new(ViewportDeb::default()),
             owner: 0,

@@ -171,6 +171,69 @@ impl Injector {
         self.keys_down.clear();
     }
 
+    /// 完整桌面模式：按显示器原点 `origin` + 相对物理像素 `(x, y)` 移动光标。
+    pub fn mouse_move_screen(&mut self, origin: (i32, i32), x: i32, y: i32) -> anyhow::Result<()> {
+        let abs = mouse::client_to_absolute(origin, x, y, mouse::virtual_desktop());
+        mouse::send(&[mouse::build_move(abs)])
+    }
+
+    /// 完整桌面模式：按显示器原点 `origin` + 相对物理像素 `(x, y)` 注入鼠标按键。
+    pub fn mouse_button_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        button: u32,
+        down: bool,
+    ) -> anyhow::Result<()> {
+        let abs = mouse::client_to_absolute(origin, x, y, mouse::virtual_desktop());
+        let mut inputs = vec![mouse::build_move(abs)];
+        inputs.push(mouse::build_button(button, down)?);
+        mouse::send(&inputs)?;
+        if down {
+            self.buttons_down.insert(button);
+        } else {
+            self.buttons_down.remove(&button);
+        }
+        Ok(())
+    }
+
+    /// 完整桌面模式：按显示器原点 `origin` + 相对物理像素 `(x, y)` 注入滚轮。
+    pub fn wheel_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    ) -> anyhow::Result<()> {
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        let abs = mouse::client_to_absolute(origin, x, y, mouse::virtual_desktop());
+        let mut inputs = vec![mouse::build_move(abs)];
+        inputs.extend(mouse::build_wheel(dx, dy));
+        mouse::send(&inputs)
+    }
+
+    /// 完整桌面模式：按显示器原点 `origin` + 相对物理像素 `(x, y)` 注入像素级连续滚动。
+    pub fn scroll_pixel_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        pixels_x: i32,
+        pixels_y: i32,
+    ) -> anyhow::Result<()> {
+        if pixels_x == 0 && pixels_y == 0 {
+            return Ok(());
+        }
+        let abs = mouse::client_to_absolute(origin, x, y, mouse::virtual_desktop());
+        let mut inputs = vec![mouse::build_move(abs)];
+        inputs.extend(mouse::build_wheel(pixels_x, pixels_y));
+        mouse::send(&inputs)
+    }
+
     /// `hwnd` 客户区 `(x, y)` → 虚拟桌面归一化绝对坐标。
     fn absolute(&self, hwnd: isize, x: i32, y: i32) -> anyhow::Result<(i32, i32)> {
         let origin = mouse::client_origin(hwnd)?;

@@ -229,6 +229,137 @@ impl Injector {
         Ok(())
     }
 
+    pub fn mouse_move_screen(&mut self, origin: (i32, i32), x: i32, y: i32) -> Result<()> {
+        let sx = (origin.0 + x) as f64;
+        let sy = (origin.1 + y) as f64;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use crate::ffi::*;
+            let ev_type = if self.buttons_down.contains(&MOUSE_BUTTON_LEFT) {
+                kCGEventLeftMouseDragged
+            } else if self.buttons_down.contains(&MOUSE_BUTTON_RIGHT) {
+                kCGEventRightMouseDragged
+            } else {
+                kCGEventMouseMoved
+            };
+            let ev = CGEventCreateMouseEvent(
+                std::ptr::null(),
+                ev_type,
+                CGPoint { x: sx, y: sy },
+                kCGMouseButtonLeft,
+            );
+            if !ev.is_null() {
+                CGEventPost(kCGHIDEventTap, ev);
+                CFRelease(ev);
+            }
+        }
+        let _ = (sx, sy);
+        Ok(())
+    }
+
+    pub fn mouse_button_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        button: u32,
+        down: bool,
+    ) -> Result<()> {
+        let sx = (origin.0 + x) as f64;
+        let sy = (origin.1 + y) as f64;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use crate::ffi::*;
+            let (ev_type, cg_btn) = match (button, down) {
+                (MOUSE_BUTTON_LEFT, true) => (kCGEventLeftMouseDown, kCGMouseButtonLeft),
+                (MOUSE_BUTTON_LEFT, false) => (kCGEventLeftMouseUp, kCGMouseButtonLeft),
+                (MOUSE_BUTTON_RIGHT, true) => (kCGEventRightMouseDown, kCGMouseButtonRight),
+                (MOUSE_BUTTON_RIGHT, false) => (kCGEventRightMouseUp, kCGMouseButtonRight),
+                (_, true) => (kCGEventOtherMouseDown, kCGMouseButtonCenter),
+                (_, false) => (kCGEventOtherMouseUp, kCGMouseButtonCenter),
+            };
+            let ev = CGEventCreateMouseEvent(
+                std::ptr::null(),
+                ev_type,
+                CGPoint { x: sx, y: sy },
+                cg_btn,
+            );
+            if !ev.is_null() {
+                CGEventPost(kCGHIDEventTap, ev);
+                CFRelease(ev);
+            }
+        }
+        let _ = (sx, sy);
+        if down {
+            self.buttons_down.insert(button);
+        } else {
+            self.buttons_down.remove(&button);
+        }
+        Ok(())
+    }
+
+    pub fn wheel_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    ) -> Result<()> {
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        self.mouse_move_screen(origin, x, y)?;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use crate::ffi::*;
+            let lines_y = (dy / 40).clamp(-30, 30);
+            let lines_x = (dx / 40).clamp(-30, 30);
+            let ev = CGEventCreateScrollWheelEvent(
+                std::ptr::null(),
+                kCGScrollEventUnitLine,
+                2,
+                lines_y,
+                lines_x,
+            );
+            if !ev.is_null() {
+                CGEventPost(kCGHIDEventTap, ev);
+                CFRelease(ev);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scroll_pixel_screen(
+        &mut self,
+        origin: (i32, i32),
+        x: i32,
+        y: i32,
+        pixels_x: i32,
+        pixels_y: i32,
+    ) -> Result<()> {
+        if pixels_x == 0 && pixels_y == 0 {
+            return Ok(());
+        }
+        self.mouse_move_screen(origin, x, y)?;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use crate::ffi::*;
+            let ev = CGEventCreateScrollWheelEvent(
+                std::ptr::null(),
+                kCGScrollEventUnitPixel,
+                2,
+                pixels_y,
+                pixels_x,
+            );
+            if !ev.is_null() {
+                CGEventPost(kCGHIDEventTap, ev);
+                CFRelease(ev);
+            }
+        }
+        Ok(())
+    }
+
     pub fn scroll_pixel(
         &mut self,
         hwnd: isize,

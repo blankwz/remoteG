@@ -42,6 +42,47 @@ pub struct CapturedFrame {
     pub readback: Duration,
 }
 
+/// 已连接的显示器信息（与 `rd-capture-win::MonitorInfo` 逐字段一致）。
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub index: u32,
+    pub hmonitor: isize,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// 枚举当前活动显示器（macOS 主显示器；坐标与 `CGEvent` 逻辑点 1:1 对齐）。
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::ffi::{CGDisplayBounds, CGMainDisplayID};
+        unsafe {
+            let id = CGMainDisplayID();
+            let b = CGDisplayBounds(id);
+            let w = b.size.width.max(1.0) as u32;
+            let h = b.size.height.max(1.0) as u32;
+            vec![MonitorInfo {
+                index: 0,
+                hmonitor: id as isize,
+                name: format!("完整桌面（主显示器 {w}×{h}）"),
+                x: b.origin.x as i32,
+                y: b.origin.y as i32,
+                width: w,
+                height: h,
+                primary: true,
+            }]
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 /// 捕获是否受支持（macOS 上检测屏幕录制权限）。
 pub fn is_supported() -> bool {
     crate::permissions::has_screen_recording()
@@ -54,6 +95,37 @@ pub struct WindowCapture {
 }
 
 impl WindowCapture {
+    /// 启动指定显示器的完整桌面捕获线程。
+    pub fn start_monitor(
+        display_id: isize,
+        opts: CaptureOptions,
+    ) -> Result<(Self, Receiver<CapturedFrame>)> {
+        let (tx, rx) = bounded::<CapturedFrame>(2);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop_flag);
+        let fps = opts.max_fps.clamp(1, 144);
+        let interval = Duration::from_secs_f64(1.0 / fps as f64);
+
+        let thread = std::thread::Builder::new()
+            .name(format!("rd-mac-mon-{display_id}"))
+            .spawn(move || {
+                #[cfg(target_os = "macos")]
+                capture_loop(None, Some(display_id as u32), interval, &stop_clone, &tx);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = (display_id, interval, stop_clone, tx);
+                }
+            })?;
+
+        Ok((
+            Self {
+                stop_flag,
+                thread: Some(thread),
+            },
+            rx,
+        ))
+    }
+
     /// 启动指定 `CGWindowID`（以 `isize` 透传）的窗口捕获线程。
     pub fn start(
         window_id: isize,
@@ -69,7 +141,7 @@ impl WindowCapture {
             .name(format!("rd-mac-cap-{window_id}"))
             .spawn(move || {
                 #[cfg(target_os = "macos")]
-                capture_loop(window_id as u32, interval, &stop_clone, &tx);
+                capture_loop(Some(window_id as u32), None, interval, &stop_clone, &tx);
                 #[cfg(not(target_os = "macos"))]
                 {
                     let _ = (window_id, interval, stop_clone, tx);
@@ -104,7 +176,8 @@ impl Drop for WindowCapture {
 
 #[cfg(target_os = "macos")]
 fn capture_loop(
-    window_id: u32,
+    window_id: Option<u32>,
+    display_id: Option<u32>,
     interval: Duration,
     stop: &AtomicBool,
     tx: &crossbeam_channel::Sender<CapturedFrame>,
@@ -117,12 +190,23 @@ fn capture_loop(
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
         let frame_opt = unsafe {
-            let img = CGWindowListCreateImage(
-                CGRectNull,
-                kCGWindowListOptionIncludingWindow,
-                window_id,
-                kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution,
-            );
+            let img = if let Some(wid) = window_id {
+                CGWindowListCreateImage(
+                    CGRectNull,
+                    kCGWindowListOptionIncludingWindow,
+                    wid,
+                    kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution,
+                )
+            } else {
+                let did = display_id.unwrap_or_else(|| CGMainDisplayID());
+                let bounds = CGDisplayBounds(did);
+                CGWindowListCreateImage(
+                    bounds,
+                    kCGWindowListOptionOnScreenOnly,
+                    kCGNullWindowID,
+                    kCGWindowImageNominalResolution,
+                )
+            };
             if img.is_null() {
                 None
             } else {

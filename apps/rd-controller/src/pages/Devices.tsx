@@ -64,6 +64,9 @@ function hostDuration(secs: number): string {
   return `${secs} 秒`;
 }
 
+/** 完整桌面（主显示器）虚拟 window_id：0xFFFF_0000_0000_0000，点击设备默认一步直入整屏。 */
+const DESKTOP_PRIMARY_ID = "18446462598732840960";
+
 /** 展示地址：默认端口 21118 自动隐藏，仅保留非默认自定义端口，减少视觉噪声。 */
 function formatDisplayAddr(addr: string): string {
   return addr.endsWith(":21118") ? addr.slice(0, -":21118".length) : addr;
@@ -276,7 +279,7 @@ export function Devices() {
           rememberHostVersion(d.id, ack.hostVersion);
         }
         rememberLastDeviceId(d.id);
-        window.location.hash = `#/windows/${d.id}`;
+        window.location.hash = `#/session/${d.id}?open=${DESKTOP_PRIMARY_ID}`;
         setNotice(null);
       } catch (e) {
         const msg = errText(e);
@@ -660,62 +663,73 @@ export function Devices() {
         </div>
       </header>
 
+      {/* RustDesk 风格顶部「控制远程桌面」快速连接栏（免填端口，直入完整桌面） */}
       <form
         onSubmit={(e) => void onQuickConnect(e)}
         aria-label="快速连接远端设备"
         style={{
           display: "flex",
+          flexDirection: "column",
           gap: "8px",
-          alignItems: "center",
-          flexWrap: "wrap",
           marginBottom: "14px",
-          padding: "10px 12px",
-          borderRadius: "10px",
+          padding: "14px 16px",
+          borderRadius: "12px",
           background: "rgba(255, 255, 255, 0.04)",
-          border: "1px solid rgba(255, 255, 255, 0.08)",
+          border: "1px solid rgba(255, 255, 255, 0.1)",
         }}
       >
-        <input
-          type="text"
-          value={quickAddr}
-          onChange={(e) => setQuickAddr(e.currentTarget.value)}
-          placeholder="输入远端 IP 或设备名快速直连（如 192.168.1.10）"
-          aria-label="快速连接地址"
-          spellCheck={false}
-          style={{
-            flex: "1 1 220px",
-            minWidth: 0,
-            padding: "7px 10px",
-            borderRadius: "6px",
-            border: "1px solid rgba(255, 255, 255, 0.14)",
-            background: "rgba(0, 0, 0, 0.25)",
-            color: "inherit",
-          }}
-        />
-        <input
-          type="text"
-          value={quickCode}
-          onChange={(e) => setQuickCode(e.currentTarget.value)}
-          placeholder="6 位配对码（新设备选填）"
-          aria-label="快速连接配对码"
-          maxLength={6}
-          spellCheck={false}
-          style={{
-            width: "160px",
-            padding: "7px 10px",
-            borderRadius: "6px",
-            border: "1px solid rgba(255, 255, 255, 0.14)",
-            background: "rgba(0, 0, 0, 0.25)",
-            color: "inherit",
-          }}
-        />
-        <button
-          type="submit"
-          className={styles.addBtn}
-          disabled={quickBusy || busyId !== null || quickAddr.trim().length === 0}
-        >
-          {quickBusy ? "连接中…" : "快速连接"}
-        </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+          <strong style={{ fontSize: "14px" }}>🖥️ 控制远程桌面</strong>
+          <span style={{ fontSize: "12px", opacity: 0.7 }}>
+            连接后默认进入完整桌面（支持在会话内随时切单窗口 / 原生终端）
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            type="text"
+            value={quickAddr}
+            onChange={(e) => setQuickAddr(e.currentTarget.value)}
+            placeholder="输入对方 IP 或设备名（如 192.168.1.10 或 100.81.205.0，免填端口）"
+            aria-label="快速连接地址"
+            spellCheck={false}
+            style={{
+              flex: "1 1 240px",
+              minWidth: 0,
+              padding: "9px 12px",
+              borderRadius: "8px",
+              border: "1px solid rgba(255, 255, 255, 0.16)",
+              background: "rgba(0, 0, 0, 0.28)",
+              color: "inherit",
+              fontSize: "14px",
+            }}
+          />
+          <input
+            type="text"
+            value={quickCode}
+            onChange={(e) => setQuickCode(e.currentTarget.value)}
+            placeholder="6 位配对码（新设备选填）"
+            aria-label="快速连接配对码"
+            maxLength={6}
+            spellCheck={false}
+            style={{
+              width: "170px",
+              padding: "9px 12px",
+              borderRadius: "8px",
+              border: "1px solid rgba(255, 255, 255, 0.16)",
+              background: "rgba(0, 0, 0, 0.28)",
+              color: "inherit",
+              fontSize: "14px",
+            }}
+          />
+          <button
+            type="submit"
+            className={styles.addBtn}
+            style={{ padding: "9px 18px", fontSize: "14px" }}
+            disabled={quickBusy || busyId !== null || quickAddr.trim().length === 0}
+          >
+            {quickBusy ? "连接中…" : "连接桌面"}
+          </button>
+        </div>
       </form>
 
       {resume !== null && (
@@ -785,6 +799,20 @@ export function Devices() {
             {host.peers.length === 0 ? (
               <>
                 <span className={styles.hostStateIdle}>本机待命</span>
+                {host.listenAddrs.length > 0 && (
+                  <button
+                    type="button"
+                    className={styles.linkBtn}
+                    title="点击复制本机地址，发给对方即可连接这台电脑"
+                    onClick={() => {
+                      const ip = formatDisplayAddr(host.listenAddrs[0] ?? "");
+                      void navigator.clipboard.writeText(ip).catch(() => undefined);
+                      setNotice(`已复制本机地址：${ip}`);
+                    }}
+                  >
+                    本机 IP：{formatDisplayAddr(host.listenAddrs[0] ?? "")}
+                  </button>
+                )}
                 {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
                 <span className={styles.hostSpacer} />
                 <button type="button" className={styles.actionBtn} onClick={() => void onGenerateCode()}>
