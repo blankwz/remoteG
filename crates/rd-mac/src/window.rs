@@ -287,6 +287,9 @@ pub mod resize {
         pub fn show_cmd(&self) -> u32 {
             1
         }
+        pub fn normal_position(&self) -> Rect {
+            self.rect
+        }
         pub fn normal_rect_ltrb(&self) -> [i32; 4] {
             [
                 self.rect.x,
@@ -295,6 +298,19 @@ pub mod resize {
                 self.rect.y + self.rect.h as i32,
             ]
         }
+    }
+
+    pub fn window_rect(hwnd: isize) -> Result<Rect> {
+        super::window_rect(hwnd).ok_or_else(|| anyhow::anyhow!("未找到窗口 {hwnd}"))
+    }
+
+    pub fn window_client_size(hwnd: isize) -> Result<(u32, u32)> {
+        let r = window_rect(hwnd)?;
+        Ok((r.w, r.h))
+    }
+
+    pub fn move_window_to(_hwnd: isize, _x: i32, _y: i32) -> Result<()> {
+        Ok(())
     }
 
     pub fn save_placement(hwnd: isize) -> Result<SavedPlacement> {

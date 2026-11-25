@@ -170,7 +170,11 @@ fn refit_blocking(refits: &HashSet<u64>, closeds: &HashSet<u64>) {
             d.remove(h);
         }
         for h in refits {
-            match rd_window_win::resize::window_client_size(*h as isize) {
+            #[cfg(windows)]
+            let sz_res = rd_window_win::resize::window_client_size(*h as isize);
+            #[cfg(not(windows))]
+            let sz_res = rd_mac::window::resize::window_client_size(*h as isize);
+            match sz_res {
                 Ok((cw, ch)) => {
                     // 客户区口径（T-049 二期）：内容真需求 vs 档位客户区容量
                     // （fit.rs client_capacity），外框口径会把边框标题栏算进

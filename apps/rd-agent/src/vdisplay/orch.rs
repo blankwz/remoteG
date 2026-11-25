@@ -52,8 +52,18 @@ pub type DisplayFactory =
     Arc<dyn Fn(ScreenFit) -> Result<Box<dyn DisplayHandle>, rd_vdisplay::Error> + Send + Sync>;
 
 /// 生产工厂：连真驱动管道建屏（阻塞，调用方放阻塞线程）。
+#[cfg(windows)]
 pub fn production_factory() -> DisplayFactory {
     Arc::new(|fit| VDisplay::open(fit).map(|vd| Box::new(vd) as Box<dyn DisplayHandle>))
+}
+
+#[cfg(not(windows))]
+pub fn production_factory() -> DisplayFactory {
+    Arc::new(|_fit| {
+        Err(rd_vdisplay::Error::DriverUnavailable(
+            "当前平台暂未提供虚拟屏驱动".into(),
+        ))
+    })
 }
 
 /// 屏槽位：档位表与句柄同存（fit 调度重算集体档位需要档位表）。

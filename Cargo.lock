@@ -4431,8 +4431,6 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
- "serde",
- "serde_json",
  "tracing",
 ]
 

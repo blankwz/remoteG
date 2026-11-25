@@ -130,7 +130,7 @@ pub fn init(config_dir: &Path) {
 
 /// 非 Windows：no-op。
 #[cfg(not(windows))]
-pub fn init() {}
+pub fn init(_config_dir: &std::path::Path) {}
 
 /// 隐私屏请求（投递给黑罩线程）。
 #[cfg(windows)]

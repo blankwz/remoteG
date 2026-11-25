@@ -243,7 +243,11 @@ pub(crate) fn center_window_sync(window_id: u64) {
     let Some(area) = area else {
         return;
     };
-    let rect = match rd_window_win::resize::window_rect(window_id as isize) {
+    #[cfg(windows)]
+    let rect_res = rd_window_win::resize::window_rect(window_id as isize);
+    #[cfg(not(windows))]
+    let rect_res = rd_mac::window::resize::window_rect(window_id as isize);
+    let rect = match rect_res {
         Ok(rect) => rect,
         Err(_) => return,
     };
@@ -252,7 +256,11 @@ pub(crate) fn center_window_sync(window_id: u64) {
     if rect.x == x && rect.y == y {
         return;
     }
-    if let Err(err) = rd_window_win::resize::move_window_to(window_id as isize, x, y) {
+    #[cfg(windows)]
+    let move_res = rd_window_win::resize::move_window_to(window_id as isize, x, y);
+    #[cfg(not(windows))]
+    let move_res = rd_mac::window::resize::move_window_to(window_id as isize, x, y);
+    if let Err(err) = move_res {
         tracing::warn!(
             window = format!("{window_id:#x}"),
             "窗口落虚拟屏失败: {err}"

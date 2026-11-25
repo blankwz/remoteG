@@ -109,12 +109,12 @@ fn recovery_fast_climb_back_to_start_then_steady() {
 
 #[test]
 fn bitrate_upper_bound_clamped() {
-    let mut rc = RateController::new(50_000, 60);
+    let mut rc = RateController::new(200_000, 144);
     for _ in 0..5 {
         let d = rc.update(normal());
-        assert!(d.kbps <= 50_000);
+        assert!(d.kbps <= 200_000);
     }
-    assert_eq!(rc.update(normal()).kbps, 50_000);
+    assert_eq!(rc.update(normal()).kbps, 200_000);
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn low_bitrate_drops_fps() {
 fn new_clamps_start_bitrate() {
     let mut rc = RateController::new(0, 60);
     assert_eq!(rc.update(normal()).kbps, 500);
-    let mut rc = RateController::new(999_999, 60);
-    assert_eq!(rc.update(normal()).kbps, 50_000);
+    let mut rc = RateController::new(999_999, 144);
+    assert_eq!(rc.update(normal()).kbps, 200_000);
 }
 
 #[test]
