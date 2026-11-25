@@ -361,13 +361,9 @@ export function Devices() {
     }
   }, []);
 
-  /** 方案实验室（v0.4 原生极客台：优先开独立窗口，demo/当前窗口亦支持直达 #/lab）。经 bridge call()（D06）。 */
-  const onOpenStudio = useCallback(async () => {
-    try {
-      await call<void>("open_studio");
-    } catch {
-      window.location.hash = "#/lab";
-    }
+  /** 方案实验室：直接在主窗口内切换到 #/lab，避免再弹第二个带导航栏的嵌套窗口。 */
+  const onOpenStudio = useCallback(() => {
+    window.location.hash = "#/lab";
   }, []);
 
   /** fec 高清链路开关（写 settings.json，下次连接生效）。经 bridge call()（D06）。 */
