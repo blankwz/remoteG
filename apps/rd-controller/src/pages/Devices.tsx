@@ -595,7 +595,7 @@ export function Devices() {
       if (code.length === 6) {
         setQuickBusy(true);
         try {
-          const added = await pairDevice(raw, code, undefined);
+          const added = await pairDevice(raw, code, "");
           await refresh();
           setQuickAddr("");
           setQuickCode("");
@@ -608,7 +608,7 @@ export function Devices() {
         return;
       }
       // 未配对设备且未填 6 位码：预填地址直达配对框
-      openAddDialog({ addr: raw });
+      openAddDialog({ addr: raw, name: "" });
     },
     [devices, onConnect, openAddDialog, quickAddr, quickCode, refresh],
   );
