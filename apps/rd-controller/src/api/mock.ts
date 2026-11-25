@@ -214,6 +214,55 @@ export async function mockInvoke<T>(
     ],
     lab_save_profile: [],
     lab_delete_profile: [],
+    lab_fetch_public_nodes: {
+      nodes: [
+        {
+          name: "小米公共 STUN",
+          kind: "stun",
+          addr: "stun.miwifi.com:3478",
+          region: "国内",
+          source: "精选国内大厂",
+          note: "国内低延迟 UDP 打洞（零流量经过）",
+        },
+        {
+          name: "B站公共 STUN",
+          kind: "stun",
+          addr: "stun.chat.bilibili.com:3478",
+          region: "国内",
+          source: "精选国内大厂",
+          note: "国内低延迟 UDP 打洞",
+        },
+        {
+          name: "Cloudflare 全球 STUN",
+          kind: "stun",
+          addr: "stun.cloudflare.com:3478",
+          region: "全球 Anycast",
+          source: "Cloudflare",
+          note: "跨境/出海网络高可用打洞",
+        },
+        {
+          name: "EasyTier 社区共享节点",
+          kind: "easytier",
+          addr: "tcp://public.easytier.top:11010",
+          region: "社区共享",
+          source: "EasyTier 社区源",
+          note: "公益组网/打洞引导节点（加密流量）",
+        },
+      ],
+      fetchedOnlineCount: 2,
+      logs: [
+        "已载入 3 个内置国内/全球高速 STUN 节点",
+        "✓ 预览模式示例：已同步社区公共打洞与 EasyTier 节点",
+      ],
+    },
+    lab_probe_node: {
+      addr: "stun.miwifi.com:3478",
+      kind: "stun",
+      ok: true,
+      rttMs: 24.6,
+      mappedAddr: "112.80.248.75:54321",
+      detail: "STUN 可达 24.6ms · 公网映射 112.80.248.75:54321",
+    },
     lab_run_ab_bench: {
       netemSummary: "Netem 开启：+60ms (±10ms) · 丢包 4.0% (Burst 3)",
       runA: {

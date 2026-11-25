@@ -222,3 +222,40 @@ export function labSaveProfile(profile: LabProfile): Promise<LabProfile[]> {
 export function labDeleteProfile(id: string): Promise<LabProfile[]> {
   return call("lab_delete_profile", { id });
 }
+
+export interface PublicNodeItemDto {
+  name: string;
+  kind: "stun" | "easytier" | "relay";
+  addr: string;
+  region: string;
+  source: string;
+  note: string;
+}
+
+export interface FetchPublicNodesResultDto {
+  nodes: PublicNodeItemDto[];
+  fetchedOnlineCount: number;
+  logs: string[];
+}
+
+export interface NodeProbeResultDto {
+  addr: string;
+  kind: string;
+  ok: boolean;
+  rttMs: number | null;
+  mappedAddr: string | null;
+  detail: string;
+}
+
+export function labFetchPublicNodes(
+  customUrl?: string,
+): Promise<FetchPublicNodesResultDto> {
+  return call("lab_fetch_public_nodes", { customUrl: customUrl?.trim() || null });
+}
+
+export function labProbeNode(
+  kind: "stun" | "easytier" | "relay" | "punch",
+  addr: string,
+): Promise<NodeProbeResultDto> {
+  return call("lab_probe_node", { kind, addr });
+}

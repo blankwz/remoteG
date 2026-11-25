@@ -1406,6 +1406,69 @@ pub async fn lab_probe_target_plan(
                 logs,
             });
         }
+        // STUN 公共/自建打洞服务器：发真实 RFC 5389 STUN Binding UDP 包（测真实延迟 + 公网映射 IP:端口）
+        if plan.mode == "punch" && is_stun_addr(relay_raw) {
+            logs.push(format!(
+                "识别为 STUN 打洞服务器：{relay_raw}（发起 {rounds} 轮真实 RFC 5389 UDP Binding 探测）"
+            ));
+            let mut last_mapped: Option<String> = None;
+            for i in 1..=rounds {
+                match probe_stun_rfc5389(relay_raw).await {
+                    Ok((ms, mapped)) => {
+                        rtts.push(ms);
+                        if let Some(m) = mapped {
+                            logs.push(format!(
+                                "  [第 {i}/{rounds} 轮] ✓ STUN 响应：{ms:.1} ms · 公网映射 {m}"
+                            ));
+                            last_mapped = Some(m);
+                        } else {
+                            logs.push(format!("  [第 {i}/{rounds} 轮] ✓ STUN 响应：{ms:.1} ms"));
+                        }
+                    }
+                    Err(e) => {
+                        logs.push(format!("  [第 {i}/{rounds} 轮] ✗ STUN 失败：{e}"));
+                    }
+                }
+            }
+            let reachable = rtts.len() as u32;
+            let loss_pct = ((rounds - reachable) as f64 / rounds as f64) * 100.0;
+            let (min_rtt_ms, avg_rtt_ms, max_rtt_ms, jitter_ms) = compute_rtt_stats(&rtts);
+            let ok = reachable > 0;
+            let route_detail = if ok {
+                match &last_mapped {
+                    Some(m) => format!(
+                        "STUN 可达 ({reachable}/{rounds}，均延迟 {:.1}ms · 公网映射 {m})",
+                        avg_rtt_ms.unwrap_or(0.0)
+                    ),
+                    None => format!(
+                        "STUN 可达 ({reachable}/{rounds}，均延迟 {:.1}ms)",
+                        avg_rtt_ms.unwrap_or(0.0)
+                    ),
+                }
+            } else {
+                "STUN 服务器无响应（请检查 UDP 放行或更换公共 STUN 节点）".into()
+            };
+            logs.push(format!("结论：{route_detail}"));
+            return Ok(RealPlanProbeResultDto {
+                plan_id: plan.plan_id,
+                plan_name: plan.plan_name,
+                mode: plan.mode,
+                resolved_addr: relay_raw.to_string(),
+                ok,
+                reachable_count: reachable,
+                total_probes: rounds,
+                loss_pct: (loss_pct * 10.0).round() / 10.0,
+                min_rtt_ms,
+                avg_rtt_ms,
+                max_rtt_ms,
+                jitter_ms,
+                node_rtt_ms: avg_rtt_ms,
+                target_rtt_ms: None,
+                peer_fingerprint: last_mapped,
+                route_detail,
+                logs,
+            });
+        }
         if relay_raw.contains("://") {
             let Some((host, port)) = parse_url_host_port(relay_raw) else {
                 logs.push(format!("✗ {mode_label} URL 格式无效：{relay_raw}"));
@@ -1743,4 +1806,551 @@ pub async fn lab_probe_target_plan(
         route_detail,
         logs,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 公共打洞 (STUN) / 公共 EasyTier 节点实时获取 + 真实 RFC 5389 测速
+// ---------------------------------------------------------------------------
+
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+
+fn is_stun_addr(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    lower.starts_with("stun:")
+        || lower.starts_with("stun://")
+        || lower.contains("stun.")
+        || lower.ends_with(":3478")
+        || lower.ends_with(":19302")
+        || lower.ends_with(":18000")
+}
+
+fn strip_stun_scheme(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix("stun://")
+        .or_else(|| trimmed.strip_prefix("STUN://"))
+        .or_else(|| trimmed.strip_prefix("stun:"))
+        .or_else(|| trimmed.strip_prefix("STUN:"))
+        .unwrap_or(trimmed);
+    normalize_probe_addr(stripped, 3478)
+}
+
+/// 解析 RFC 5389 STUN Binding Response 中的 XOR-MAPPED-ADDRESS (0x0020) 或 MAPPED-ADDRESS (0x0001)。
+fn parse_stun_mapped_addr(buf: &[u8], txid: &[u8; 12]) -> Option<String> {
+    if buf.len() < 20 {
+        return None;
+    }
+    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+    if msg_type != 0x0101 {
+        return None;
+    }
+    let cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if cookie != STUN_MAGIC_COOKIE || &buf[8..20] != txid {
+        return None;
+    }
+    let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    let end = (20 + msg_len).min(buf.len());
+    let mut offset = 20usize;
+    let mut fallback_mapped: Option<String> = None;
+
+    while offset + 4 <= end {
+        let attr_type = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+        let attr_len = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]) as usize;
+        offset += 4;
+        if offset + attr_len > end {
+            break;
+        }
+        let val = &buf[offset..offset + attr_len];
+        if attr_type == 0x0020 && val.len() >= 8 {
+            // XOR-MAPPED-ADDRESS
+            let family = val[1];
+            let xport = u16::from_be_bytes([val[2], val[3]]) ^ ((STUN_MAGIC_COOKIE >> 16) as u16);
+            if family == 0x01 {
+                let cookie_bytes = STUN_MAGIC_COOKIE.to_be_bytes();
+                let ip = std::net::Ipv4Addr::new(
+                    val[4] ^ cookie_bytes[0],
+                    val[5] ^ cookie_bytes[1],
+                    val[6] ^ cookie_bytes[2],
+                    val[7] ^ cookie_bytes[3],
+                );
+                return Some(format!("{ip}:{xport}"));
+            } else if family == 0x02 && val.len() >= 20 {
+                let mut mask = [0u8; 16];
+                mask[0..4].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+                mask[4..16].copy_from_slice(txid);
+                let mut ip_bytes = [0u8; 16];
+                for i in 0..16 {
+                    ip_bytes[i] = val[4 + i] ^ mask[i];
+                }
+                let ip = std::net::Ipv6Addr::from(ip_bytes);
+                return Some(format!("[{ip}]:{xport}"));
+            }
+        } else if attr_type == 0x0001 && val.len() >= 8 && val[1] == 0x01 {
+            // MAPPED-ADDRESS (IPv4)
+            let port = u16::from_be_bytes([val[2], val[3]]);
+            let ip = std::net::Ipv4Addr::new(val[4], val[5], val[6], val[7]);
+            fallback_mapped = Some(format!("{ip}:{port}"));
+        }
+        let padded = (attr_len + 3) & !3;
+        offset = offset.saturating_add(padded);
+    }
+    fallback_mapped
+}
+
+/// 向指定 STUN 服务器发送真实 RFC 5389 UDP Binding Request，返回 (RTT ms, 公网映射 IP:端口)。
+async fn probe_stun_rfc5389(raw_addr: &str) -> Result<(f64, Option<String>), String> {
+    let host_port = strip_stun_scheme(raw_addr);
+    let mut addrs = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::lookup_host(&host_port),
+    )
+    .await
+    .map_err(|_| "DNS 解析超时".to_string())?
+    .map_err(|e| format!("DNS 解析失败：{e}"))?;
+
+    let target = addrs
+        .find(|a| a.is_ipv4())
+        .or_else(|| {
+            // 如果全是 IPv6 再试一次
+            None
+        })
+        .ok_or_else(|| "未解析到可用 IPv4 地址".to_string())?;
+
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("绑定本地 UDP 失败：{e}"))?;
+
+    let uuid = uuid::Uuid::new_v4();
+    let ub = uuid.as_bytes();
+    let mut txid = [0u8; 12];
+    txid.copy_from_slice(&ub[0..12]);
+
+    let mut req = [0u8; 20];
+    req[0] = 0x00;
+    req[1] = 0x01; // Binding Request
+    req[2] = 0x00;
+    req[3] = 0x00;
+    req[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    req[8..20].copy_from_slice(&txid);
+
+    let t0 = Instant::now();
+    sock.send_to(&req, target)
+        .await
+        .map_err(|e| format!("发送 STUN 包失败：{e}"))?;
+
+    let mut resp = [0u8; 512];
+    let (n, _from) = tokio::time::timeout(Duration::from_millis(2500), sock.recv_from(&mut resp))
+        .await
+        .map_err(|_| "UDP 超时（>2500ms）".to_string())?
+        .map_err(|e| format!("接收 STUN 响应失败：{e}"))?;
+
+    let rtt_ms = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
+    let mapped = parse_stun_mapped_addr(&resp[..n], &txid);
+    if mapped.is_none() && (n < 20 || resp[0] != 0x01 || resp[1] != 0x01) {
+        return Err("收到非 STUN Binding 响应".into());
+    }
+    Ok((rtt_ms, mapped))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicNodeItemDto {
+    pub name: String,
+    /// `"stun"` | `"easytier"` | `"relay"`
+    pub kind: String,
+    pub addr: String,
+    pub region: String,
+    pub source: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchPublicNodesResultDto {
+    pub nodes: Vec<PublicNodeItemDto>,
+    pub fetched_online_count: usize,
+    pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeProbeResultDto {
+    pub addr: String,
+    pub kind: String,
+    pub ok: bool,
+    pub rtt_ms: Option<f64>,
+    pub mapped_addr: Option<String>,
+    pub detail: String,
+}
+
+fn builtin_public_nodes() -> Vec<PublicNodeItemDto> {
+    vec![
+        PublicNodeItemDto {
+            name: "小米公共 STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.miwifi.com:3478".into(),
+            region: "国内".into(),
+            source: "精选国内大厂".into(),
+            note: "国内低延迟 UDP 打洞（零流量经过）".into(),
+        },
+        PublicNodeItemDto {
+            name: "B站公共 STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.chat.bilibili.com:3478".into(),
+            region: "国内".into(),
+            source: "精选国内大厂".into(),
+            note: "国内低延迟 UDP 打洞".into(),
+        },
+        PublicNodeItemDto {
+            name: "芒果TV公共 STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.hitv.com:3478".into(),
+            region: "国内".into(),
+            source: "精选国内大厂".into(),
+            note: "国内多线 STUN 节点".into(),
+        },
+        PublicNodeItemDto {
+            name: "腾讯 QQ STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.qq.com:3478".into(),
+            region: "国内".into(),
+            source: "精选国内大厂".into(),
+            note: "国内公网反射探测".into(),
+        },
+        PublicNodeItemDto {
+            name: "斗鱼公共 STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.douyucdn.cn:18000".into(),
+            region: "国内".into(),
+            source: "精选国内大厂".into(),
+            note: "UDP 18000 端口打洞备用".into(),
+        },
+        PublicNodeItemDto {
+            name: "Cloudflare 全球 STUN".into(),
+            kind: "stun".into(),
+            addr: "stun.cloudflare.com:3478".into(),
+            region: "全球 Anycast".into(),
+            source: "Cloudflare".into(),
+            note: "跨境/出海网络高可用打洞".into(),
+        },
+    ]
+}
+
+/// 从任意文本/JSON 中提取 EasyTier 节点 URI（`tcp://`、`udp://`、`wss://`、`ws://`）。
+fn extract_easytier_uris(text: &str, max_items: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ']' | '[' | '{' | '}' | '(' | ')')
+    }) {
+        let t = token.trim();
+        let lower = t.to_ascii_lowercase();
+        let valid_scheme = lower.starts_with("tcp://")
+            || lower.starts_with("udp://")
+            || lower.starts_with("wss://")
+            || lower.starts_with("ws://");
+        if valid_scheme && t.len() >= 10 && t.len() <= 120 && t[6..].contains(':') {
+            let cleaned = t.trim_end_matches('/').to_string();
+            if seen.insert(cleaned.clone()) {
+                out.push(cleaned);
+                if out.len() >= max_items {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 实时拉取公共 STUN 节点（GitHub `always-online-stun` + 精选国内大厂）与 EasyTier 社区节点（支持自定义订阅 URL）。
+#[tauri::command]
+pub async fn lab_fetch_public_nodes(
+    custom_url: Option<String>,
+) -> Result<FetchPublicNodesResultDto, String> {
+    let mut nodes = builtin_public_nodes();
+    let mut seen: std::collections::HashSet<String> =
+        nodes.iter().map(|n| n.addr.to_ascii_lowercase()).collect();
+    let mut fetched_online_count = 0usize;
+    let mut logs = vec![format!("已载入 {} 个内置国内/全球高速 STUN 节点", nodes.len())];
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("rd-controller/0.4.2")
+        .build()
+        .map_err(|e| format!("初始化 HTTP 客户端失败：{e}"))?;
+
+    // 1) 在线拉取 GitHub pradt2/always-online-stun 每小时更新存活表
+    let stun_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+    match client.get(stun_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.text().await {
+                let mut added = 0usize;
+                for line in body.lines() {
+                    let addr = line.trim();
+                    if addr.is_empty() || !addr.contains(':') || addr.starts_with('#') {
+                        continue;
+                    }
+                    if seen.insert(addr.to_ascii_lowercase()) {
+                        let host = addr.split(':').next().unwrap_or(addr);
+                        nodes.push(PublicNodeItemDto {
+                            name: format!("STUN · {host}"),
+                            kind: "stun".into(),
+                            addr: addr.to_string(),
+                            region: "全球保活".into(),
+                            source: "always-online-stun".into(),
+                            note: "GitHub 每小时自动测活公共 STUN".into(),
+                        });
+                        added += 1;
+                        fetched_online_count += 1;
+                        if added >= 8 {
+                            break;
+                        }
+                    }
+                }
+                logs.push(format!(
+                    "✓ 在线拉取 always-online-stun 成功：新增 {added} 个实时存活 STUN 节点"
+                ));
+            }
+        }
+        Ok(resp) => {
+            logs.push(format!(
+                "⚠ 在线拉取 always-online-stun 返回 HTTP {}（已保留内置国内节点）",
+                resp.status()
+            ));
+        }
+        Err(e) => {
+            logs.push(format!(
+                "⚠ 访问 GitHub always-online-stun 超时/不可达（{e}），已使用内置国内高速 STUN"
+            ));
+        }
+    }
+
+    // 2) 在线拉取 EasyTier 公共社区订阅源（优先用户自定义 URL，其次社区公开 API）
+    let mut easytier_sources: Vec<(&str, String)> = Vec::new();
+    if let Some(u) = custom_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        easytier_sources.push(("自定义订阅", u));
+    }
+    easytier_sources.push((
+        "EasyTier 社区源",
+        "https://uptime.easytier.cn/api/nodes?page=1&per_page=12&is_active=true".to_string(),
+    ));
+
+    let mut et_added = 0usize;
+    for (src_label, url) in easytier_sources {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(body) = resp.text().await {
+                    let uris = extract_easytier_uris(&body, 10);
+                    let mut this_added = 0usize;
+                    for uri in uris {
+                        if seen.insert(uri.to_ascii_lowercase()) {
+                            let host = parse_url_host_port(&uri)
+                                .map(|(h, _)| h)
+                                .unwrap_or_else(|| uri.clone());
+                            nodes.push(PublicNodeItemDto {
+                                name: format!("EasyTier · {host}"),
+                                kind: "easytier".into(),
+                                addr: uri,
+                                region: "社区共享".into(),
+                                source: src_label.into(),
+                                note: "公益组网/打洞引导节点（加密流量）".into(),
+                            });
+                            this_added += 1;
+                            et_added += 1;
+                            fetched_online_count += 1;
+                        }
+                    }
+                    if this_added > 0 {
+                        logs.push(format!(
+                            "✓ 从 {src_label} 实时解析到 {this_added} 个 EasyTier 节点"
+                        ));
+                    } else {
+                        logs.push(format!(
+                            "⚠ {src_label} 已连通但未解析到 tcp:// / udp:// 节点地址"
+                        ));
+                    }
+                }
+            }
+            Ok(resp) => {
+                logs.push(format!(
+                    "⚠ {src_label} 返回 HTTP {}（公益站波动属正常，可填自定义订阅 URL）",
+                    resp.status()
+                ));
+            }
+            Err(e) => {
+                logs.push(format!(
+                    "⚠ {src_label} 请求失败：{e}（可填入你的 EasyTier 节点订阅地址或自建）"
+                ));
+            }
+        }
+    }
+
+    if et_added == 0 {
+        // 放入一个常见社区示例占位，方便用户一键测活或替换
+        let fallback_et = "tcp://public.easytier.top:11010".to_string();
+        if seen.insert(fallback_et.clone()) {
+            nodes.push(PublicNodeItemDto {
+                name: "EasyTier 默认引导节点".into(),
+                kind: "easytier".into(),
+                addr: fallback_et,
+                region: "公共".into(),
+                source: "内置回退".into(),
+                note: "若测速超时，请在上方填入新社区订阅 URL 或 SSH 一键自建".into(),
+            });
+        }
+    }
+
+    Ok(FetchPublicNodesResultDto {
+        nodes,
+        fetched_online_count,
+        logs,
+    })
+}
+
+/// 真实单节点测速：STUN 走 RFC 5389 UDP Binding（同时返回公网映射 IP:端口），EasyTier/Relay 走真实 TCP/QUIC 连通测速。
+#[tauri::command]
+pub async fn lab_probe_node(kind: String, addr: String) -> Result<NodeProbeResultDto, String> {
+    let trimmed = addr.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(NodeProbeResultDto {
+            addr: trimmed,
+            kind,
+            ok: false,
+            rtt_ms: None,
+            mapped_addr: None,
+            detail: "节点地址为空".into(),
+        });
+    }
+
+    let k = kind.trim().to_ascii_lowercase();
+    if k == "stun" || (k == "punch" && is_stun_addr(&trimmed)) {
+        return match probe_stun_rfc5389(&trimmed).await {
+            Ok((rtt, mapped)) => {
+                let detail = match &mapped {
+                    Some(m) => format!("STUN 可达 {rtt:.1}ms · 公网映射 {m}"),
+                    None => format!("STUN 可达 {rtt:.1}ms"),
+                };
+                Ok(NodeProbeResultDto {
+                    addr: trimmed,
+                    kind: "stun".into(),
+                    ok: true,
+                    rtt_ms: Some(rtt),
+                    mapped_addr: mapped,
+                    detail,
+                })
+            }
+            Err(e) => Ok(NodeProbeResultDto {
+                addr: trimmed,
+                kind: "stun".into(),
+                ok: false,
+                rtt_ms: None,
+                mapped_addr: None,
+                detail: e,
+            }),
+        };
+    }
+
+    // EasyTier / Relay / URL 节点：提取 host:port 测真实 TCP 握手延迟
+    let target = if trimmed.contains("://") {
+        match parse_url_host_port(&trimmed) {
+            Some((h, p)) => format!("{h}:{p}"),
+            None => {
+                return Ok(NodeProbeResultDto {
+                    addr: trimmed,
+                    kind,
+                    ok: false,
+                    rtt_ms: None,
+                    mapped_addr: None,
+                    detail: "URL 格式无效".into(),
+                });
+            }
+        }
+    } else {
+        normalize_probe_addr(&trimmed, if k == "easytier" { 11010 } else { 21118 })
+    };
+
+    let t0 = Instant::now();
+    match tokio::time::timeout(
+        Duration::from_millis(2500),
+        tokio::net::TcpStream::connect(&target),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
+            Ok(NodeProbeResultDto {
+                addr: trimmed,
+                kind,
+                ok: true,
+                rtt_ms: Some(rtt),
+                mapped_addr: None,
+                detail: format!("TCP 连通 {rtt:.1}ms"),
+            })
+        }
+        Ok(Err(e)) => Ok(NodeProbeResultDto {
+            addr: trimmed,
+            kind,
+            ok: false,
+            rtt_ms: None,
+            mapped_addr: None,
+            detail: format!("连接失败：{e}"),
+        }),
+        Err(_) => Ok(NodeProbeResultDto {
+            addr: trimmed,
+            kind,
+            ok: false,
+            rtt_ms: None,
+            mapped_addr: None,
+            detail: "连接超时（>2500ms）".into(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod stun_and_pool_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rfc5389_xor_mapped_ipv4() {
+        let txid = [1u8; 12];
+        let mut pkt = vec![0u8; 20 + 12];
+        pkt[0] = 0x01;
+        pkt[1] = 0x01; // Binding Success Response
+        pkt[2] = 0x00;
+        pkt[3] = 0x0c; // 12 bytes
+        pkt[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        pkt[8..20].copy_from_slice(&txid);
+        // XOR-MAPPED-ADDRESS (0x0020), len 8
+        pkt[20] = 0x00;
+        pkt[21] = 0x20;
+        pkt[22] = 0x00;
+        pkt[23] = 0x08;
+        pkt[24] = 0x00;
+        pkt[25] = 0x01; // IPv4
+        let xport = 54321u16 ^ ((STUN_MAGIC_COOKIE >> 16) as u16);
+        pkt[26..28].copy_from_slice(&xport.to_be_bytes());
+        let cb = STUN_MAGIC_COOKIE.to_be_bytes();
+        let ip = [112u8, 80, 248, 75];
+        for i in 0..4 {
+            pkt[28 + i] = ip[i] ^ cb[i];
+        }
+        assert_eq!(
+            parse_stun_mapped_addr(&pkt, &txid).as_deref(),
+            Some("112.80.248.75:54321")
+        );
+    }
+
+    #[test]
+    fn extract_easytier_uris_from_json_and_text() {
+        let sample = r#"{"data":[{"url":"tcp://node1.example.com:11010"},{"url":"wss://et.example.org:11012/"}]} udp://1.2.3.4:11010"#;
+        let uris = extract_easytier_uris(sample, 10);
+        assert_eq!(
+            uris,
+            vec![
+                "tcp://node1.example.com:11010",
+                "wss://et.example.org:11012",
+                "udp://1.2.3.4:11010"
+            ]
+        );
+    }
 }

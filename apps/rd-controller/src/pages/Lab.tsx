@@ -16,9 +16,11 @@ import {
   labApplyTransport,
   labApplyTuning,
   labBenchmarkAllRoutes,
+  labFetchPublicNodes,
   labGetState,
   labListProfiles,
   labPanicReset,
+  labProbeNode,
   labProbeTargetPlan,
   labRunAbBench,
   labSaveProfile,
@@ -491,12 +493,17 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [testingPlanId, setTestingPlanId] = useState<string | null>(null);
   const [runningRealBatch, setRunningRealBatch] = useState(false);
 
-  // 共用打洞 / 中转服务器节点池（可多目标共用，并独立显示每个节点的真实延迟）
+  // 共用打洞 (STUN) / EasyTier / 自建中转服务器节点池（支持实时拉取公共源、并发测速排序、分类管理、SSH 一键自建）
   interface RelayNodeItem {
     id: string;
     name: string;
     addr: string;
+    kind?: "stun" | "easytier" | "relay";
+    region?: string;
+    source?: string;
+    favorite?: boolean;
     lastRttMs: number | null;
+    mappedAddr?: string | null;
     status: "idle" | "ok" | "fail";
   }
   const [serverPool, setServerPool] = useState<RelayNodeItem[]>(() => {
@@ -516,6 +523,20 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       // ignore
     }
   }, []);
+  const [poolFilter, setPoolFilter] = useState<"all" | "stun" | "easytier" | "relay">("all");
+  const [fetchingPublic, setFetchingPublic] = useState(false);
+  const [showSubInput, setShowSubInput] = useState(false);
+  const [customSubUrl, setCustomSubUrl] = useState(() => {
+    try {
+      return window.localStorage.getItem("rd.labCustomSubUrl") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [showManualNode, setShowManualNode] = useState(false);
+  const [manualNodeName, setManualNodeName] = useState("");
+  const [manualNodeKind, setManualNodeKind] = useState<"stun" | "easytier" | "relay">("stun");
+  const [manualNodeAddr, setManualNodeAddr] = useState("");
   const [probingPool, setProbingPool] = useState(false);
   const [showSshDeploy, setShowSshDeploy] = useState(false);
   const [sshName, setSshName] = useState("");
@@ -888,49 +909,178 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     return okList[0]?.planId ?? null;
   })();
 
-  // 实测共用服务器节点池中每个节点的真实延迟
+  const inferNodeKind = (node: RelayNodeItem): "stun" | "easytier" | "relay" => {
+    if (node.kind) return node.kind;
+    const lower = node.addr.toLowerCase();
+    if (lower.includes("stun") || lower.endsWith(":3478") || lower.endsWith(":19302") || lower.endsWith(":18000")) {
+      return "stun";
+    }
+    if (lower.startsWith("tcp://") || lower.startsWith("udp://") || lower.includes("easytier")) {
+      return "easytier";
+    }
+    return "relay";
+  };
+
+  const sortServerPool = (list: RelayNodeItem[]): RelayNodeItem[] =>
+    [...list].sort((a, b) => {
+      const favDiff = (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0);
+      if (favDiff !== 0) return favDiff;
+      const rank = (s: RelayNodeItem["status"]) => (s === "ok" ? 0 : s === "idle" ? 1 : 2);
+      const rDiff = rank(a.status) - rank(b.status);
+      if (rDiff !== 0) return rDiff;
+      return (a.lastRttMs ?? 99999) - (b.lastRttMs ?? 99999);
+    });
+
+  // 实时在线拉取公共 STUN（国内大厂 + always-online-stun）与 EasyTier 社区节点
+  const handleFetchPublicNodes = useCallback(async () => {
+    setFetchingPublic(true);
+    try {
+      window.localStorage.setItem("rd.labCustomSubUrl", customSubUrl.trim());
+    } catch {
+      // ignore
+    }
+    pushLog(
+      "info",
+      customSubUrl.trim()
+        ? `🌐 正在实时拉取公共 STUN 与 EasyTier 节点（含自定义订阅：${customSubUrl.trim()}）…`
+        : "🌐 正在实时拉取公共 STUN（国内大厂 + GitHub 保活源）与 EasyTier 社区节点…",
+    );
+    try {
+      const res = await labFetchPublicNodes(customSubUrl);
+      for (const line of res.logs) {
+        pushLog(line.includes("✓") ? "ok" : line.includes("⚠") ? "warn" : "info", line);
+      }
+      const existingAddrs = new Set(serverPool.map((n) => n.addr.toLowerCase()));
+      const additions: RelayNodeItem[] = [];
+      for (const item of res.nodes) {
+        if (existingAddrs.has(item.addr.toLowerCase())) continue;
+        existingAddrs.add(item.addr.toLowerCase());
+        additions.push({
+          id: `pub-${item.kind}-${Date.now()}-${additions.length}`,
+          name: item.name,
+          addr: item.addr,
+          kind: item.kind,
+          region: item.region,
+          source: item.source,
+          lastRttMs: null,
+          mappedAddr: null,
+          status: "idle",
+        });
+      }
+      if (additions.length > 0) {
+        saveServerPool(sortServerPool([...serverPool, ...additions]));
+        showToast(`已入池 ${additions.length} 个公共节点，点「一键全池测速」测真实延迟`);
+      } else {
+        showToast("所有公共节点均已在节点池中");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      pushLog("warn", `拉取公共节点失败：${msg}`);
+      showToast(`拉取失败：${msg}`);
+    } finally {
+      setFetchingPublic(false);
+    }
+  }, [customSubUrl, pushLog, saveServerPool, serverPool, showToast]);
+
+  // 并发实测节点池中每个节点的真实延迟（STUN 走 RFC 5389 UDP + 公网映射 IP，EasyTier/Relay 走真实 TCP）并自动按延迟排序
   const handleProbeServerPool = useCallback(async () => {
-    if (serverPool.length === 0) {
-      pushLog("warn", "节点池为空，请先点击「🚀 SSH 一键部署新节点」或添加打洞/中转服务器");
+    const targets =
+      poolFilter === "all"
+        ? serverPool
+        : serverPool.filter((n) => inferNodeKind(n) === poolFilter);
+    if (targets.length === 0) {
+      pushLog("warn", "当前分组节点为空，请先点「🌐 实时获取公共节点」或「🚀 SSH 一键部署新节点」");
       return;
     }
     setProbingPool(true);
-    pushLog("info", `开始实测共用节点池（共 ${serverPool.length} 个打洞/中转服务器）…`);
-    const updated = [...serverPool];
-    for (let i = 0; i < updated.length; i += 1) {
-      const node = updated[i];
-      if (!node) continue;
-      try {
-        const res = await labProbeTargetPlan({
-          planId: `pool-${node.id}`,
-          planName: node.name,
-          mode: "relay",
-          targetAddr: "",
-          relayAddr: node.addr,
-          rounds: 3,
-        });
-        updated[i] = {
-          ...node,
-          lastRttMs: res.nodeRttMs ?? res.avgRttMs,
-          status: res.ok ? "ok" : "fail",
-        };
-        saveServerPool([...updated]);
-        pushLog(
-          res.ok ? "ok" : "warn",
-          `[节点 ${node.name} (${node.addr})] ${
-            res.ok
-              ? `✓ 可达 · 节点延迟 ${res.nodeRttMs ?? res.avgRttMs}ms（抖动 ${res.jitterMs ?? 0}ms / 丢包 ${res.lossPct}%）`
-              : `✗ ${res.routeDetail}`
-          }`,
-        );
-      } catch (e) {
-        updated[i] = { ...node, lastRttMs: null, status: "fail" };
-        saveServerPool([...updated]);
-        pushLog("warn", `[节点 ${node.name}] 探测异常：${e instanceof Error ? e.message : String(e)}`);
-      }
+    pushLog("info", `🔍 开始并发实测 ${targets.length} 个节点的真实延迟（STUN 发 RFC 5389 UDP 包，EasyTier/中转测真实 TCP）…`);
+    const map = new Map(serverPool.map((n) => [n.id, { ...n }]));
+    const batchSize = 5;
+    let okCount = 0;
+    for (let i = 0; i < targets.length; i += batchSize) {
+      const chunk = targets.slice(i, i + batchSize);
+      await Promise.all(
+        chunk.map(async (node) => {
+          const kind = inferNodeKind(node);
+          try {
+            const res = await labProbeNode(kind, node.addr);
+            if (res.ok) okCount += 1;
+            map.set(node.id, {
+              ...node,
+              kind,
+              lastRttMs: res.rttMs,
+              mappedAddr: res.mappedAddr,
+              status: res.ok ? "ok" : "fail",
+            });
+            pushLog(
+              res.ok ? "ok" : "warn",
+              `[${kind.toUpperCase()} · ${node.name}] ${res.ok ? `✓ ${res.detail}` : `✗ ${res.detail}`}`,
+            );
+          } catch (e) {
+            map.set(node.id, { ...node, kind, lastRttMs: null, status: "fail" });
+            pushLog("warn", `[${node.name}] 探测异常：${e instanceof Error ? e.message : String(e)}`);
+          }
+        }),
+      );
+      saveServerPool(sortServerPool(Array.from(map.values())));
     }
+    pushLog("ok", `✓ 节点池测速完成：${okCount}/${targets.length} 个可用，已按延迟从低到高自动排序`);
     setProbingPool(false);
-  }, [pushLog, saveServerPool, serverPool]);
+  }, [poolFilter, pushLog, saveServerPool, serverPool]);
+
+  const handleAddManualNode = useCallback(() => {
+    const addr = manualNodeAddr.trim();
+    if (!addr) {
+      showToast("请输入节点地址");
+      return;
+    }
+    if (serverPool.some((n) => n.addr.toLowerCase() === addr.toLowerCase())) {
+      showToast("该节点地址已在池中");
+      return;
+    }
+    const name =
+      manualNodeName.trim() ||
+      (manualNodeKind === "stun"
+        ? `自定义 STUN`
+        : manualNodeKind === "easytier"
+          ? `自定义 EasyTier`
+          : `自建中转`);
+    const next: RelayNodeItem = {
+      id: `manual-${Date.now()}`,
+      name,
+      addr,
+      kind: manualNodeKind,
+      source: "手动添加",
+      lastRttMs: null,
+      mappedAddr: null,
+      status: "idle",
+    };
+    saveServerPool(sortServerPool([next, ...serverPool]));
+    setManualNodeName("");
+    setManualNodeAddr("");
+    setShowManualNode(false);
+    pushLog("ok", `已手动添加节点「${name}」(${addr}) 到共用节点池`);
+  }, [manualNodeAddr, manualNodeKind, manualNodeName, pushLog, saveServerPool, serverPool, showToast]);
+
+  const handleBindNodeToTarget = useCallback(
+    (node: RelayNodeItem) => {
+      const kind = inferNodeKind(node);
+      const mode: RealTestPlanDto["mode"] =
+        kind === "stun" ? "punch" : kind === "easytier" ? "easytier" : "relay";
+      const plan: RealTestPlanDto = {
+        planId: `plan-${Date.now()}`,
+        planName: `${node.name}${node.lastRttMs !== null ? ` (${node.lastRttMs}ms)` : ""}`,
+        mode,
+        targetAddr: baseTargetIp || "192.168.1.10",
+        relayAddr: node.addr,
+        rounds: 3,
+      };
+      savePlansForTarget([...activePlans, plan]);
+      showToast(`已将「${node.name}」绑定到当前目标方案`);
+      pushLog("ok", `已一键绑定节点「${node.name}」(${node.addr}) 到目标「${effectiveTargetLabel}」`);
+    },
+    [activePlans, baseTargetIp, effectiveTargetLabel, pushLog, savePlansForTarget, showToast],
+  );
 
   // 内联 SSH 一键上传代码、启动打洞/中转服务器并自动入池+实测连通
   const handleLabSshDeploy = useCallback(async () => {
@@ -1417,103 +1567,290 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           </div>
         )}
 
-        {/* 共用打洞 / 中转服务器节点池（实时显示每个节点的延迟 + 内联 SSH 一键部署） */}
+        {/* 共用打洞 (STUN) / EasyTier / 自建中转服务器节点池（实时拉取公共源 + 并发测速排序 + 分类管理 + SSH 一键自建） */}
         <div
           style={{
-            padding: "10px 12px",
-            borderRadius: "8px",
+            padding: "12px",
+            borderRadius: "10px",
             background: "rgba(255, 255, 255, 0.025)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
+            border: "1px solid rgba(255, 255, 255, 0.09)",
             display: "flex",
             flexDirection: "column",
-            gap: "8px",
+            gap: "10px",
           }}
         >
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-            <strong style={{ fontSize: "12.5px" }}>
-              🌐 共用打洞 / 中转服务器节点池（{serverPool.length} 个节点，所有目标可共用）
+            <strong style={{ fontSize: "13px" }}>
+              🌐 公共 & 自建服务器节点池（{serverPool.length} 个节点 · 公共 STUN 零隐私风险）
             </strong>
-            <div style={{ display: "flex", gap: "6px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnPrimary}`}
+                disabled={fetchingPublic}
+                onClick={() => void handleFetchPublicNodes()}
+              >
+                {fetchingPublic ? "⏳ 拉取中…" : "🌐 实时获取公共节点"}
+              </button>
               <button
                 type="button"
                 className={styles.btn}
                 disabled={probingPool || serverPool.length === 0}
                 onClick={() => void handleProbeServerPool()}
               >
-                {probingPool ? "⏳ 测速中…" : "🔍 测全部节点延迟"}
+                {probingPool ? "⏳ 测速中…" : "🔍 一键全池测速"}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setShowManualNode((v) => !v)}
+              >
+                {showManualNode ? "收起手动添加" : "+ 手动添加"}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setShowSubInput((v) => !v)}
+                title="配置自定义 EasyTier 公共节点订阅源 URL"
+              >
+                订阅源
               </button>
               <button
                 type="button"
                 className={styles.btn}
                 onClick={() => setShowSshDeploy((v) => !v)}
               >
-                {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署新节点"}
+                {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署"}
               </button>
             </div>
           </div>
 
-          {serverPool.length === 0 ? (
-            <div style={{ fontSize: "12px", opacity: 0.65 }}>
-              暂无共用打洞/中转服务器。点击右侧「🚀 SSH 一键部署新节点」填入 Linux VPS 的 SSH 信息，即可自动上传代码、启动服务并测试延迟。
-            </div>
-          ) : (
+          {/* 分类筛选 + 清理超时节点 */}
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-              {serverPool.map((node) => (
-                <div
-                  key={node.id}
+              {(
+                [
+                  ["all", `全部 (${serverPool.length})`],
+                  ["stun", `公共 STUN (${serverPool.filter((n) => inferNodeKind(n) === "stun").length})`],
+                  ["easytier", `EasyTier (${serverPool.filter((n) => inferNodeKind(n) === "easytier").length})`],
+                  ["relay", `自建中转 (${serverPool.filter((n) => inferNodeKind(n) === "relay").length})`],
+                ] as const
+              ).map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setPoolFilter(k)}
                   style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    padding: "4px 10px",
+                    padding: "3px 10px",
                     borderRadius: "999px",
-                    fontSize: "12px",
+                    fontSize: "11.5px",
+                    cursor: "pointer",
                     border:
-                      node.status === "ok"
-                        ? "1px solid rgba(63, 185, 80, 0.45)"
-                        : node.status === "fail"
-                          ? "1px solid rgba(248, 81, 73, 0.45)"
-                          : "1px solid rgba(255, 255, 255, 0.14)",
-                    background: "rgba(0, 0, 0, 0.28)",
+                      poolFilter === k
+                        ? "1px solid rgba(88, 166, 255, 0.7)"
+                        : "1px solid rgba(255, 255, 255, 0.14)",
+                    background:
+                      poolFilter === k ? "rgba(88, 166, 255, 0.16)" : "rgba(0, 0, 0, 0.2)",
+                    color: "inherit",
                   }}
                 >
-                  <span>
-                    {node.status === "ok" ? "🟢" : node.status === "fail" ? "🔴" : "⚪"} {node.name}
-                  </span>
-                  <code style={{ opacity: 0.75 }}>{node.addr}</code>
-                  <strong
-                    style={{
-                      color:
-                        node.status === "ok"
-                          ? "#3fb950"
-                          : node.status === "fail"
-                            ? "#f85149"
-                            : "inherit",
-                    }}
-                  >
-                    {node.lastRttMs !== null
-                      ? `${node.lastRttMs}ms`
-                      : node.status === "fail"
-                        ? "超时"
-                        : "未测"}
-                  </strong>
-                  <button
-                    type="button"
-                    aria-label={`移除节点 ${node.name}`}
-                    onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "inherit",
-                      opacity: 0.55,
-                      cursor: "pointer",
-                      padding: "0 2px",
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
+                  {label}
+                </button>
               ))}
+            </div>
+            {serverPool.some((n) => n.status === "fail") && (
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => {
+                  const kept = serverPool.filter((n) => n.status !== "fail");
+                  saveServerPool(kept);
+                  showToast(`已清理 ${serverPool.length - kept.length} 个超时节点`);
+                }}
+              >
+                🧹 清理超时节点
+              </button>
+            )}
+          </div>
+
+          {/* 可选自定义订阅 URL */}
+          {showSubInput && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", padding: "8px", borderRadius: "8px", background: "rgba(0,0,0,0.22)" }}>
+              <input
+                type="text"
+                value={customSubUrl}
+                onChange={(e) => setCustomSubUrl(e.currentTarget.value)}
+                placeholder="可选：填入 EasyTier 社区节点 API / txt 订阅地址（留空用内置源）"
+                aria-label="自定义公共节点订阅地址"
+                style={{ flex: "1 1 260px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnPrimary}`}
+                disabled={fetchingPublic}
+                onClick={() => void handleFetchPublicNodes()}
+              >
+                保存并拉取
+              </button>
+            </div>
+          )}
+
+          {/* 手动添加节点 */}
+          {showManualNode && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", padding: "8px", borderRadius: "8px", background: "rgba(88,166,255,0.06)", border: "1px solid rgba(88,166,255,0.25)" }}>
+              <select
+                className={styles.select}
+                aria-label="手动节点类型"
+                value={manualNodeKind}
+                onChange={(e) => setManualNodeKind(e.target.value as "stun" | "easytier" | "relay")}
+              >
+                <option value="stun">公共 STUN 打洞</option>
+                <option value="easytier">EasyTier 节点</option>
+                <option value="relay">自建中转 (VPS/Workers)</option>
+              </select>
+              <input
+                type="text"
+                value={manualNodeName}
+                onChange={(e) => setManualNodeName(e.currentTarget.value)}
+                placeholder="节点名称（如：阿里云上海）"
+                aria-label="手动节点名称"
+                style={{ flex: "1 1 130px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <input
+                type="text"
+                value={manualNodeAddr}
+                onChange={(e) => setManualNodeAddr(e.currentTarget.value)}
+                placeholder={
+                  manualNodeKind === "stun"
+                    ? "stun.miwifi.com:3478"
+                    : manualNodeKind === "easytier"
+                      ? "tcp://xxx:11010"
+                      : "45.x.x.x:21118 或 https://..."
+                }
+                aria-label="手动节点地址"
+                style={{ flex: "1.4 1 200px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnPrimary}`}
+                onClick={handleAddManualNode}
+              >
+                加入节点池
+              </button>
+            </div>
+          )}
+
+          {serverPool.filter((n) => poolFilter === "all" || inferNodeKind(n) === poolFilter).length === 0 ? (
+            <div style={{ fontSize: "12px", opacity: 0.72, lineHeight: 1.6 }}>
+              当前暂无节点。推荐先点右上角 <strong>「🌐 实时获取公共节点」</strong> 一键拉取国内高速 STUN 打洞服务器（小米/B站/腾讯/芒果/GitHub 保活源）与 EasyTier 社区节点，再点 <strong>「🔍 一键全池测速」</strong> 找出延迟最低的节点；如需独享高速中转，点 <strong>「🚀 SSH 一键部署」</strong>。
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(255px, 1fr))", gap: "8px", maxHeight: "240px", overflowY: "auto", paddingRight: "2px" }}>
+              {serverPool
+                .filter((n) => poolFilter === "all" || inferNodeKind(n) === poolFilter)
+                .map((node) => {
+                  const kind = inferNodeKind(node);
+                  const kindLabel = kind === "stun" ? "STUN" : kind === "easytier" ? "EASYTIER" : "RELAY";
+                  return (
+                    <div
+                      key={node.id}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "5px",
+                        padding: "8px 10px",
+                        borderRadius: "8px",
+                        fontSize: "12px",
+                        border:
+                          node.status === "ok"
+                            ? "1px solid rgba(63, 185, 80, 0.45)"
+                            : node.status === "fail"
+                              ? "1px solid rgba(248, 81, 73, 0.4)"
+                              : "1px solid rgba(255, 255, 255, 0.12)",
+                        background: "rgba(0, 0, 0, 0.28)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                        <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {node.status === "ok" ? "🟢" : node.status === "fail" ? "🔴" : "⚪"} {node.name}
+                        </span>
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                          <span style={{ fontSize: "10px", padding: "1px 5px", borderRadius: "4px", background: "rgba(255,255,255,0.08)" }}>
+                            {kindLabel}
+                          </span>
+                          <strong
+                            style={{
+                              color:
+                                node.status === "ok"
+                                  ? "#3fb950"
+                                  : node.status === "fail"
+                                    ? "#f85149"
+                                    : "inherit",
+                            }}
+                          >
+                            {node.lastRttMs !== null
+                              ? `${node.lastRttMs}ms`
+                              : node.status === "fail"
+                                ? "超时"
+                                : "未测"}
+                          </strong>
+                        </div>
+                      </div>
+                      <code style={{ opacity: 0.78, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {node.addr}
+                      </code>
+                      {node.mappedAddr && (
+                        <div style={{ fontSize: "11px", color: "#58a6ff" }}>
+                          公网映射：{node.mappedAddr}
+                        </div>
+                      )}
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", marginTop: "2px" }}>
+                        <button
+                          type="button"
+                          onClick={() => handleBindNodeToTarget(node)}
+                          style={{
+                            padding: "2px 8px",
+                            borderRadius: "5px",
+                            fontSize: "11px",
+                            cursor: "pointer",
+                            border: "1px solid rgba(88,166,255,0.45)",
+                            background: "rgba(88,166,255,0.12)",
+                            color: "inherit",
+                          }}
+                        >
+                          + 绑定到当前目标
+                        </button>
+                        <div style={{ display: "inline-flex", gap: "4px" }}>
+                          <button
+                            type="button"
+                            aria-label={`收藏节点 ${node.name}`}
+                            title={node.favorite ? "取消置顶" : "收藏置顶"}
+                            onClick={() =>
+                              saveServerPool(
+                                sortServerPool(
+                                  serverPool.map((n) =>
+                                    n.id === node.id ? { ...n, favorite: !n.favorite } : n,
+                                  ),
+                                ),
+                              )
+                            }
+                            style={{ background: "none", border: "none", color: node.favorite ? "#e3b341" : "inherit", opacity: node.favorite ? 1 : 0.45, cursor: "pointer", padding: "0 3px" }}
+                          >
+                            {node.favorite ? "★" : "☆"}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`移除节点 ${node.name}`}
+                            onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                            style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 3px" }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
           )}
 
