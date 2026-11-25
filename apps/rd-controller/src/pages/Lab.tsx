@@ -19,6 +19,7 @@ import {
   labGetState,
   labListProfiles,
   labPanicReset,
+  labProbeTargetPlan,
   labRunAbBench,
   labSaveProfile,
   labSetNetem,
@@ -31,9 +32,12 @@ import {
   type LabProfile,
   type LabTransportConfig,
   type NetemConfigDto,
+  type RealPlanProbeResultDto,
+  type RealTestPlanDto,
 } from "../api/lab";
 import { isTauriRuntime } from "../api/bridge";
 import {
+  getRelayAddr,
   listDevices,
   probeDevice,
   tailscalePing,
@@ -446,8 +450,30 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [savedDevices, setSavedDevices] = useState<DeviceDto[]>([]);
   const [targetDeviceId, setTargetDeviceId] = useState<string>(deviceId ?? "");
   const [customIp, setCustomIp] = useState<string>("");
-  const [probingTarget, setProbingTarget] = useState(false);
-  const [probeSummary, setProbeSummary] = useState<string | null>(null);
+  const [defaultRelayAddr, setDefaultRelayAddr] = useState<string>("");
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+
+  // 按目标持久化的多绑定方案（1 个目标可绑定 N 个不同方案：直连 / Tailscale / 自建中转 / EasyTier）
+  const [plansByTarget, setPlansByTarget] = useState<Record<string, RealTestPlanDto[]>>(() => {
+    try {
+      const raw = window.localStorage.getItem("rd.labTargetPlans");
+      if (raw) return JSON.parse(raw) as Record<string, RealTestPlanDto[]>;
+    } catch {
+      // ignore
+    }
+    return {};
+  });
+  const [newPlanName, setNewPlanName] = useState("");
+  const [newPlanMode, setNewPlanMode] = useState<RealTestPlanDto["mode"]>("direct");
+  const [newPlanAddr, setNewPlanAddr] = useState("");
+  const [newPlanRelay, setNewPlanRelay] = useState("");
+  const [showAddPlan, setShowAddPlan] = useState(false);
+
+  // 真实自动化测速结果（零造假：仅存后端真实探测回包）
+  const [realResults, setRealResults] = useState<Record<string, RealPlanProbeResultDto>>({});
+  const [testingPlanId, setTestingPlanId] = useState<string | null>(null);
+  const [runningRealBatch, setRunningRealBatch] = useState(false);
+
   const [eventLogs, setEventLogs] = useState<
     { id: number; time: string; level: "info" | "ok" | "warn"; text: string }[]
   >(() => [
@@ -455,14 +481,14 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       id: 1,
       time: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
       level: "info",
-      text: "实验室已就绪：选择目标设备/输入 IP → 点「实测连通」或「全方案一键选最优」，每次调参都会在下方记录具体影响。",
+      text: "真实测速实验室就绪：1) 选择或输入目标 → 2) 为该目标绑定 1~N 个方案 → 3) 点「一键自动实测全部方案」查看真实网络延迟与动态日志。",
     },
   ]);
   const logSeqRef = useRef(2);
   const pushLog = useCallback((level: "info" | "ok" | "warn", text: string) => {
     const id = logSeqRef.current++;
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    setEventLogs((prev) => [{ id, time, level, text }, ...prev].slice(0, 40));
+    setEventLogs((prev) => [...prev, { id, time, level, text }].slice(-120));
   }, []);
 
   useEffect(() => {
@@ -476,72 +502,222 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         }
       })
       .catch(() => undefined);
+    void getRelayAddr()
+      .then((r) => setDefaultRelayAddr(typeof r === "string" ? r.trim() : ""))
+      .catch(() => undefined);
   }, [targetDeviceId]);
 
   const selectedDevice =
     savedDevices.find((d) => d.id === targetDeviceId) ?? null;
+  const targetKey =
+    customIp.trim().length > 0
+      ? `custom:${customIp.trim()}`
+      : selectedDevice
+        ? `dev:${selectedDevice.id}`
+        : "manual:default";
+  const baseTargetIp =
+    customIp.trim().length > 0
+      ? customIp.trim()
+      : selectedDevice
+        ? selectedDevice.addr.replace(/:21118$/, "")
+        : "";
   const effectiveTargetLabel =
     customIp.trim().length > 0
       ? customIp.trim()
       : selectedDevice
         ? `${selectedDevice.name} (${selectedDevice.addr.replace(/:21118$/, "")})`
-        : live?.activeAddr
-          ? live.activeAddr.replace(/:21118$/, "")
-          : "本机真栈沙盒";
+        : "未指定目标（请先选择设备或输入 IP）";
 
-  const handleProbeTarget = useCallback(async () => {
-    setProbingTarget(true);
-    setProbeSummary(null);
-    const rawIp = customIp.trim();
-    const targetAddr =
-      rawIp.length > 0
-        ? rawIp
-        : selectedDevice?.addr ?? live?.activeAddr ?? "";
-    const hostOnly = targetAddr.replace(/:21118$/, "").split(":")[0] ?? "";
-    pushLog("info", `开始实测目标「${effectiveTargetLabel}」的连通性与链路质量…`);
-    const t0 = performance.now();
-    try {
-      if (selectedDevice && rawIp.length === 0) {
-        const reachable = await probeDevice(selectedDevice.id);
-        const ms = Math.round(performance.now() - t0);
-        if (reachable) {
-          let extra = "";
-          if (hostOnly.startsWith("100.")) {
-            try {
-              const ts = await tailscalePing(selectedDevice.addr);
-              extra = ` · Tailscale: ${ts}`;
-            } catch {
-              // ignore optional tailscale ping failure
-            }
-          }
-          const summary = `可达 · 握手响应 ${ms}ms${extra}`;
-          setProbeSummary(summary);
-          pushLog("ok", `目标 ${effectiveTargetLabel} 连通成功：${summary}`);
-        } else {
-          const summary = `不可达（耗时 ${ms}ms，请检查对方 rd-agent 是否运行或端口 21118 放行）`;
-          setProbeSummary(summary);
-          pushLog("warn", `目标 ${effectiveTargetLabel} ${summary}`);
-        }
-      } else if (hostOnly.startsWith("100.")) {
-        const ts = await tailscalePing(rawIp);
-        setProbeSummary(`Tailscale 实测：${ts}`);
-        pushLog("ok", `Tailscale 实测 ${rawIp}：${ts}`);
-      } else {
-        const summary =
-          rawIp.length > 0
-            ? `已锁定目标 IP ${rawIp}（默认端口 21118），可点击「全方案一键选最优」压测最优传输策略`
-            : "当前未选择远端设备，正在本机真栈沙盒运行（可先在设备页添加设备或上方输入 IP）";
-        setProbeSummary(summary);
-        pushLog("info", summary);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setProbeSummary(`探测异常：${msg}`);
-      pushLog("warn", `探测 ${effectiveTargetLabel} 失败：${msg}`);
-    } finally {
-      setProbingTarget(false);
+  const activePlans: RealTestPlanDto[] = (() => {
+    const existing = plansByTarget[targetKey];
+    if (existing && existing.length > 0) {
+      return existing;
     }
-  }, [customIp, effectiveTargetLabel, live?.activeAddr, pushLog, selectedDevice]);
+    const baseIp = baseTargetIp || "192.168.1.10";
+    const starter: RealTestPlanDto[] = [
+      {
+        planId: `${targetKey}-direct`,
+        planName: baseIp.startsWith("100.") ? "Tailscale 直连通道" : "直连通道 (QUIC)",
+        mode: baseIp.startsWith("100.") ? "tailscale" : "direct",
+        targetAddr: baseIp,
+        relayAddr: "",
+        rounds: 3,
+      },
+    ];
+    if (defaultRelayAddr || selectedDevice?.relay) {
+      starter.push({
+        planId: `${targetKey}-relay`,
+        planName: "自建中转服务器",
+        mode: "relay",
+        targetAddr: baseIp,
+        relayAddr: selectedDevice?.relay ?? defaultRelayAddr,
+        rounds: 3,
+      });
+    }
+    return starter;
+  })();
+
+  const savePlansForTarget = useCallback(
+    (nextPlans: RealTestPlanDto[]) => {
+      setPlansByTarget((prev) => {
+        const updated = { ...prev, [targetKey]: nextPlans };
+        try {
+          window.localStorage.setItem("rd.labTargetPlans", JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+        return updated;
+      });
+    },
+    [targetKey],
+  );
+
+  const handleAddTargetPlan = useCallback(() => {
+    const name =
+      newPlanName.trim() ||
+      (newPlanMode === "direct"
+        ? "局域网直连"
+        : newPlanMode === "tailscale"
+          ? "Tailscale 跨网"
+          : newPlanMode === "relay"
+            ? "自建中转"
+            : "EasyTier 组网");
+    const addr = newPlanAddr.trim() || baseTargetIp;
+    const relay = newPlanRelay.trim() || defaultRelayAddr;
+    if (newPlanMode !== "relay" && !addr) {
+      pushLog("warn", "新增方案失败：请填写目标 IP 地址");
+      return;
+    }
+    if (newPlanMode === "relay" && !relay) {
+      pushLog("warn", "新增中转方案失败：请填写中转服务器地址（如 1.2.3.4:21118 或 https://xxx.workers.dev）");
+      return;
+    }
+    const plan: RealTestPlanDto = {
+      planId: `plan-${Date.now().toString(36)}`,
+      planName: name,
+      mode: newPlanMode,
+      targetAddr: addr,
+      relayAddr: relay,
+      rounds: 3,
+    };
+    savePlansForTarget([...activePlans, plan]);
+    setNewPlanName("");
+    setNewPlanAddr("");
+    setNewPlanRelay("");
+    setShowAddPlan(false);
+    pushLog("ok", `已为目标「${effectiveTargetLabel}」绑定新方案：${plan.planName}（${plan.mode.toUpperCase()}）`);
+  }, [
+    activePlans,
+    baseTargetIp,
+    defaultRelayAddr,
+    effectiveTargetLabel,
+    newPlanAddr,
+    newPlanMode,
+    newPlanName,
+    newPlanRelay,
+    pushLog,
+    savePlansForTarget,
+  ]);
+
+  const handleDeleteTargetPlan = useCallback(
+    (planId: string) => {
+      savePlansForTarget(activePlans.filter((p) => p.planId !== planId));
+      setRealResults((prev) => {
+        const copy = { ...prev };
+        delete copy[planId];
+        return copy;
+      });
+    },
+    [activePlans, savePlansForTarget],
+  );
+
+  const runSinglePlanReal = useCallback(
+    async (plan: RealTestPlanDto): Promise<RealPlanProbeResultDto | null> => {
+      setTestingPlanId(plan.planId);
+      pushLog(
+        "info",
+        `▶ 正在真实探测方案「${plan.planName}」（${plan.mode.toUpperCase()} · ${
+          plan.mode === "relay" ? plan.relayAddr : plan.targetAddr
+        }）…`,
+      );
+      try {
+        const res = await labProbeTargetPlan(plan);
+        setRealResults((prev) => ({ ...prev, [plan.planId]: res }));
+        for (const line of res.logs) {
+          const lvl = line.includes("✗") ? "warn" : line.includes("✓") || line.startsWith("结论") && res.ok ? "ok" : "info";
+          pushLog(lvl, `[${plan.planName}] ${line}`);
+        }
+        if (plan.mode === "tailscale" && plan.targetAddr.startsWith("100.")) {
+          try {
+            const ts = await tailscalePing(plan.targetAddr);
+            pushLog("ok", `[${plan.planName}] Tailscale 路径诊断：${ts}`);
+          } catch {
+            // optional
+          }
+        }
+        return res;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        pushLog("warn", `[${plan.planName}] 实测调用异常：${msg}`);
+        return null;
+      } finally {
+        setTestingPlanId(null);
+      }
+    },
+    [pushLog],
+  );
+
+  const runAllTargetPlansReal = useCallback(async () => {
+    if (activePlans.length === 0) {
+      pushLog("warn", "当前目标还没有绑定任何测试方案，请先点「+ 新增绑定方案」");
+      return;
+    }
+    setRunningRealBatch(true);
+    pushLog(
+      "info",
+      `════════ 开始自动化实测目标「${effectiveTargetLabel}」（共 ${activePlans.length} 个绑定方案）════════`,
+    );
+    const collected: RealPlanProbeResultDto[] = [];
+    for (const plan of activePlans) {
+      const res = await runSinglePlanReal(plan);
+      if (res) collected.push(res);
+    }
+    const reachable = collected
+      .filter((r) => r.ok && r.avgRttMs !== null)
+      .sort(
+        (a, b) =>
+          a.lossPct - b.lossPct ||
+          (a.avgRttMs ?? 9999) - (b.avgRttMs ?? 9999),
+      );
+    if (reachable.length > 0 && reachable[0]) {
+      const best = reachable[0];
+      pushLog(
+        "ok",
+        `🏆 自动实测完成！最优方案：「${best.planName}」（均延迟 ${best.avgRttMs}ms，抖动 ${best.jitterMs ?? 0}ms，丢包 ${best.lossPct}%）`,
+      );
+    } else {
+      pushLog(
+        "warn",
+        "自动实测完成：所有已绑定方案均不可达，请检查对方设备是否开机、软件是否运行或尝试添加中转方案。",
+      );
+    }
+    setRunningRealBatch(false);
+  }, [activePlans, effectiveTargetLabel, pushLog, runSinglePlanReal]);
+
+  const bestRealPlanId = (() => {
+    const okList = activePlans
+      .map((p) => realResults[p.planId])
+      .filter((r): r is RealPlanProbeResultDto => Boolean(r && r.ok && r.avgRttMs !== null))
+      .sort(
+        (a, b) =>
+          a.lossPct - b.lossPct ||
+          (a.avgRttMs ?? 9999) - (b.avgRttMs ?? 9999),
+      );
+    return okList[0]?.planId ?? null;
+  })();
+
+  // 保留兼容引用避免未用告警
+  void probeDevice;
 
   const applyTransportNow = useCallback(
     async (next: LabTransportConfig) => {
@@ -786,28 +962,22 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         </div>
       </header>
 
-      {/* ── 可视化网络拓扑图 + 目标实测条（控制端 → 中转/节点 → 被控端） ── */}
+      {/* ── 主工作台：按目标管理多方案 + 真实自动化测速 + 实时动态日志 ── */}
       <div
         style={{
-          margin: "0 0 12px",
-          padding: "12px 14px",
-          borderRadius: "10px",
+          margin: "0 0 14px",
+          padding: "16px",
+          borderRadius: "12px",
           background: "rgba(255, 255, 255, 0.03)",
-          border: "1px solid rgba(255, 255, 255, 0.09)",
+          border: "1px solid rgba(255, 255, 255, 0.1)",
           display: "flex",
           flexDirection: "column",
-          gap: "10px",
+          gap: "14px",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "8px",
-            alignItems: "center",
-          }}
-        >
-          <strong style={{ fontSize: "13px" }}>🎯 测试目标：</strong>
+        {/* 1) 选择已有目标 或 手动输入 IP */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
+          <strong style={{ fontSize: "14px" }}>① 测试目标：</strong>
           <select
             className={styles.select}
             aria-label="选择要测试的被控设备"
@@ -815,10 +985,11 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             onChange={(e) => {
               setTargetDeviceId(e.target.value);
               setCustomIp("");
+              setRealResults({});
               pushLog("info", "已切换测试目标设备");
             }}
           >
-            <option value="">本机真栈沙盒（免连外机）</option>
+            <option value="">手动输入目标 IP</option>
             {savedDevices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name} ({d.addr.replace(/:21118$/, "")}){d.online ? " · 在线" : ""}
@@ -829,38 +1000,125 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             type="text"
             value={customIp}
             onChange={(e) => setCustomIp(e.currentTarget.value)}
-            placeholder="或直接输入目标 IP（如 100.81.205.0，免填端口）"
+            placeholder="或手动输入目标 IP（如 100.81.205.0 / 192.168.1.10，免填端口）"
             aria-label="自定义测试目标 IP"
             style={{
-              flex: "1 1 200px",
+              flex: "1 1 220px",
               minWidth: 0,
-              padding: "6px 10px",
-              borderRadius: "6px",
-              border: "1px solid rgba(255, 255, 255, 0.14)",
-              background: "rgba(0, 0, 0, 0.25)",
+              padding: "7px 10px",
+              borderRadius: "8px",
+              border: "1px solid rgba(255, 255, 255, 0.16)",
+              background: "rgba(0, 0, 0, 0.28)",
               color: "inherit",
-              fontSize: "12px",
+              fontSize: "13px",
             }}
           />
           <button
             type="button"
             className={styles.btn}
-            disabled={probingTarget}
-            onClick={() => void handleProbeTarget()}
+            onClick={() => setShowAddPlan((v) => !v)}
           >
-            {probingTarget ? "⏳ 实测中…" : "🔍 实测连通与延迟"}
+            + 绑定新方案
           </button>
           <button
             type="button"
             className={`${styles.btn} ${styles.btnPrimary}`}
-            disabled={allBenchRunning}
-            onClick={() => void handleBenchmarkAll()}
+            disabled={runningRealBatch || testingPlanId !== null}
+            onClick={() => void runAllTargetPlansReal()}
           >
-            {allBenchRunning ? "⏳ 全方案测速中…" : "🚀 全方案自动测速优选"}
+            {runningRealBatch ? "⏳ 正在自动实测…" : "▶ 一键自动实测全部方案"}
           </button>
         </div>
 
-        {/* 3 节点直观拓扑图：控制端 ──► 中转/链路节点 ──► 被控端 */}
+        {/* 新增绑定方案表单（1 个目标可绑定任意多个方案） */}
+        {showAddPlan && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "8px",
+              padding: "12px",
+              borderRadius: "8px",
+              background: "rgba(61, 126, 255, 0.08)",
+              border: "1px solid rgba(61, 126, 255, 0.28)",
+              alignItems: "center",
+            }}
+          >
+            <input
+              type="text"
+              value={newPlanName}
+              onChange={(e) => setNewPlanName(e.currentTarget.value)}
+              placeholder="方案名（如：公司 Tailscale / 香港中转）"
+              aria-label="新绑定方案名称"
+              style={{
+                flex: "1 1 160px",
+                padding: "6px 10px",
+                borderRadius: "6px",
+                border: "1px solid rgba(255, 255, 255, 0.16)",
+                background: "rgba(0, 0, 0, 0.3)",
+                color: "inherit",
+                fontSize: "12px",
+              }}
+            />
+            <select
+              className={styles.select}
+              aria-label="新绑定方案类型"
+              value={newPlanMode}
+              onChange={(e) =>
+                setNewPlanMode(e.target.value as RealTestPlanDto["mode"])
+              }
+            >
+              <option value="direct">局域网 / 直连 (QUIC)</option>
+              <option value="tailscale">Tailscale 跨网</option>
+              <option value="relay">自建中转服务器</option>
+              <option value="easytier">EasyTier 组网</option>
+            </select>
+            {newPlanMode === "relay" ? (
+              <input
+                type="text"
+                value={newPlanRelay}
+                onChange={(e) => setNewPlanRelay(e.currentTarget.value)}
+                placeholder="中转地址（如 1.2.3.4:21118 或 https://xxx.workers.dev）"
+                aria-label="新绑定方案中转地址"
+                style={{
+                  flex: "1 1 220px",
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(255, 255, 255, 0.16)",
+                  background: "rgba(0, 0, 0, 0.3)",
+                  color: "inherit",
+                  fontSize: "12px",
+                }}
+              />
+            ) : (
+              <input
+                type="text"
+                value={newPlanAddr}
+                onChange={(e) => setNewPlanAddr(e.currentTarget.value)}
+                placeholder={`目标 IP（留空默认 ${baseTargetIp || "192.168.1.10"}）`}
+                aria-label="新绑定方案目标地址"
+                style={{
+                  flex: "1 1 180px",
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(255, 255, 255, 0.16)",
+                  background: "rgba(0, 0, 0, 0.3)",
+                  color: "inherit",
+                  fontSize: "12px",
+                }}
+              />
+            )}
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnPrimary}`}
+              onClick={handleAddTargetPlan}
+            >
+              保存绑定
+            </button>
+          </div>
+        )}
+
+        {/* 2) 3 节点真实链路拓扑图 */}
         <div
           aria-label="控制端到被控端网络拓扑图"
           style={{
@@ -870,7 +1128,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             gap: "8px",
             padding: "10px",
             borderRadius: "8px",
-            background: "rgba(0, 0, 0, 0.22)",
+            background: "rgba(0, 0, 0, 0.24)",
           }}
         >
           <div
@@ -882,49 +1140,42 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             }}
           >
             <div style={{ fontSize: "12px", fontWeight: 600 }}>💻 控制端（本机）</div>
-            <div style={{ fontSize: "11px", opacity: 0.8, marginTop: "2px" }}>
-              WebCodecs 解码 · {decodeStats.decodeMs.toFixed(1)}ms
-            </div>
-            <div style={{ fontSize: "11px", opacity: 0.7 }}>
-              目标 {codec.maxFps}fps · {(codec.bitrateKbps / 1000).toFixed(1)} Mbps
+            <div style={{ fontSize: "11px", opacity: 0.78, marginTop: "2px" }}>
+              发起真实多轮探测（3 轮 / 方案）
             </div>
           </div>
 
           <div style={{ textAlign: "center", fontSize: "11px", opacity: 0.85 }}>
             <div>━━►</div>
-            <div>{transport.congestion.toUpperCase()}</div>
+            <div>{testingPlanId ? "实测中…" : "QUIC/TCP"}</div>
           </div>
 
           <div
             style={{
               padding: "8px 10px",
               borderRadius: "8px",
-              border: netem.enabled
-                ? "1px solid rgba(248, 81, 73, 0.6)"
-                : "1px solid rgba(63, 185, 80, 0.45)",
-              background: netem.enabled
-                ? "rgba(248, 81, 73, 0.1)"
-                : "rgba(63, 185, 80, 0.08)",
+              border: bestRealPlanId
+                ? "1px solid rgba(63, 185, 80, 0.55)"
+                : "1px solid rgba(255, 255, 255, 0.15)",
+              background: bestRealPlanId
+                ? "rgba(63, 185, 80, 0.09)"
+                : "rgba(255, 255, 255, 0.03)",
               textAlign: "center",
             }}
           >
             <div style={{ fontSize: "12px", fontWeight: 600 }}>
-              🌐 传输节点：{live?.routeTag ?? transport.routeMode.toUpperCase()}
+              🌐 {bestRealPlanId ? `最优：${realResults[bestRealPlanId]?.planName}` : `已绑定 ${activePlans.length} 个方案`}
             </div>
             <div style={{ fontSize: "11px", opacity: 0.85, marginTop: "2px" }}>
-              延迟 RTT {live?.rttMs ?? 1}ms · 实测 {((live?.videoKbps ?? 0) / 1000).toFixed(1)} Mbps ·{" "}
-              {transport.mediaFec ? `RS-FEC +${transport.fecOverheadPct}%` : "QUIC 可靠流"}
-            </div>
-            <div style={{ fontSize: "11px", opacity: 0.72 }}>
-              {netem.enabled
-                ? `⚠️ 弱网模拟中：+${netem.delayMs}ms / 丢包 ${netem.lossPct}%`
-                : "真实链路直通（未叠加人为丢包）"}
+              {bestRealPlanId
+                ? `实测均延迟 ${realResults[bestRealPlanId]?.avgRttMs}ms · 抖动 ${realResults[bestRealPlanId]?.jitterMs ?? 0}ms · 丢包 ${realResults[bestRealPlanId]?.lossPct}%`
+                : "点击「一键自动实测全部方案」获取真实网络延迟与丢包"}
             </div>
           </div>
 
           <div style={{ textAlign: "center", fontSize: "11px", opacity: 0.85 }}>
             <div>━━►</div>
-            <div>{live?.hardwareEnc === false ? "软件编码" : "硬件编码"}</div>
+            <div>真实链路</div>
           </div>
 
           <div
@@ -935,25 +1186,181 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               background: "rgba(188, 140, 255, 0.08)",
             }}
           >
-            <div style={{ fontSize: "12px", fontWeight: 600 }}>🖥️ 被控端</div>
+            <div style={{ fontSize: "12px", fontWeight: 600 }}>🖥️ 被控端目标</div>
             <div style={{ fontSize: "11px", opacity: 0.85, marginTop: "2px" }}>
               {effectiveTargetLabel}
-            </div>
-            <div style={{ fontSize: "11px", opacity: 0.7 }}>
-              {live?.is444 ? "YUV444 锐利" : "YUV420 高效"} · QOI 瓦片
-              {codec.tileEnabled ? "开" : "关"}
             </div>
           </div>
         </div>
 
-        {probeSummary && (
-          <div style={{ fontSize: "12px", opacity: 0.9 }}>
-            <strong>📡 最近实测结果：</strong>
-            {probeSummary}
+        {/* 3) 当前目标绑定的多个方案卡片列表 */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+            gap: "10px",
+          }}
+        >
+          {activePlans.map((plan) => {
+            const res = realResults[plan.planId];
+            const isBest = bestRealPlanId === plan.planId;
+            const isRunning = testingPlanId === plan.planId;
+            return (
+              <div
+                key={plan.planId}
+                style={{
+                  padding: "12px",
+                  borderRadius: "10px",
+                  border: isBest
+                    ? "1px solid rgba(63, 185, 80, 0.65)"
+                    : isRunning
+                      ? "1px solid rgba(88, 166, 255, 0.7)"
+                      : "1px solid rgba(255, 255, 255, 0.1)",
+                  background: isBest
+                    ? "rgba(63, 185, 80, 0.07)"
+                    : "rgba(0, 0, 0, 0.22)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                  <strong style={{ fontSize: "13px" }}>
+                    {isBest ? "🏆 " : ""}
+                    {plan.planName}
+                  </strong>
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      padding: "2px 6px",
+                      borderRadius: "999px",
+                      background: "rgba(255, 255, 255, 0.08)",
+                    }}
+                  >
+                    {plan.mode.toUpperCase()}
+                  </span>
+                </div>
+                <div style={{ fontSize: "12px", opacity: 0.78, fontFamily: "monospace" }}>
+                  {plan.mode === "relay" ? `中转: ${plan.relayAddr}` : `地址: ${plan.targetAddr}`}
+                </div>
+                <div style={{ fontSize: "12px", minHeight: "34px" }}>
+                  {isRunning ? (
+                    <span style={{ color: "#58a6ff" }}>⏳ 正在真实探测（3 轮）…</span>
+                  ) : res ? (
+                    res.ok ? (
+                      <span style={{ color: "#3fb950" }}>
+                        ✓ 可达 {res.reachableCount}/{res.totalProbes} · 均延迟 <b>{res.avgRttMs}ms</b>（最小 {res.minRttMs}ms / 抖动 {res.jitterMs ?? 0}ms / 丢包 {res.lossPct}%）
+                      </span>
+                    ) : (
+                      <span style={{ color: "#f85149" }}>✗ {res.routeDetail}</span>
+                    )
+                  ) : (
+                    <span style={{ opacity: 0.55 }}>尚未实测（点击下方「单测」或顶部一键实测）</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "6px", marginTop: "auto" }}>
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    style={{ flex: 1 }}
+                    disabled={runningRealBatch || testingPlanId !== null}
+                    onClick={() => void runSinglePlanReal(plan)}
+                  >
+                    {isRunning ? "实测中…" : "单测此方案"}
+                  </button>
+                  {activePlans.length > 1 && (
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      disabled={runningRealBatch || testingPlanId !== null}
+                      onClick={() => handleDeleteTargetPlan(plan.planId)}
+                    >
+                      删除
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 4) 实时动态测试日志（逐轮真实输出） */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontSize: "13px" }}>📋 实时动态测试日志（真实探测逐轮输出）</strong>
+            <button
+              type="button"
+              className={styles.btn}
+              onClick={() => setEventLogs([])}
+            >
+              清空日志
+            </button>
           </div>
-        )}
+          <div
+            role="log"
+            aria-live="polite"
+            style={{
+              maxHeight: "220px",
+              overflowY: "auto",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              fontSize: "12px",
+              lineHeight: 1.6,
+              background: "rgba(0, 0, 0, 0.32)",
+              border: "1px solid rgba(255, 255, 255, 0.08)",
+              borderRadius: "8px",
+              padding: "10px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "3px",
+            }}
+          >
+            {eventLogs.length === 0 ? (
+              <span style={{ opacity: 0.55 }}>暂无日志，点击「一键自动实测全部方案」开始真实探测。</span>
+            ) : (
+              eventLogs.map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    color:
+                      entry.level === "ok"
+                        ? "#3fb950"
+                        : entry.level === "warn"
+                          ? "#f85149"
+                          : "inherit",
+                  }}
+                >
+                  <span style={{ opacity: 0.55 }}>[{entry.time}]</span> {entry.text}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </div>
 
+      {/* ── 高级底层调优与协议微操（默认折叠收起，不干扰日常真实测速） ── */}
+      <div style={{ marginBottom: "10px" }}>
+        <button
+          type="button"
+          className={styles.btn}
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen((v) => !v)}
+          style={{ width: "100%", justifyContent: "space-between", padding: "10px 14px" }}
+        >
+          <span>
+            ⚙️ 高级底层调优与协议微操（编码码控 / RS-FEC / Netem 弱网模拟 / 1:1 微距镜）
+          </span>
+          <span>{advancedOpen ? "▲ 收起高级区" : "▼ 展开高级调优"}</span>
+        </button>
+      </div>
+
+      {advancedOpen && (
+        <>
       {/* ── 实时链路解剖拓扑条 (Live Pipeline Anatomy) ── */}
       <div className={styles.anatomyBar} role="status" aria-label="实时链路拓扑解剖">
         <div className={styles.stageBox}>
@@ -1645,63 +2052,10 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               </>
             )}
           </div>
-
-          {/* 📋 实时诊断与调参日志流 */}
-          <div className={styles.abCard}>
-            <div className={styles.magHeader}>
-              <div>
-                <h2 className={styles.knobTitle}>📋 实时测速与调参消息日志</h2>
-                <span className={styles.oscSub}>
-                  记录每次探测、选路切换与参数调节的具体效果，方便回看发生了什么
-                </span>
-              </div>
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => setEventLogs([])}
-              >
-                清空日志
-              </button>
-            </div>
-            <div
-              role="log"
-              aria-live="polite"
-              style={{
-                maxHeight: "180px",
-                overflowY: "auto",
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                fontSize: "12px",
-                background: "rgba(0, 0, 0, 0.25)",
-                borderRadius: "6px",
-                padding: "8px 10px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "4px",
-              }}
-            >
-              {eventLogs.length === 0 ? (
-                <span style={{ opacity: 0.6 }}>暂无日志，点击上方「实测连通」或拨动任意参数即可查看记录。</span>
-              ) : (
-                eventLogs.map((entry) => (
-                  <div
-                    key={entry.id}
-                    style={{
-                      color:
-                        entry.level === "ok"
-                          ? "#3fb950"
-                          : entry.level === "warn"
-                            ? "#f85149"
-                            : "inherit",
-                    }}
-                  >
-                    <span style={{ opacity: 0.65 }}>[{entry.time}]</span> {entry.text}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
         </div>
       </div>
+        </>
+      )}
     </section>
   );
 }

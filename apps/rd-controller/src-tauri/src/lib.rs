@@ -199,6 +199,7 @@ pub fn run() {
             commands::lab::lab_list_profiles,
             commands::lab::lab_save_profile,
             commands::lab::lab_delete_profile,
+            commands::lab::lab_probe_target_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

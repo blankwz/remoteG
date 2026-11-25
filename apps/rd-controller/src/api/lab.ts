@@ -180,6 +180,39 @@ export function labListProfiles(): Promise<LabProfile[]> {
   return call("lab_list_profiles", {});
 }
 
+export interface RealTestPlanDto {
+  planId: string;
+  planName: string;
+  mode: "direct" | "tailscale" | "relay" | "easytier";
+  targetAddr: string;
+  relayAddr: string;
+  rounds: number;
+}
+
+export interface RealPlanProbeResultDto {
+  planId: string;
+  planName: string;
+  mode: string;
+  resolvedAddr: string;
+  ok: boolean;
+  reachableCount: number;
+  totalProbes: number;
+  lossPct: number;
+  minRttMs: number | null;
+  avgRttMs: number | null;
+  maxRttMs: number | null;
+  jitterMs: number | null;
+  peerFingerprint: string | null;
+  routeDetail: string;
+  logs: string[];
+}
+
+export function labProbeTargetPlan(
+  plan: RealTestPlanDto,
+): Promise<RealPlanProbeResultDto> {
+  return call("lab_probe_target_plan", { plan });
+}
+
 export function labSaveProfile(profile: LabProfile): Promise<LabProfile[]> {
   return call("lab_save_profile", { profile });
 }

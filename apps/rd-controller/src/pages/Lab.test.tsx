@@ -145,9 +145,11 @@ afterEach(() => {
 });
 
 describe("RD Geek Lab 极客操控台", () => {
-  it("渲染链路实时解剖条、四组硬核旋钮与 1:1 微距像素检视镜", async () => {
+  it("默认收起高级调优区；展开后渲染链路实时解剖条、四组硬核旋钮与 1:1 微距像素检视镜", async () => {
     render(<Lab deviceId="dev-studio" />);
     expect(await screen.findByText(/方案实验室 · 真栈操控台/)).toBeTruthy();
+    expect(screen.queryByText(/1:1 微距像素检视镜/)).toBeNull();
+    fireEvent.click(screen.getByText(/展开高级调优/));
     expect(await screen.findByText(/h264_nvenc/)).toBeTruthy();
     expect(screen.getByText(/1:1 微距像素检视镜/)).toBeTruthy();
   });
@@ -155,6 +157,7 @@ describe("RD Geek Lab 极客操控台", () => {
   it("拨动旋钮直接调用底层 Tauri IPC (选路/热调/Netem/Panic Reset/A-B对决)", async () => {
     render(<Lab deviceId="dev-studio" />);
     await screen.findByText(/方案实验室 · 真栈操控台/);
+    fireEvent.click(screen.getByText(/展开高级调优/));
 
     // 1) 强制切 STUN 打洞
     fireEvent.click(screen.getByText("STUN 打洞"));

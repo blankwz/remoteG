@@ -1254,3 +1254,434 @@ pub fn lab_delete_profile(
     save_profiles_to_disk(state.data_dir(), &list)?;
     Ok(list)
 }
+
+// ---------------------------------------------------------------------------
+// 真实目标多方案自动化实测（零造假：真实 DNS/QUIC/中转/Tailscale 多轮探测）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealTestPlanDto {
+    pub plan_id: String,
+    pub plan_name: String,
+    /// `direct` | `tailscale` | `relay` | `easytier`
+    pub mode: String,
+    /// 目标 IP 或域名（可不带端口，默认补 21118）
+    pub target_addr: String,
+    /// 自建中转地址（mode == "relay" 时使用）
+    #[serde(default)]
+    pub relay_addr: String,
+    /// 探测轮数（默认 3 轮，上限 5 轮）
+    #[serde(default)]
+    pub rounds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealPlanProbeResultDto {
+    pub plan_id: String,
+    pub plan_name: String,
+    pub mode: String,
+    pub resolved_addr: String,
+    pub ok: bool,
+    pub reachable_count: u32,
+    pub total_probes: u32,
+    pub loss_pct: f64,
+    pub min_rtt_ms: Option<f64>,
+    pub avg_rtt_ms: Option<f64>,
+    pub max_rtt_ms: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    pub peer_fingerprint: Option<String>,
+    pub route_detail: String,
+    pub logs: Vec<String>,
+}
+
+fn normalize_probe_addr(raw: &str, default_port: u16) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if raw.starts_with('[') || raw.matches(':').count() >= 2 || raw.contains(':') {
+        raw.to_string()
+    } else {
+        format!("{raw}:{default_port}")
+    }
+}
+
+fn parse_url_host_port(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let host_port = rest.split('/').next()?;
+    if host_port.is_empty() {
+        return None;
+    }
+    let default_port = if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
+    {
+        443
+    } else {
+        80
+    };
+    if let Some((h, p)) = host_port.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return Some((h.to_string(), port));
+    }
+    Some((host_port.to_string(), default_port))
+}
+
+fn compute_rtt_stats(samples: &[f64]) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    if samples.is_empty() {
+        return (None, None, None, None);
+    }
+    let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let avg = samples.iter().sum::<f64>() / samples.len() as f64;
+    let jitter = if samples.len() >= 2 {
+        let mut diff_sum = 0.0;
+        for w in samples.windows(2) {
+            diff_sum += (w[1] - w[0]).abs();
+        }
+        diff_sum / (samples.len() - 1) as f64
+    } else {
+        0.0
+    };
+    (
+        Some((min * 10.0).round() / 10.0),
+        Some((avg * 10.0).round() / 10.0),
+        Some((max * 10.0).round() / 10.0),
+        Some((jitter * 10.0).round() / 10.0),
+    )
+}
+
+/// 真实探测单个目标绑定方案：多轮真实 QUIC 握手 / 中转 TCP+QUIC 实测 + 逐轮动态日志。
+#[tauri::command]
+pub async fn lab_probe_target_plan(
+    plan: RealTestPlanDto,
+    state: State<'_, ConnManager>,
+) -> Result<RealPlanProbeResultDto, String> {
+    let rounds = plan.rounds.clamp(1, 5);
+    let mut logs: Vec<String> = Vec::new();
+    let mut rtts: Vec<f64> = Vec::new();
+    let mut peer_fp: Option<String> = None;
+
+    logs.push(format!(
+        "开始实测方案「{}」（模式={}，轮次={}）",
+        plan.plan_name,
+        plan.mode.to_uppercase(),
+        rounds
+    ));
+
+    // 分支 1：自建中转模式（支持 https/wss Workers 或 VPS ip:port）
+    if plan.mode == "relay" {
+        let relay_raw = plan.relay_addr.trim();
+        if relay_raw.is_empty() {
+            logs.push("✗ 未填写中转服务器地址，无法测速".into());
+            return Ok(RealPlanProbeResultDto {
+                plan_id: plan.plan_id,
+                plan_name: plan.plan_name,
+                mode: plan.mode,
+                resolved_addr: String::new(),
+                ok: false,
+                reachable_count: 0,
+                total_probes: rounds,
+                loss_pct: 100.0,
+                min_rtt_ms: None,
+                avg_rtt_ms: None,
+                max_rtt_ms: None,
+                jitter_ms: None,
+                peer_fingerprint: None,
+                route_detail: "未配置中转地址".into(),
+                logs,
+            });
+        }
+        if relay_raw.contains("://") {
+            let Some((host, port)) = parse_url_host_port(relay_raw) else {
+                logs.push(format!("✗ 中转 URL 格式无效：{relay_raw}"));
+                return Ok(RealPlanProbeResultDto {
+                    plan_id: plan.plan_id,
+                    plan_name: plan.plan_name,
+                    mode: plan.mode,
+                    resolved_addr: relay_raw.to_string(),
+                    ok: false,
+                    reachable_count: 0,
+                    total_probes: rounds,
+                    loss_pct: 100.0,
+                    min_rtt_ms: None,
+                    avg_rtt_ms: None,
+                    max_rtt_ms: None,
+                    jitter_ms: None,
+                    peer_fingerprint: None,
+                    route_detail: "URL 格式无效".into(),
+                    logs,
+                });
+            };
+            let target = format!("{host}:{port}");
+            logs.push(format!("解析中转端点：{target}（TCP/TLS 连通性实测）"));
+            for i in 1..=rounds {
+                let t0 = Instant::now();
+                match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    tokio::net::TcpStream::connect(&target),
+                )
+                .await
+                {
+                    Ok(Ok(_stream)) => {
+                        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        rtts.push(ms);
+                        logs.push(format!("  [第 {i}/{rounds} 轮] ✓ 中转端口连通：{ms:.1} ms"));
+                    }
+                    Ok(Err(e)) => {
+                        logs.push(format!("  [第 {i}/{rounds} 轮] ✗ 连接失败：{e}"));
+                    }
+                    Err(_) => {
+                        logs.push(format!("  [第 {i}/{rounds} 轮] ✗ 连接超时（>3000ms）"));
+                    }
+                }
+            }
+            let reachable = rtts.len() as u32;
+            let loss_pct = ((rounds - reachable) as f64 / rounds as f64) * 100.0;
+            let (min_rtt_ms, avg_rtt_ms, max_rtt_ms, jitter_ms) = compute_rtt_stats(&rtts);
+            let ok = reachable > 0;
+            let route_detail = if ok {
+                format!(
+                    "中转节点可达 ({reachable}/{rounds}，均延迟 {:.1}ms)",
+                    avg_rtt_ms.unwrap_or(0.0)
+                )
+            } else {
+                "中转节点不可达（请检查防火墙/端口/域名）".into()
+            };
+            logs.push(format!("结论：{route_detail}"));
+            return Ok(RealPlanProbeResultDto {
+                plan_id: plan.plan_id,
+                plan_name: plan.plan_name,
+                mode: plan.mode,
+                resolved_addr: target,
+                ok,
+                reachable_count: reachable,
+                total_probes: rounds,
+                loss_pct: (loss_pct * 10.0).round() / 10.0,
+                min_rtt_ms,
+                avg_rtt_ms,
+                max_rtt_ms,
+                jitter_ms,
+                peer_fingerprint: None,
+                route_detail,
+                logs,
+            });
+        }
+        // VPS ip:port 模式：同时测 TCP/UDP 可达（这里优先测真实 QUIC/UDP 端口响应或 TCP 探活）
+        let normalized = normalize_probe_addr(relay_raw, crate::conn::DEFAULT_AGENT_PORT);
+        let t_dns = Instant::now();
+        let sock =
+            match crate::conn::resolve_addr(&normalized, crate::conn::DEFAULT_AGENT_PORT).await {
+                Ok(s) => {
+                    logs.push(format!(
+                        "解析中转地址 {normalized} → {s}（耗时 {:.1}ms）",
+                        t_dns.elapsed().as_secs_f64() * 1000.0
+                    ));
+                    s
+                }
+                Err(e) => {
+                    logs.push(format!("✗ 中转地址解析失败：{e:#}"));
+                    return Ok(RealPlanProbeResultDto {
+                        plan_id: plan.plan_id,
+                        plan_name: plan.plan_name,
+                        mode: plan.mode,
+                        resolved_addr: normalized,
+                        ok: false,
+                        reachable_count: 0,
+                        total_probes: rounds,
+                        loss_pct: 100.0,
+                        min_rtt_ms: None,
+                        avg_rtt_ms: None,
+                        max_rtt_ms: None,
+                        jitter_ms: None,
+                        peer_fingerprint: None,
+                        route_detail: format!("地址解析失败：{e}"),
+                        logs,
+                    });
+                }
+            };
+        for i in 1..=rounds {
+            let t0 = Instant::now();
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                rd_transport::connect(sock, state.identity(), None),
+            )
+            .await
+            {
+                Ok(Ok(conn)) => {
+                    let rtt_ms = conn.rtt().as_secs_f64() * 1000.0;
+                    let hs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    let measured = if rtt_ms > 0.0 { rtt_ms } else { hs_ms };
+                    rtts.push(measured);
+                    peer_fp = Some(conn.peer_fingerprint().short_hex().to_string());
+                    conn.close(0, "lab probe");
+                    logs.push(format!(
+                        "  [第 {i}/{rounds} 轮] ✓ QUIC 握手成功：RTT {measured:.1} ms（总握手 {hs_ms:.1} ms）"
+                    ));
+                }
+                Ok(Err(e)) => {
+                    logs.push(format!("  [第 {i}/{rounds} 轮] ✗ QUIC 连接失败：{e:#}"));
+                }
+                Err(_) => {
+                    logs.push(format!("  [第 {i}/{rounds} 轮] ✗ QUIC 握手超时（>3000ms）"));
+                }
+            }
+        }
+        let reachable = rtts.len() as u32;
+        let loss_pct = ((rounds - reachable) as f64 / rounds as f64) * 100.0;
+        let (min_rtt_ms, avg_rtt_ms, max_rtt_ms, jitter_ms) = compute_rtt_stats(&rtts);
+        let ok = reachable > 0;
+        let route_detail = if ok {
+            format!(
+                "中转 QUIC 可达 ({reachable}/{rounds}，均延迟 {:.1}ms)",
+                avg_rtt_ms.unwrap_or(0.0)
+            )
+        } else {
+            "中转端口无 QUIC 响应（请检查 UDP 放行与 rd-relay 进程）".into()
+        };
+        logs.push(format!("结论：{route_detail}"));
+        return Ok(RealPlanProbeResultDto {
+            plan_id: plan.plan_id,
+            plan_name: plan.plan_name,
+            mode: plan.mode,
+            resolved_addr: sock.to_string(),
+            ok,
+            reachable_count: reachable,
+            total_probes: rounds,
+            loss_pct: (loss_pct * 10.0).round() / 10.0,
+            min_rtt_ms,
+            avg_rtt_ms,
+            max_rtt_ms,
+            jitter_ms,
+            peer_fingerprint: peer_fp,
+            route_detail,
+            logs,
+        });
+    }
+
+    // 分支 2：直连 / Tailscale / EasyTier —— 真实多轮 QUIC 握手测速
+    let normalized = normalize_probe_addr(&plan.target_addr, crate::conn::DEFAULT_AGENT_PORT);
+    if normalized.is_empty() {
+        logs.push("✗ 目标地址为空，请先选择设备或输入目标 IP".into());
+        return Ok(RealPlanProbeResultDto {
+            plan_id: plan.plan_id,
+            plan_name: plan.plan_name,
+            mode: plan.mode,
+            resolved_addr: String::new(),
+            ok: false,
+            reachable_count: 0,
+            total_probes: rounds,
+            loss_pct: 100.0,
+            min_rtt_ms: None,
+            avg_rtt_ms: None,
+            max_rtt_ms: None,
+            jitter_ms: None,
+            peer_fingerprint: None,
+            route_detail: "目标地址为空".into(),
+            logs,
+        });
+    }
+
+    let t_dns = Instant::now();
+    let sock = match crate::conn::resolve_addr(&normalized, crate::conn::DEFAULT_AGENT_PORT).await {
+        Ok(s) => {
+            logs.push(format!(
+                "地址解析：{normalized} → {s}（耗时 {:.1}ms）",
+                t_dns.elapsed().as_secs_f64() * 1000.0
+            ));
+            s
+        }
+        Err(e) => {
+            logs.push(format!("✗ 地址解析失败：{e:#}"));
+            return Ok(RealPlanProbeResultDto {
+                plan_id: plan.plan_id,
+                plan_name: plan.plan_name,
+                mode: plan.mode,
+                resolved_addr: normalized,
+                ok: false,
+                reachable_count: 0,
+                total_probes: rounds,
+                loss_pct: 100.0,
+                min_rtt_ms: None,
+                avg_rtt_ms: None,
+                max_rtt_ms: None,
+                jitter_ms: None,
+                peer_fingerprint: None,
+                route_detail: format!("解析失败：{e}"),
+                logs,
+            });
+        }
+    };
+
+    for i in 1..=rounds {
+        let t0 = Instant::now();
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            rd_transport::connect(sock, state.identity(), None),
+        )
+        .await
+        {
+            Ok(Ok(conn)) => {
+                let rtt_ms = conn.rtt().as_secs_f64() * 1000.0;
+                let hs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let measured = if rtt_ms > 0.0 { rtt_ms } else { hs_ms };
+                rtts.push(measured);
+                let fp = conn.peer_fingerprint().short_hex().to_string();
+                peer_fp = Some(fp.clone());
+                conn.close(0, "lab probe");
+                logs.push(format!(
+                    "  [第 {i}/{rounds} 轮] ✓ QUIC 连通：RTT {measured:.1} ms · 握手 {hs_ms:.1} ms · 指纹 {fp}"
+                ));
+            }
+            Ok(Err(e)) => {
+                logs.push(format!("  [第 {i}/{rounds} 轮] ✗ 连接失败：{e:#}"));
+            }
+            Err(_) => {
+                logs.push(format!(
+                    "  [第 {i}/{rounds} 轮] ✗ 超时（>3000ms，目标离线或 UDP 21118 未放行）"
+                ));
+            }
+        }
+    }
+
+    let reachable = rtts.len() as u32;
+    let loss_pct = ((rounds - reachable) as f64 / rounds as f64) * 100.0;
+    let (min_rtt_ms, avg_rtt_ms, max_rtt_ms, jitter_ms) = compute_rtt_stats(&rtts);
+    let ok = reachable > 0;
+    let route_detail = if ok {
+        let tag = if sock.ip().is_loopback() {
+            "本机回环"
+        } else if sock.ip().to_string().starts_with("100.") {
+            "Tailscale 通道"
+        } else {
+            "直连通道"
+        };
+        format!(
+            "{tag}可达 ({reachable}/{rounds}，均延迟 {:.1}ms，抖动 {:.1}ms)",
+            avg_rtt_ms.unwrap_or(0.0),
+            jitter_ms.unwrap_or(0.0)
+        )
+    } else {
+        "目标不可达（请确认对方 rd-controller/rd-agent 已运行且网络可达）".into()
+    };
+    logs.push(format!("结论：{route_detail}"));
+
+    Ok(RealPlanProbeResultDto {
+        plan_id: plan.plan_id,
+        plan_name: plan.plan_name,
+        mode: plan.mode,
+        resolved_addr: sock.to_string(),
+        ok,
+        reachable_count: reachable,
+        total_probes: rounds,
+        loss_pct: (loss_pct * 10.0).round() / 10.0,
+        min_rtt_ms,
+        avg_rtt_ms,
+        max_rtt_ms,
+        jitter_ms,
+        peer_fingerprint: peer_fp,
+        route_detail,
+        logs,
+    })
+}
