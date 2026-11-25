@@ -40,12 +40,16 @@ import {
 import { isTauriRuntime } from "../api/bridge";
 import {
   connectDevice,
+  easytierDetectStatus,
+  easytierGenerateInvite,
+  easytierJoinInvite,
   editDevice,
   getRelayAddr,
   listDevices,
   probeDevice,
   tailscalePing,
   type DeviceDto,
+  type EasyTierStatusDto,
 } from "../api/devices";
 import { deployRelaySsh } from "../api/relayDeploy";
 import {
@@ -541,6 +545,11 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [batchNodeText, setBatchNodeText] = useState("");
   const [probingPool, setProbingPool] = useState(false);
   const [probingNodeId, setProbingNodeId] = useState<string | null>(null);
+  const [etExpanded, setEtExpanded] = useState(false);
+  const [etStatus, setEtStatus] = useState<EasyTierStatusDto | null>(null);
+  const [etBusy, setEtBusy] = useState(false);
+  const [etJoinInput, setEtJoinInput] = useState("");
+  const [etInviteCode, setEtInviteCode] = useState("");
   const [smartDiscovering, setSmartDiscovering] = useState(false);
   const [smartHint, setSmartHint] = useState<{
     level: "ok" | "suggest" | "warn";
@@ -610,6 +619,12 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             return next;
           });
         }
+      })
+      .catch(() => undefined);
+    void easytierDetectStatus()
+      .then((st) => {
+        setEtStatus(st);
+        if (st.inviteCode) setEtInviteCode(st.inviteCode);
       })
       .catch(() => undefined);
   }, [targetDeviceId]);
@@ -1302,6 +1317,88 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       setSmartHint(null);
     },
     [handleBindNodeToTarget, handleConfirmPlan],
+  );
+
+  // 方案 B：EasyTier 一键组网口令（生成 / 加入 / 刷新在线 10.126.x.x 成员）
+  const handleRefreshEtStatus = useCallback(async () => {
+    setEtBusy(true);
+    try {
+      const st = await easytierDetectStatus();
+      setEtStatus(st);
+      if (st.inviteCode) setEtInviteCode(st.inviteCode);
+      pushLog(
+        "ok",
+        `[EasyTier] 检测完成：${st.enabled ? `网络 ${st.networkName} · 本机 ${st.virtualIp || "待重启分配"} · 在线对端 ${st.peers.length} 台` : "未启用"}`,
+      );
+    } catch (e) {
+      pushLog("warn", `[EasyTier] 检测失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEtBusy(false);
+    }
+  }, [pushLog]);
+
+  const handleGenerateEtInvite = useCallback(async () => {
+    setEtBusy(true);
+    try {
+      const bestEtPeers = serverPool
+        .filter((n) => inferNodeKind(n) === "easytier" && n.status !== "fail")
+        .sort((a, b) => (a.lastRttMs ?? 9999) - (b.lastRttMs ?? 9999))
+        .slice(0, 3)
+        .map((n) => n.addr);
+      const res = await easytierGenerateInvite(bestEtPeers);
+      setEtInviteCode(res.inviteCode);
+      showToast(res.hint);
+      pushLog("ok", `[EasyTier] ${res.hint}`);
+      const st = await easytierDetectStatus().catch(() => null);
+      if (st) setEtStatus(st);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(`生成口令失败：${msg}`);
+      pushLog("warn", `[EasyTier] 生成口令失败：${msg}`);
+    } finally {
+      setEtBusy(false);
+    }
+  }, [pushLog, serverPool, showToast]);
+
+  const handleJoinEtInvite = useCallback(async () => {
+    const code = etJoinInput.trim();
+    if (!code) {
+      showToast("请先粘贴对方发来的 rd-et:// 组网口令");
+      return;
+    }
+    setEtBusy(true);
+    try {
+      const res = await easytierJoinInvite(code);
+      setEtInviteCode(res.inviteCode);
+      setEtJoinInput("");
+      showToast(res.hint);
+      pushLog("ok", `[EasyTier] ${res.hint}`);
+      const st = await easytierDetectStatus().catch(() => null);
+      if (st) setEtStatus(st);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(`加入失败：${msg}`);
+      pushLog("warn", `[EasyTier] 加入失败：${msg}`);
+    } finally {
+      setEtBusy(false);
+    }
+  }, [etJoinInput, pushLog, showToast]);
+
+  const handleBindEtPeerIp = useCallback(
+    (hostname: string, ipv4: string) => {
+      const plan: RealTestPlanDto = {
+        planId: `plan-et-${Date.now()}`,
+        planName: `EasyTier 直连 (${hostname})`,
+        mode: "easytier",
+        targetAddr: ipv4,
+        relayAddr: "",
+        rounds: 3,
+      };
+      savePlansForTarget([...activePlans, plan]);
+      showToast(`已绑定 EasyTier 内网 IP ${ipv4}（彻底绕开 Tailscale）`);
+      pushLog("ok", `已将 EasyTier 成员「${hostname}」(${ipv4}) 绑定为当前目标测速方案`);
+    },
+    [activePlans, pushLog, savePlansForTarget, showToast],
   );
 
   // 内联 SSH 一键上传代码、启动打洞/中转服务器并自动入池+实测连通
@@ -2273,6 +2370,145 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             </div>
           )}
             </>
+          )}
+        </div>
+
+        {/* 方案 B：EasyTier 双端一键组网（生成/粘贴口令，双端自动分配 10.126.x.x 彻底脱离 Tailscale 卡顿） */}
+        <div
+          style={{
+            padding: "10px 12px",
+            borderRadius: "10px",
+            background: "rgba(255, 255, 255, 0.025)",
+            border: "1px solid rgba(255, 255, 255, 0.09)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+              <strong style={{ fontSize: "13px" }}>
+                EasyTier 双端一键组网（摆脱 Tailscale 绕道卡顿）
+              </strong>
+              <span style={{ fontSize: "11.5px", color: etStatus?.enabled ? "#3fb950" : "inherit", opacity: etStatus?.enabled ? 1 : 0.65 }}>
+                {etStatus?.enabled
+                  ? `已加入 ${etStatus.networkName} · 本机 ${etStatus.virtualIp || "重启后分配 10.126.x.x"} · 对端 ${etStatus.peers.length} 台`
+                  : "双端粘贴同一条口令，自动分配 10.126.x.x 直连内网 IP"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className={styles.btn}
+              aria-expanded={etExpanded}
+              onClick={() => setEtExpanded((v) => !v)}
+            >
+              {etExpanded ? "▲ 收起组网" : "▼ 展开口令组网"}
+            </button>
+          </div>
+
+          {etExpanded && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {etStatus && !etStatus.installed && (
+                <div style={{ fontSize: "12px", padding: "8px 10px", borderRadius: "6px", background: "rgba(229, 181, 103, 0.1)", border: "1px solid rgba(229, 181, 103, 0.35)" }}>
+                  本机未检测到 <code>easytier-core</code>：请先下载 EasyTier（<code>easytier-core</code> + <code>easytier-cli</code>）放入软件配置目录的 <code>tools</code> 文件夹或系统 PATH，即可自动识别。
+                </div>
+              )}
+
+              {/* A 端：生成组网口令 */}
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnPrimary}`}
+                  disabled={etBusy}
+                  onClick={() => void handleGenerateEtInvite()}
+                >
+                  {etBusy ? "处理中…" : "生成组网口令（创建网络）"}
+                </button>
+                {etInviteCode && (
+                  <>
+                    <input
+                      type="text"
+                      readOnly
+                      value={etInviteCode}
+                      aria-label="当前 EasyTier 组网口令"
+                      style={{ flex: "1 1 240px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(63,185,80,0.4)", background: "rgba(0,0,0,0.3)", color: "#3fb950", fontFamily: "monospace", fontSize: "11.5px" }}
+                    />
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(etInviteCode);
+                        showToast("已复制组网口令，发给对方粘贴加入即可");
+                      }}
+                    >
+                      复制口令
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* B 端：粘贴口令加入 */}
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                <input
+                  type="text"
+                  value={etJoinInput}
+                  onChange={(e) => setEtJoinInput(e.currentTarget.value)}
+                  placeholder="粘贴对方发来的 rd-et://... 组网口令，一键加入同一内网"
+                  aria-label="粘贴 EasyTier 组网口令"
+                  style={{ flex: "1 1 260px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+                />
+                <button
+                  type="button"
+                  className={styles.btn}
+                  disabled={etBusy}
+                  onClick={() => void handleJoinEtInvite()}
+                >
+                  一键加入组网
+                </button>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  disabled={etBusy}
+                  onClick={() => void handleRefreshEtStatus()}
+                >
+                  刷新在线成员
+                </button>
+              </div>
+
+              {/* 在线组网成员（直接绑定对方的 10.126.x.x） */}
+              {etStatus && etStatus.peers.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                  {etStatus.peers.map((p) => (
+                    <div
+                      key={p.ipv4}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        padding: "6px 10px",
+                        borderRadius: "8px",
+                        border: "1px solid rgba(63,185,80,0.4)",
+                        background: "rgba(0,0,0,0.28)",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <strong>{p.hostname}</strong>
+                      <code style={{ color: "#58a6ff" }}>{p.ipv4}</code>
+                      <span style={{ opacity: 0.78 }}>
+                        {p.cost}{p.latencyMs !== null ? ` · ${p.latencyMs}ms` : ""}
+                      </span>
+                      <button
+                        type="button"
+                        className={styles.btn}
+                        onClick={() => handleBindEtPeerIp(p.hostname, p.ipv4)}
+                      >
+                        + 绑定此 IP
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
 

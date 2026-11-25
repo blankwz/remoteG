@@ -1469,3 +1469,400 @@ pub fn media_fec_setting(data_dir: &Path) -> bool {
         .and_then(|v| v.get("media_fec").and_then(|b| b.as_bool()))
         .unwrap_or(false)
 }
+
+// ---------------------------------------------------------------------------
+// 方案 B：EasyTier 一键组网口令（rd-et://...）+ 本机环境检测 + 在线成员实时查询
+// ---------------------------------------------------------------------------
+
+const B64_URL_TABLE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn b64url_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_URL_TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(B64_URL_TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_URL_TABLE[((n >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(B64_URL_TABLE[(n & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+fn b64url_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut vals = Vec::with_capacity(input.len());
+    for b in input.trim().trim_end_matches('=').bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return Err("组网口令包含非法字符".into()),
+        };
+        vals.push(v);
+    }
+    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
+    for chunk in vals.chunks(4) {
+        if chunk.len() < 2 {
+            return Err("组网口令长度不完整".into());
+        }
+        let n0 = (chunk[0] as u32) << 18;
+        let n1 = (chunk[1] as u32) << 12;
+        let n2 = if chunk.len() > 2 { (chunk[2] as u32) << 6 } else { 0 };
+        let n3 = if chunk.len() > 3 { chunk[3] as u32 } else { 0 };
+        let n = n0 | n1 | n2 | n3;
+        out.push(((n >> 16) & 0xff) as u8);
+        if chunk.len() > 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct EasyTierInvitePayload {
+    /// network_name
+    n: String,
+    /// network_secret
+    s: String,
+    /// peer_urls
+    p: Vec<String>,
+}
+
+fn encode_easytier_invite(name: &str, secret: &str, peers: &[String]) -> Result<String, String> {
+    let payload = EasyTierInvitePayload {
+        n: name.to_string(),
+        s: secret.to_string(),
+        p: peers.to_vec(),
+    };
+    let json = serde_json::to_vec(&payload).map_err(|e| format!("编码口令失败：{e}"))?;
+    Ok(format!("rd-et://{}", b64url_encode(&json)))
+}
+
+fn decode_easytier_invite(raw: &str) -> Result<EasyTierInvitePayload, String> {
+    let trimmed = raw.trim();
+    let body = trimmed
+        .strip_prefix("rd-et://")
+        .or_else(|| trimmed.strip_prefix("RD-ET://"))
+        .ok_or_else(|| "口令格式错误，应以 rd-et:// 开头".to_string())?;
+    let bytes = b64url_decode(body)?;
+    let payload: EasyTierInvitePayload =
+        serde_json::from_slice(&bytes).map_err(|e| format!("解析口令失败：{e}"))?;
+    if payload.n.trim().is_empty() {
+        return Err("口令缺少网络名称".into());
+    }
+    Ok(payload)
+}
+
+fn detect_easytier_binaries(configured_core: &str, configured_cli: &str) -> (Option<String>, Option<String>) {
+    let core_name = if cfg!(windows) { "easytier-core.exe" } else { "easytier-core" };
+    let cli_name = if cfg!(windows) { "easytier-cli.exe" } else { "easytier-cli" };
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if !configured_core.trim().is_empty() {
+        candidates.push(std::path::PathBuf::from(configured_core.trim()));
+    }
+    if let Some(parent) = agent_config_file().parent() {
+        candidates.push(parent.join("tools").join(core_name));
+        candidates.push(parent.join(core_name));
+    }
+    #[cfg(windows)]
+    {
+        candidates.push(std::path::PathBuf::from(r"C:\tools\easytier-core.exe"));
+        candidates.push(std::path::PathBuf::from(r"C:\Program Files\EasyTier\easytier-core.exe"));
+    }
+    #[cfg(not(windows))]
+    {
+        candidates.push(std::path::PathBuf::from("/opt/homebrew/bin/easytier-core"));
+        candidates.push(std::path::PathBuf::from("/usr/local/bin/easytier-core"));
+        candidates.push(std::path::PathBuf::from("/usr/bin/easytier-core"));
+    }
+
+    let mut found_core = candidates.into_iter().find(|p| p.is_file());
+    if found_core.is_none() {
+        let cmd = if cfg!(windows) { "where" } else { "which" };
+        if let Ok(out) = std::process::Command::new(cmd).arg(core_name).output()
+            && out.status.success()
+        {
+            if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                let p = std::path::PathBuf::from(line.trim());
+                if p.is_file() {
+                    found_core = Some(p);
+                }
+            }
+        }
+    }
+
+    let mut found_cli = if !configured_cli.trim().is_empty() {
+        let p = std::path::PathBuf::from(configured_cli.trim());
+        p.is_file().then_some(p)
+    } else {
+        None
+    };
+    if found_cli.is_none()
+        && let Some(ref core) = found_core
+        && let Some(dir) = core.parent()
+    {
+        let sibling = dir.join(cli_name);
+        if sibling.is_file() {
+            found_cli = Some(sibling);
+        }
+    }
+
+    (
+        found_core.map(|p| p.to_string_lossy().to_string()),
+        found_cli.map(|p| p.to_string_lossy().to_string()),
+    )
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EasyTierPeerDto {
+    pub hostname: String,
+    pub ipv4: String,
+    pub cost: String,
+    pub latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EasyTierStatusDto {
+    pub installed: bool,
+    pub binary_path: String,
+    pub enabled: bool,
+    pub network_name: String,
+    pub virtual_ip: String,
+    pub peer_urls: Vec<String>,
+    pub invite_code: Option<String>,
+    pub peers: Vec<EasyTierPeerDto>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EasyTierInviteResultDto {
+    pub ok: bool,
+    pub invite_code: String,
+    pub network_name: String,
+    pub peer_urls: Vec<String>,
+    pub binary_found: bool,
+    pub binary_path: String,
+    pub hint: String,
+}
+
+/// 检测本机 EasyTier 安装状态、当前组网配置、当前口令与实时在线对端列表（10.126.x.x）。
+#[tauri::command]
+pub async fn easytier_detect_status() -> Result<EasyTierStatusDto, String> {
+    let cfg = load_easytier_settings();
+    let (core, cli) = detect_easytier_binaries(&cfg.binary_path, &cfg.cli_path);
+    let invite_code = if cfg.enabled && !cfg.network_name.trim().is_empty() {
+        encode_easytier_invite(&cfg.network_name, &cfg.network_secret, &cfg.peer_urls).ok()
+    } else {
+        None
+    };
+
+    let mut peers = Vec::new();
+    let mut local_vip = cfg.virtual_ip.clone();
+    if let Some(cli_bin) = cli {
+        let mut cmd = tokio::process::Command::new(&cli_bin);
+        cmd.args(["-o", "json", "peer"]);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        if let Ok(Ok(out)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), cmd.output()).await
+            && out.status.success()
+            && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            && let Some(arr) = val.as_array()
+        {
+            for item in arr {
+                let ipv4 = item
+                    .get("ipv4")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let hostname = item
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("EasyTier 设备")
+                    .to_string();
+                let cost = item
+                    .get("cost")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let lat = item
+                    .get("lat_ms")
+                    .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()));
+                if cost.eq_ignore_ascii_case("Local") && !ipv4.is_empty() {
+                    local_vip = ipv4;
+                } else if !ipv4.is_empty() {
+                    peers.push(EasyTierPeerDto {
+                        hostname,
+                        ipv4,
+                        cost: if cost.is_empty() { "P2P".into() } else { cost },
+                        latency_ms: lat,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(EasyTierStatusDto {
+        installed: core.is_some(),
+        binary_path: core.unwrap_or_default(),
+        enabled: cfg.enabled,
+        network_name: cfg.network_name,
+        virtual_ip: local_vip,
+        peer_urls: cfg.peer_urls,
+        invite_code,
+        peers,
+    })
+}
+
+/// 一键生成 EasyTier 组网口令（自动创建随机网络名+密钥，绑定最快的公共引导节点并写入本机配置）。
+#[tauri::command]
+pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInviteResultDto, String> {
+    let cleaned_peers: Vec<String> = peer_urls
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .take(4)
+        .collect();
+    let final_peers = if cleaned_peers.is_empty() {
+        vec!["tcp://public.easytier.top:11010".to_string()]
+    } else {
+        cleaned_peers
+    };
+
+    let u1 = uuid::Uuid::new_v4().simple().to_string();
+    let u2 = uuid::Uuid::new_v4().simple().to_string();
+    let network_name = format!("rd-mesh-{}", &u1[..6]);
+    let network_secret = u2[..16].to_string();
+
+    let cur = load_easytier_settings();
+    let (core, cli) = detect_easytier_binaries(&cur.binary_path, &cur.cli_path);
+    let binary_found = core.is_some();
+    let binary_path = core.unwrap_or_default();
+    let cli_path = cli.unwrap_or_default();
+
+    write_agent_config(|table| {
+        let mut sec = toml::value::Table::new();
+        sec.insert("enabled".into(), toml::Value::Boolean(true));
+        sec.insert("binary_path".into(), toml::Value::String(binary_path.clone()));
+        sec.insert("cli_path".into(), toml::Value::String(cli_path.clone()));
+        sec.insert("network_name".into(), toml::Value::String(network_name.clone()));
+        sec.insert("network_secret".into(), toml::Value::String(network_secret.clone()));
+        sec.insert(
+            "peer_urls".into(),
+            toml::Value::Array(final_peers.iter().map(|s| toml::Value::String(s.clone())).collect()),
+        );
+        // 留空由 EasyTier 内置 DHCP 自动分配唯一 10.126.126.x 虚拟内网 IP（避免双端冲突）
+        sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
+        sec.insert("no_tun".into(), toml::Value::Boolean(false));
+        sec.insert("forwards".into(), toml::Value::Array(Vec::new()));
+        table.insert("easytier".into(), toml::Value::Table(sec));
+    })?;
+
+    let invite_code = encode_easytier_invite(&network_name, &network_secret, &final_peers)?;
+    let hint = if binary_found {
+        "已写入本机 EasyTier 组网配置。请复制口令发给对方粘贴加入，然后双方重启本软件即可通过 10.126.x.x 直连！".into()
+    } else {
+        "口令已生成并保存！本机尚未检测到 easytier-core，请先安装 easytier-core（或放进 rd/tools 目录）后重启生效。".into()
+    };
+
+    Ok(EasyTierInviteResultDto {
+        ok: true,
+        invite_code,
+        network_name,
+        peer_urls: final_peers,
+        binary_found,
+        binary_path,
+        hint,
+    })
+}
+
+/// 粘贴对方发来的 `rd-et://...` 组网口令，一键加入同一个 EasyTier 网络（自动 DHCP 分配不冲突的 10.126.x.x）。
+#[tauri::command]
+pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultDto, String> {
+    let payload = decode_easytier_invite(&invite_code)?;
+    let cur = load_easytier_settings();
+    let (core, cli) = detect_easytier_binaries(&cur.binary_path, &cur.cli_path);
+    let binary_found = core.is_some();
+    let binary_path = core.unwrap_or_default();
+    let cli_path = cli.unwrap_or_default();
+
+    write_agent_config(|table| {
+        let mut sec = toml::value::Table::new();
+        sec.insert("enabled".into(), toml::Value::Boolean(true));
+        sec.insert("binary_path".into(), toml::Value::String(binary_path.clone()));
+        sec.insert("cli_path".into(), toml::Value::String(cli_path.clone()));
+        sec.insert("network_name".into(), toml::Value::String(payload.n.clone()));
+        sec.insert("network_secret".into(), toml::Value::String(payload.s.clone()));
+        sec.insert(
+            "peer_urls".into(),
+            toml::Value::Array(payload.p.iter().map(|s| toml::Value::String(s.clone())).collect()),
+        );
+        sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
+        sec.insert("no_tun".into(), toml::Value::Boolean(false));
+        sec.insert("forwards".into(), toml::Value::Array(Vec::new()));
+        table.insert("easytier".into(), toml::Value::Table(sec));
+    })?;
+
+    let hint = if binary_found {
+        format!(
+            "已加入组网「{}」！重启本软件后将自动分配 10.126.x.x 内网 IP 并与对方打洞直连。",
+            payload.n
+        )
+    } else {
+        format!(
+            "已保存组网「{}」，但本机未检测到 easytier-core，安装后重启即可上线。",
+            payload.n
+        )
+    };
+
+    Ok(EasyTierInviteResultDto {
+        ok: true,
+        invite_code: invite_code.trim().to_string(),
+        network_name: payload.n,
+        peer_urls: payload.p,
+        binary_found,
+        binary_path,
+        hint,
+    })
+}
+
+#[cfg(test)]
+mod easytier_invite_tests {
+    use super::*;
+
+    #[test]
+    fn easytier_invite_roundtrip() {
+        let code = encode_easytier_invite(
+            "rd-mesh-abc123",
+            "secret9876543210",
+            &["tcp://public.easytier.top:11010".into()],
+        )
+        .unwrap();
+        assert!(code.starts_with("rd-et://"));
+        let decoded = decode_easytier_invite(&code).unwrap();
+        assert_eq!(decoded.n, "rd-mesh-abc123");
+        assert_eq!(decoded.s, "secret9876543210");
+        assert_eq!(decoded.p, vec!["tcp://public.easytier.top:11010"]);
+    }
+}

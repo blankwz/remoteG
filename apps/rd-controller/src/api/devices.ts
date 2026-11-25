@@ -333,3 +333,47 @@ export function relativeTime(ts: number): string {
   }
   return "更早";
 }
+
+export interface EasyTierPeerDto {
+  hostname: string;
+  ipv4: string;
+  cost: string;
+  latencyMs: number | null;
+}
+
+export interface EasyTierStatusDto {
+  installed: boolean;
+  binaryPath: string;
+  enabled: boolean;
+  networkName: string;
+  virtualIp: string;
+  peerUrls: string[];
+  inviteCode: string | null;
+  peers: EasyTierPeerDto[];
+}
+
+export interface EasyTierInviteResultDto {
+  ok: boolean;
+  inviteCode: string;
+  networkName: string;
+  peerUrls: string[];
+  binaryFound: boolean;
+  binaryPath: string;
+  hint: string;
+}
+
+export function easytierDetectStatus(): Promise<EasyTierStatusDto> {
+  return call("easytier_detect_status");
+}
+
+export function easytierGenerateInvite(
+  peerUrls: string[],
+): Promise<EasyTierInviteResultDto> {
+  return call("easytier_generate_invite", { peerUrls });
+}
+
+export function easytierJoinInvite(
+  inviteCode: string,
+): Promise<EasyTierInviteResultDto> {
+  return call("easytier_join_invite", { inviteCode });
+}
