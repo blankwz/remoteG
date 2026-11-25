@@ -1291,6 +1291,10 @@ pub struct RealPlanProbeResultDto {
     pub avg_rtt_ms: Option<f64>,
     pub max_rtt_ms: Option<f64>,
     pub jitter_ms: Option<f64>,
+    /// 本机 → 中转/打洞服务器的节点延迟（ms）
+    pub node_rtt_ms: Option<f64>,
+    /// 本机 → 被控端目标的直连/端到端延迟（ms）
+    pub target_rtt_ms: Option<f64>,
     pub peer_fingerprint: Option<String>,
     pub route_detail: String,
     pub logs: Vec<String>,
@@ -1370,11 +1374,18 @@ pub async fn lab_probe_target_plan(
         rounds
     ));
 
-    // 分支 1：自建中转模式（支持 https/wss Workers 或 VPS ip:port）
-    if plan.mode == "relay" {
+    // 分支 1：自建中转 / 打洞服务器模式（支持 https/wss Workers 或 VPS ip:port）
+    if plan.mode == "relay" || plan.mode == "punch" {
+        let mode_label = if plan.mode == "punch" {
+            "打洞服务器"
+        } else {
+            "中转服务器"
+        };
         let relay_raw = plan.relay_addr.trim();
         if relay_raw.is_empty() {
-            logs.push("✗ 未填写中转服务器地址，无法测速".into());
+            logs.push(format!(
+                "✗ 未选择或填写{mode_label}地址，无法测速（可点「SSH 一键部署新节点」）"
+            ));
             return Ok(RealPlanProbeResultDto {
                 plan_id: plan.plan_id,
                 plan_name: plan.plan_name,
@@ -1388,14 +1399,16 @@ pub async fn lab_probe_target_plan(
                 avg_rtt_ms: None,
                 max_rtt_ms: None,
                 jitter_ms: None,
+                node_rtt_ms: None,
+                target_rtt_ms: None,
                 peer_fingerprint: None,
-                route_detail: "未配置中转地址".into(),
+                route_detail: format!("未配置{mode_label}地址"),
                 logs,
             });
         }
         if relay_raw.contains("://") {
             let Some((host, port)) = parse_url_host_port(relay_raw) else {
-                logs.push(format!("✗ 中转 URL 格式无效：{relay_raw}"));
+                logs.push(format!("✗ {mode_label} URL 格式无效：{relay_raw}"));
                 return Ok(RealPlanProbeResultDto {
                     plan_id: plan.plan_id,
                     plan_name: plan.plan_name,
@@ -1409,6 +1422,8 @@ pub async fn lab_probe_target_plan(
                     avg_rtt_ms: None,
                     max_rtt_ms: None,
                     jitter_ms: None,
+                    node_rtt_ms: None,
+                    target_rtt_ms: None,
                     peer_fingerprint: None,
                     route_detail: "URL 格式无效".into(),
                     logs,
@@ -1463,6 +1478,8 @@ pub async fn lab_probe_target_plan(
                 avg_rtt_ms,
                 max_rtt_ms,
                 jitter_ms,
+                node_rtt_ms: avg_rtt_ms,
+                target_rtt_ms: None,
                 peer_fingerprint: None,
                 route_detail,
                 logs,
@@ -1495,6 +1512,8 @@ pub async fn lab_probe_target_plan(
                         avg_rtt_ms: None,
                         max_rtt_ms: None,
                         jitter_ms: None,
+                        node_rtt_ms: None,
+                        target_rtt_ms: None,
                         peer_fingerprint: None,
                         route_detail: format!("地址解析失败：{e}"),
                         logs,
@@ -1528,17 +1547,49 @@ pub async fn lab_probe_target_plan(
                 }
             }
         }
+        // 打洞/中转模式若同时填了目标地址，附带实测目标端直连延迟以呈现分节点延迟
+        let mut target_rtt_ms: Option<f64> = None;
+        let target_norm = normalize_probe_addr(&plan.target_addr, crate::conn::DEFAULT_AGENT_PORT);
+        if !target_norm.is_empty()
+            && let Ok(tsock) =
+                crate::conn::resolve_addr(&target_norm, crate::conn::DEFAULT_AGENT_PORT).await
+        {
+            let t0 = Instant::now();
+            match tokio::time::timeout(
+                Duration::from_secs(2),
+                rd_transport::connect(tsock, state.identity(), None),
+            )
+            .await
+            {
+                Ok(Ok(conn)) => {
+                    let rtt = conn.rtt().as_secs_f64() * 1000.0;
+                    let m = if rtt > 0.0 {
+                        rtt
+                    } else {
+                        t0.elapsed().as_secs_f64() * 1000.0
+                    };
+                    target_rtt_ms = Some((m * 10.0).round() / 10.0);
+                    conn.close(0, "lab target probe");
+                    logs.push(format!("  [目标端探活] ✓ 目标 {tsock} 直连延迟：{m:.1} ms"));
+                }
+                _ => {
+                    logs.push(format!(
+                        "  [目标端探活] 目标 {tsock} 当前不可直连，需由{mode_label}协助打洞/转发"
+                    ));
+                }
+            }
+        }
         let reachable = rtts.len() as u32;
         let loss_pct = ((rounds - reachable) as f64 / rounds as f64) * 100.0;
         let (min_rtt_ms, avg_rtt_ms, max_rtt_ms, jitter_ms) = compute_rtt_stats(&rtts);
         let ok = reachable > 0;
         let route_detail = if ok {
             format!(
-                "中转 QUIC 可达 ({reachable}/{rounds}，均延迟 {:.1}ms)",
+                "{mode_label}可达 ({reachable}/{rounds}，节点延迟 {:.1}ms)",
                 avg_rtt_ms.unwrap_or(0.0)
             )
         } else {
-            "中转端口无 QUIC 响应（请检查 UDP 放行与 rd-relay 进程）".into()
+            format!("{mode_label}无 QUIC 响应（请检查 UDP 放行与 rd-relay 进程）")
         };
         logs.push(format!("结论：{route_detail}"));
         return Ok(RealPlanProbeResultDto {
@@ -1554,6 +1605,8 @@ pub async fn lab_probe_target_plan(
             avg_rtt_ms,
             max_rtt_ms,
             jitter_ms,
+            node_rtt_ms: avg_rtt_ms,
+            target_rtt_ms,
             peer_fingerprint: peer_fp,
             route_detail,
             logs,
@@ -1577,6 +1630,8 @@ pub async fn lab_probe_target_plan(
             avg_rtt_ms: None,
             max_rtt_ms: None,
             jitter_ms: None,
+            node_rtt_ms: None,
+            target_rtt_ms: None,
             peer_fingerprint: None,
             route_detail: "目标地址为空".into(),
             logs,
@@ -1607,6 +1662,8 @@ pub async fn lab_probe_target_plan(
                 avg_rtt_ms: None,
                 max_rtt_ms: None,
                 jitter_ms: None,
+                node_rtt_ms: None,
+                target_rtt_ms: None,
                 peer_fingerprint: None,
                 route_detail: format!("解析失败：{e}"),
                 logs,
@@ -1680,6 +1737,8 @@ pub async fn lab_probe_target_plan(
         avg_rtt_ms,
         max_rtt_ms,
         jitter_ms,
+        node_rtt_ms: None,
+        target_rtt_ms: avg_rtt_ms,
         peer_fingerprint: peer_fp,
         route_detail,
         logs,

@@ -183,7 +183,7 @@ export function labListProfiles(): Promise<LabProfile[]> {
 export interface RealTestPlanDto {
   planId: string;
   planName: string;
-  mode: "direct" | "tailscale" | "relay" | "easytier";
+  mode: "direct" | "tailscale" | "punch" | "relay" | "easytier";
   targetAddr: string;
   relayAddr: string;
   rounds: number;
@@ -202,6 +202,8 @@ export interface RealPlanProbeResultDto {
   avgRttMs: number | null;
   maxRttMs: number | null;
   jitterMs: number | null;
+  nodeRttMs: number | null;
+  targetRttMs: number | null;
   peerFingerprint: string | null;
   routeDetail: string;
   logs: string[];

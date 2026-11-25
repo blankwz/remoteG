@@ -43,6 +43,7 @@ import {
   tailscalePing,
   type DeviceDto,
 } from "../api/devices";
+import { deployRelaySsh } from "../api/relayDeploy";
 import {
   CanvasTileSurface,
   FRAME_INVALIDATE,
@@ -474,6 +475,41 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [testingPlanId, setTestingPlanId] = useState<string | null>(null);
   const [runningRealBatch, setRunningRealBatch] = useState(false);
 
+  // 共用打洞 / 中转服务器节点池（可多目标共用，并独立显示每个节点的真实延迟）
+  interface RelayNodeItem {
+    id: string;
+    name: string;
+    addr: string;
+    lastRttMs: number | null;
+    status: "idle" | "ok" | "fail";
+  }
+  const [serverPool, setServerPool] = useState<RelayNodeItem[]>(() => {
+    try {
+      const raw = window.localStorage.getItem("rd.labServerPool");
+      if (raw) return JSON.parse(raw) as RelayNodeItem[];
+    } catch {
+      // ignore
+    }
+    return [];
+  });
+  const saveServerPool = useCallback((next: RelayNodeItem[]) => {
+    setServerPool(next);
+    try {
+      window.localStorage.setItem("rd.labServerPool", JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  }, []);
+  const [probingPool, setProbingPool] = useState(false);
+  const [showSshDeploy, setShowSshDeploy] = useState(false);
+  const [sshName, setSshName] = useState("");
+  const [sshHost, setSshHost] = useState("");
+  const [sshPort, setSshPort] = useState("22");
+  const [sshUser, setSshUser] = useState("root");
+  const [sshKeyPath, setSshKeyPath] = useState("");
+  const [sshMode, setSshMode] = useState<"udp" | "docker">("udp");
+  const [sshBusy, setSshBusy] = useState(false);
+
   const [eventLogs, setEventLogs] = useState<
     { id: number; time: string; level: "info" | "ok" | "warn"; text: string }[]
   >(() => [
@@ -503,7 +539,25 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       })
       .catch(() => undefined);
     void getRelayAddr()
-      .then((r) => setDefaultRelayAddr(typeof r === "string" ? r.trim() : ""))
+      .then((r) => {
+        const addr = typeof r === "string" ? r.trim() : "";
+        setDefaultRelayAddr(addr);
+        if (addr) {
+          setServerPool((prev) => {
+            if (prev.some((n) => n.addr === addr)) return prev;
+            const next: RelayNodeItem[] = [
+              ...prev,
+              { id: "default-relay", name: "默认中转/打洞节点", addr, lastRttMs: null, status: "idle" },
+            ];
+            try {
+              window.localStorage.setItem("rd.labServerPool", JSON.stringify(next));
+            } catch {
+              // ignore
+            }
+            return next;
+          });
+        }
+      })
       .catch(() => undefined);
   }, [targetDeviceId]);
 
@@ -579,18 +633,29 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
         ? "局域网直连"
         : newPlanMode === "tailscale"
           ? "Tailscale 跨网"
-          : newPlanMode === "relay"
-            ? "自建中转"
-            : "EasyTier 组网");
+          : newPlanMode === "punch"
+            ? "STUN 打洞"
+            : newPlanMode === "relay"
+              ? "自建中转"
+              : "EasyTier 组网");
     const addr = newPlanAddr.trim() || baseTargetIp;
     const relay = newPlanRelay.trim() || defaultRelayAddr;
-    if (newPlanMode !== "relay" && !addr) {
+    if (newPlanMode !== "relay" && newPlanMode !== "punch" && !addr) {
       pushLog("warn", "新增方案失败：请填写目标 IP 地址");
       return;
     }
-    if (newPlanMode === "relay" && !relay) {
-      pushLog("warn", "新增中转方案失败：请填写中转服务器地址（如 1.2.3.4:21118 或 https://xxx.workers.dev）");
+    if ((newPlanMode === "relay" || newPlanMode === "punch") && !relay) {
+      pushLog("warn", "新增打洞/中转方案失败：请先选择共用服务器、填写服务器地址，或点「SSH 一键部署新节点」");
       return;
+    }
+    if ((newPlanMode === "relay" || newPlanMode === "punch") && relay) {
+      // 自动收录到共用节点池，方便后续其他目标复用
+      if (!serverPool.some((n) => n.addr === relay)) {
+        saveServerPool([
+          ...serverPool,
+          { id: `node-${Date.now().toString(36)}`, name, addr: relay, lastRttMs: null, status: "idle" },
+        ]);
+      }
     }
     const plan: RealTestPlanDto = {
       planId: `plan-${Date.now().toString(36)}`,
@@ -715,6 +780,118 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       );
     return okList[0]?.planId ?? null;
   })();
+
+  // 实测共用服务器节点池中每个节点的真实延迟
+  const handleProbeServerPool = useCallback(async () => {
+    if (serverPool.length === 0) {
+      pushLog("warn", "节点池为空，请先点击「🚀 SSH 一键部署新节点」或添加打洞/中转服务器");
+      return;
+    }
+    setProbingPool(true);
+    pushLog("info", `开始实测共用节点池（共 ${serverPool.length} 个打洞/中转服务器）…`);
+    const updated = [...serverPool];
+    for (let i = 0; i < updated.length; i += 1) {
+      const node = updated[i];
+      if (!node) continue;
+      try {
+        const res = await labProbeTargetPlan({
+          planId: `pool-${node.id}`,
+          planName: node.name,
+          mode: "relay",
+          targetAddr: "",
+          relayAddr: node.addr,
+          rounds: 3,
+        });
+        updated[i] = {
+          ...node,
+          lastRttMs: res.nodeRttMs ?? res.avgRttMs,
+          status: res.ok ? "ok" : "fail",
+        };
+        saveServerPool([...updated]);
+        pushLog(
+          res.ok ? "ok" : "warn",
+          `[节点 ${node.name} (${node.addr})] ${
+            res.ok
+              ? `✓ 可达 · 节点延迟 ${res.nodeRttMs ?? res.avgRttMs}ms（抖动 ${res.jitterMs ?? 0}ms / 丢包 ${res.lossPct}%）`
+              : `✗ ${res.routeDetail}`
+          }`,
+        );
+      } catch (e) {
+        updated[i] = { ...node, lastRttMs: null, status: "fail" };
+        saveServerPool([...updated]);
+        pushLog("warn", `[节点 ${node.name}] 探测异常：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    setProbingPool(false);
+  }, [pushLog, saveServerPool, serverPool]);
+
+  // 内联 SSH 一键上传代码、启动打洞/中转服务器并自动入池+实测连通
+  const handleLabSshDeploy = useCallback(async () => {
+    const host = sshHost.trim();
+    if (!host) {
+      pushLog("warn", "请先填写 Linux 服务器 IP 或域名");
+      return;
+    }
+    setSshBusy(true);
+    const label = sshName.trim() || `自建节点 (${host})`;
+    pushLog("info", `🚀 开始 SSH 连接 ${sshUser.trim() || "root"}@${host}:${sshPort}，自动上传并启动打洞/中转服务…`);
+    try {
+      const res = await deployRelaySsh({
+        host,
+        port: Number(sshPort) || 22,
+        user: sshUser.trim() || "root",
+        keyPath: sshKeyPath.trim(),
+        relayPort: 21118,
+        mode: sshMode,
+        domain: "",
+      });
+      for (const line of res.log.split(/\r?\n/).filter((l) => l.trim().length > 0)) {
+        pushLog(res.ok ? "info" : "warn", `[SSH 部署] ${line}`);
+      }
+      if (res.ok && res.relayAddr) {
+        const newNode: RelayNodeItem = {
+          id: `node-${Date.now().toString(36)}`,
+          name: label,
+          addr: res.relayAddr,
+          lastRttMs: null,
+          status: "idle",
+        };
+        const nextPool = [
+          ...serverPool.filter((n) => n.addr !== res.relayAddr),
+          newNode,
+        ];
+        saveServerPool(nextPool);
+        setNewPlanRelay(res.relayAddr);
+        setShowSshDeploy(false);
+        pushLog("ok", `✓ 部署成功！已自动加入共用节点池：${label} (${res.relayAddr})，正在自动测试节点延迟…`);
+        // 立刻实测刚部署好的新节点
+        const probe = await labProbeTargetPlan({
+          planId: `pool-${newNode.id}`,
+          planName: label,
+          mode: "relay",
+          targetAddr: baseTargetIp,
+          relayAddr: res.relayAddr,
+          rounds: 3,
+        });
+        saveServerPool(
+          nextPool.map((n) =>
+            n.id === newNode.id
+              ? { ...n, lastRttMs: probe.nodeRttMs ?? probe.avgRttMs, status: probe.ok ? "ok" : "fail" }
+              : n,
+          ),
+        );
+        for (const line of probe.logs) {
+          pushLog(probe.ok ? "ok" : "warn", `[新节点实测] ${line}`);
+        }
+      } else {
+        pushLog("warn", `✗ SSH 部署未成功：${res.summary}`);
+      }
+    } catch (e) {
+      pushLog("warn", `✗ SSH 部署调用失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSshBusy(false);
+    }
+  }, [baseTargetIp, pushLog, saveServerPool, serverPool, sshHost, sshKeyPath, sshMode, sshName, sshPort, sshUser]);
 
   // 保留兼容引用避免未用告警
   void probeDevice;
@@ -1070,26 +1247,53 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             >
               <option value="direct">局域网 / 直连 (QUIC)</option>
               <option value="tailscale">Tailscale 跨网</option>
+              <option value="punch">STUN / 打洞服务器</option>
               <option value="relay">自建中转服务器</option>
               <option value="easytier">EasyTier 组网</option>
             </select>
-            {newPlanMode === "relay" ? (
-              <input
-                type="text"
-                value={newPlanRelay}
-                onChange={(e) => setNewPlanRelay(e.currentTarget.value)}
-                placeholder="中转地址（如 1.2.3.4:21118 或 https://xxx.workers.dev）"
-                aria-label="新绑定方案中转地址"
-                style={{
-                  flex: "1 1 220px",
-                  padding: "6px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid rgba(255, 255, 255, 0.16)",
-                  background: "rgba(0, 0, 0, 0.3)",
-                  color: "inherit",
-                  fontSize: "12px",
-                }}
-              />
+            {newPlanMode === "relay" || newPlanMode === "punch" ? (
+              <>
+                {serverPool.length > 0 && (
+                  <select
+                    className={styles.select}
+                    aria-label="选择共用打洞或中转服务器"
+                    value={serverPool.some((n) => n.addr === newPlanRelay) ? newPlanRelay : ""}
+                    onChange={(e) => {
+                      if (e.target.value) setNewPlanRelay(e.target.value);
+                    }}
+                  >
+                    <option value="">从共用节点池选择…</option>
+                    {serverPool.map((n) => (
+                      <option key={n.id} value={n.addr}>
+                        {n.name} ({n.addr}){n.lastRttMs !== null ? ` · ${n.lastRttMs}ms` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <input
+                  type="text"
+                  value={newPlanRelay}
+                  onChange={(e) => setNewPlanRelay(e.currentTarget.value)}
+                  placeholder="打洞/中转服务器地址（如 1.2.3.4:21118 或 https://xxx.workers.dev）"
+                  aria-label="新绑定方案中转地址"
+                  style={{
+                    flex: "1 1 200px",
+                    padding: "6px 10px",
+                    borderRadius: "6px",
+                    border: "1px solid rgba(255, 255, 255, 0.16)",
+                    background: "rgba(0, 0, 0, 0.3)",
+                    color: "inherit",
+                    fontSize: "12px",
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => setShowSshDeploy((v) => !v)}
+                >
+                  🚀 没有服务器？SSH 一键部署
+                </button>
+              </>
             ) : (
               <input
                 type="text"
@@ -1118,7 +1322,181 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           </div>
         )}
 
-        {/* 2) 3 节点真实链路拓扑图 */}
+        {/* 共用打洞 / 中转服务器节点池（实时显示每个节点的延迟 + 内联 SSH 一键部署） */}
+        <div
+          style={{
+            padding: "10px 12px",
+            borderRadius: "8px",
+            background: "rgba(255, 255, 255, 0.025)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+            <strong style={{ fontSize: "12.5px" }}>
+              🌐 共用打洞 / 中转服务器节点池（{serverPool.length} 个节点，所有目标可共用）
+            </strong>
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button
+                type="button"
+                className={styles.btn}
+                disabled={probingPool || serverPool.length === 0}
+                onClick={() => void handleProbeServerPool()}
+              >
+                {probingPool ? "⏳ 测速中…" : "🔍 测全部节点延迟"}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
+                onClick={() => setShowSshDeploy((v) => !v)}
+              >
+                {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署新节点"}
+              </button>
+            </div>
+          </div>
+
+          {serverPool.length === 0 ? (
+            <div style={{ fontSize: "12px", opacity: 0.65 }}>
+              暂无共用打洞/中转服务器。点击右侧「🚀 SSH 一键部署新节点」填入 Linux VPS 的 SSH 信息，即可自动上传代码、启动服务并测试延迟。
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+              {serverPool.map((node) => (
+                <div
+                  key={node.id}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    padding: "4px 10px",
+                    borderRadius: "999px",
+                    fontSize: "12px",
+                    border:
+                      node.status === "ok"
+                        ? "1px solid rgba(63, 185, 80, 0.45)"
+                        : node.status === "fail"
+                          ? "1px solid rgba(248, 81, 73, 0.45)"
+                          : "1px solid rgba(255, 255, 255, 0.14)",
+                    background: "rgba(0, 0, 0, 0.28)",
+                  }}
+                >
+                  <span>
+                    {node.status === "ok" ? "🟢" : node.status === "fail" ? "🔴" : "⚪"} {node.name}
+                  </span>
+                  <code style={{ opacity: 0.75 }}>{node.addr}</code>
+                  <strong
+                    style={{
+                      color:
+                        node.status === "ok"
+                          ? "#3fb950"
+                          : node.status === "fail"
+                            ? "#f85149"
+                            : "inherit",
+                    }}
+                  >
+                    {node.lastRttMs !== null
+                      ? `${node.lastRttMs}ms`
+                      : node.status === "fail"
+                        ? "超时"
+                        : "未测"}
+                  </strong>
+                  <button
+                    type="button"
+                    aria-label={`移除节点 ${node.name}`}
+                    onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "inherit",
+                      opacity: 0.55,
+                      cursor: "pointer",
+                      padding: "0 2px",
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showSshDeploy && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "8px",
+                padding: "10px",
+                borderRadius: "8px",
+                background: "rgba(63, 185, 80, 0.06)",
+                border: "1px solid rgba(63, 185, 80, 0.3)",
+                alignItems: "center",
+              }}
+            >
+              <input
+                type="text"
+                value={sshName}
+                onChange={(e) => setSshName(e.currentTarget.value)}
+                placeholder="节点名（如：香港 VPS）"
+                aria-label="新节点名称"
+                style={{ flex: "1 1 120px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <input
+                type="text"
+                value={sshHost}
+                onChange={(e) => setSshHost(e.currentTarget.value)}
+                placeholder="SSH 主机 IP（如 45.x.x.x）"
+                aria-label="部署节点 SSH 主机"
+                style={{ flex: "1 1 150px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <input
+                type="text"
+                value={sshPort}
+                onChange={(e) => setSshPort(e.currentTarget.value)}
+                placeholder="端口 22"
+                aria-label="部署节点 SSH 端口"
+                style={{ width: "68px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <input
+                type="text"
+                value={sshUser}
+                onChange={(e) => setSshUser(e.currentTarget.value)}
+                placeholder="root"
+                aria-label="部署节点 SSH 用户"
+                style={{ width: "80px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <input
+                type="text"
+                value={sshKeyPath}
+                onChange={(e) => setSshKeyPath(e.currentTarget.value)}
+                placeholder="私钥路径（留空用默认 ~/.ssh）"
+                aria-label="部署节点 SSH 私钥"
+                style={{ flex: "1 1 160px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+              />
+              <select
+                className={styles.select}
+                aria-label="部署模式"
+                value={sshMode}
+                onChange={(e) => setSshMode(e.target.value as "udp" | "docker")}
+              >
+                <option value="udp">UDP 直连 (systemd 21118)</option>
+                <option value="docker">Docker 容器化部署</option>
+              </select>
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnPrimary}`}
+                disabled={sshBusy}
+                onClick={() => void handleLabSshDeploy()}
+              >
+                {sshBusy ? "⏳ 正在上传并启动…" : "🚀 上传启动并测速"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* 2) 3 节点真实链路拓扑图（展示每个节点的实测延迟） */}
         <div
           aria-label="控制端到被控端网络拓扑图"
           style={{
@@ -1241,7 +1619,9 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                   </span>
                 </div>
                 <div style={{ fontSize: "12px", opacity: 0.78, fontFamily: "monospace" }}>
-                  {plan.mode === "relay" ? `中转: ${plan.relayAddr}` : `地址: ${plan.targetAddr}`}
+                  {plan.mode === "relay" || plan.mode === "punch"
+                    ? `节点: ${plan.relayAddr || "未配置"}`
+                    : `地址: ${plan.targetAddr}`}
                 </div>
                 <div style={{ fontSize: "12px", minHeight: "34px" }}>
                   {isRunning ? (
@@ -1249,7 +1629,12 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                   ) : res ? (
                     res.ok ? (
                       <span style={{ color: "#3fb950" }}>
-                        ✓ 可达 {res.reachableCount}/{res.totalProbes} · 均延迟 <b>{res.avgRttMs}ms</b>（最小 {res.minRttMs}ms / 抖动 {res.jitterMs ?? 0}ms / 丢包 {res.lossPct}%）
+                        ✓ 可达 {res.reachableCount}/{res.totalProbes} ·{" "}
+                        {res.nodeRttMs !== null ? `节点延迟 ${res.nodeRttMs}ms` : `均延迟 ${res.avgRttMs}ms`}
+                        {res.targetRttMs !== null && res.nodeRttMs !== null
+                          ? ` · 目标直连 ${res.targetRttMs}ms`
+                          : ""}
+                        （抖动 {res.jitterMs ?? 0}ms / 丢包 {res.lossPct}%）
                       </span>
                     ) : (
                       <span style={{ color: "#f85149" }}>✗ {res.routeDetail}</span>
