@@ -556,3 +556,100 @@
   font-size: var(--rd-fs-dim);
   color: var(--rd-text);
 }
+
+/* ---- 目标方案卡片：悬浮显隐矢量图标操作栏（零 emoji，极简克制） ---- */
+
+.planCard {
+  position: relative;
+  transition: border-color var(--rd-dur-fast) var(--rd-ease), background var(--rd-dur-fast) var(--rd-ease);
+}
+
+.planCardActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition:
+    opacity var(--rd-dur-fast) var(--rd-ease),
+    transform var(--rd-dur-fast) var(--rd-ease);
+}
+
+.planCard:hover .planCardActions,
+.planCard:focus-within .planCardActions,
+.planCardActionsVisible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.planIconBtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-panel);
+  color: var(--rd-text-dim);
+  cursor: pointer;
+  transition:
+    color var(--rd-dur-fast) var(--rd-ease),
+    border-color var(--rd-dur-fast) var(--rd-ease),
+    background var(--rd-dur-fast) var(--rd-ease);
+}
+
+.planIconBtn:hover:not(:disabled) {
+  color: var(--rd-text);
+  border-color: var(--rd-accent-strong);
+  background: var(--rd-accent-soft);
+}
+
+.planIconBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.planIconBtnActive {
+  color: var(--rd-ok);
+  border-color: rgb(70 209 126 / 50%);
+  background: rgb(70 209 126 / 12%);
+}
+
+.planIconBtnDanger:hover:not(:disabled) {
+  color: var(--rd-err);
+  border-color: rgb(239 111 111 / 55%);
+  background: rgb(239 111 111 / 12%);
+}
+
+.planIconBtn[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border-strong);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-micro);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--rd-dur-fast) var(--rd-ease), transform var(--rd-dur-fast) var(--rd-ease);
+  z-index: 20;
+}
+
+.planIconBtn[data-tip]:hover::after,
+.planIconBtn[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

@@ -2367,6 +2367,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             return (
               <div
                 key={plan.planId}
+                className={styles.planCard}
                 style={{
                   padding: "12px",
                   borderRadius: "10px",
@@ -2441,48 +2442,78 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                       <span style={{ color: "#f85149" }}>✗ {res.routeDetail}</span>
                     )
                   ) : (
-                    <span style={{ opacity: 0.55 }}>尚未实测（点击下方「单测」或顶部一键实测）</span>
+                    <span style={{ opacity: 0.55 }}>尚未实测（鼠标悬停卡片可单测 / 切换）</span>
                   )}
                 </div>
-                <div style={{ display: "flex", gap: "6px", marginTop: "auto", flexWrap: "wrap" }}>
+                <div
+                  className={`${styles.planCardActions} ${isRunning ? styles.planCardActionsVisible : ""}`}
+                >
                   <button
                     type="button"
-                    className={styles.btn}
-                    style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                    className={styles.planIconBtn}
+                    data-tip={isRunning ? "实测中…" : "单测"}
+                    aria-label={isRunning ? `正在实测 ${plan.planName}` : `单测 ${plan.planName}`}
                     disabled={runningRealBatch || testingPlanId !== null}
                     onClick={() => void runSinglePlanReal(plan)}
                   >
-                    {isRunning ? "实测中…" : "单测"}
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polygon points="6 4 20 12 6 20 6 4" />
+                    </svg>
                   </button>
                   <button
                     type="button"
-                    className={`${styles.btn} ${isConfirmed ? "" : styles.btnPrimary}`}
-                    style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                    className={`${styles.planIconBtn} ${isConfirmed ? styles.planIconBtnActive : ""}`}
+                    data-tip={
+                      applyingPlanId === plan.planId
+                        ? "切换中…"
+                        : isConfirmed
+                          ? "使用中"
+                          : "切换使用"
+                    }
+                    aria-label={isConfirmed ? `${plan.planName} 使用中` : `切换使用 ${plan.planName}`}
                     disabled={applyingPlanId === plan.planId}
                     onClick={() => void handleConfirmPlan(plan)}
                   >
-                    {applyingPlanId === plan.planId
-                      ? "切换中…"
-                      : isConfirmed
-                        ? "✓ 使用中"
-                        : "切换使用"}
+                    {isConfirmed ? (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M20 6 9 17l-5-5" />
+                      </svg>
+                    ) : (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M8 3 4 7l4 4" />
+                        <path d="M4 7h16" />
+                        <path d="m16 21 4-4-4-4" />
+                        <path d="M20 17H4" />
+                      </svg>
+                    )}
                   </button>
                   <button
                     type="button"
-                    className={styles.btn}
+                    className={styles.planIconBtn}
+                    data-tip="编辑"
+                    aria-label={`编辑 ${plan.planName}`}
                     disabled={runningRealBatch || testingPlanId !== null}
                     onClick={() => handleStartEditPlan(plan)}
                   >
-                    编辑
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4Z" />
+                    </svg>
                   </button>
                   {activePlans.length > 1 && (
                     <button
                       type="button"
-                      className={styles.btn}
+                      className={`${styles.planIconBtn} ${styles.planIconBtnDanger}`}
+                      data-tip="删除"
+                      aria-label={`删除 ${plan.planName}`}
                       disabled={runningRealBatch || testingPlanId !== null}
                       onClick={() => handleDeleteTargetPlan(plan.planId)}
                     >
-                      删除
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
                     </button>
                   )}
                 </div>
