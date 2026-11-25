@@ -90,6 +90,10 @@ pub const TYPE_DIAL_ACK: u8 = 4;
 pub const TYPE_PUNCH_NOTIFY: u8 = 5;
 /// 签名 REG（安全审计 F4）：指纹持有证明的注册。
 pub const TYPE_REG2: u8 = 6;
+/// 方案 A：按 9 位数字设备 ID 查在线被控端指纹（controller → relay）。
+pub const TYPE_LOOKUP_ID: u8 = 7;
+/// 方案 A：9 位 ID 查询应答（relay → controller）。
+pub const TYPE_LOOKUP_ID_ACK: u8 = 8;
 pub const STATUS_OK: u8 = 1;
 pub const STATUS_NOT_FOUND: u8 = 2;
 pub const STATUS_CONFLICT: u8 = 3;
@@ -129,6 +133,44 @@ struct Table {
 impl Table {
     fn tag_of(fp: &[u8; 32]) -> u64 {
         u64::from_le_bytes(fp[..8].try_into().expect("fp 前 8 字节"))
+    }
+}
+
+/// 从 32 字节证书指纹确定性派生 RustDesk 风格 9 位数字设备 ID（100_000_000..=999_999_999）。
+pub fn numeric_id_from_fp(fp: &[u8; 32]) -> u32 {
+    let raw = u64::from_le_bytes(fp[..8].try_into().expect("fp 前 8 字节"));
+    100_000_000 + (raw % 900_000_000) as u32
+}
+
+/// 格式化 9 位数字 ID 为 `xxx xxx xxx`。
+pub fn format_numeric_id(id: u32) -> String {
+    format!("{:03} {:03} {:03}", id / 1_000_000, (id / 1_000) % 1_000, id % 1_000)
+}
+
+/// 编码 9 位 ID 查询报：`[u64 0][u8 7][u32 numeric_id LE]`（13 字节）。
+pub fn encode_lookup_id(numeric_id: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(13);
+    out.extend_from_slice(&TAG_CONTROL.to_le_bytes());
+    out.push(TYPE_LOOKUP_ID);
+    out.extend_from_slice(&numeric_id.to_le_bytes());
+    out
+}
+
+/// 解码 9 位 ID 查询应答：`[u64 0][u8 8][u8 status][32B fp?]`。
+pub fn decode_lookup_id_ack(buf: &[u8]) -> Option<(u8, Option<[u8; 32]>)> {
+    if buf.len() < 10 {
+        return None;
+    }
+    if u64::from_le_bytes(buf[..8].try_into().ok()?) != TAG_CONTROL || buf[8] != TYPE_LOOKUP_ID_ACK
+    {
+        return None;
+    }
+    let status = buf[9];
+    if status == STATUS_OK && buf.len() >= 42 {
+        let fp: [u8; 32] = buf[10..42].try_into().ok()?;
+        Some((status, Some(fp)))
+    } else {
+        Some((status, None))
     }
 }
 
@@ -530,6 +572,29 @@ pub async fn spawn(bind: SocketAddr) -> anyhow::Result<SocketAddr> {
 }
 
 async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8], from: SocketAddr) {
+    // 方案 A：9 位数字 ID 查询（13 字节短控制报）
+    if pkt.len() >= 13 && pkt[8] == TYPE_LOOKUP_ID {
+        let target_id = u32::from_le_bytes(pkt[9..13].try_into().expect("4 字节 ID"));
+        let found_fp = {
+            let t = table.lock().unwrap_or_else(|e| e.into_inner());
+            t.by_tag
+                .values()
+                .find(|s| s.agent.is_some() && numeric_id_from_fp(&s.fp) == target_id)
+                .map(|s| s.fp)
+        };
+        let mut ack = Vec::with_capacity(if found_fp.is_some() { 42 } else { 10 });
+        ack.extend_from_slice(&TAG_CONTROL.to_le_bytes());
+        ack.push(TYPE_LOOKUP_ID_ACK);
+        if let Some(fp) = found_fp {
+            ack.push(STATUS_OK);
+            ack.extend_from_slice(&fp);
+        } else {
+            ack.push(STATUS_NOT_FOUND);
+        }
+        let _ = sock.send_to(&ack, from).await;
+        return;
+    }
+
     let Some((kind, fp)) = decode_control(pkt) else {
         return;
     };

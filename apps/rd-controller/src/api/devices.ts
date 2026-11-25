@@ -377,3 +377,30 @@ export function easytierJoinInvite(
 ): Promise<EasyTierInviteResultDto> {
   return call("easytier_join_invite", { inviteCode });
 }
+
+export interface RelayIdStatusDto {
+  numericId: string;
+  rawId: number;
+  relayAddr: string | null;
+  fingerprintShort: string;
+}
+
+export interface RelayResolveIdResultDto {
+  ok: boolean;
+  online: boolean;
+  numericId: string;
+  rttMs: number | null;
+  peerFingerprintShort: string | null;
+  detail: string;
+}
+
+export function relayIdStatus(): Promise<RelayIdStatusDto> {
+  return call("relay_id_status");
+}
+
+export function relayResolveId(
+  relayAddr: string,
+  numericId: string,
+): Promise<RelayResolveIdResultDto> {
+  return call("relay_resolve_id", { relayAddr, numericId });
+}

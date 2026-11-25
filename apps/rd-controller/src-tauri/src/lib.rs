@@ -202,10 +202,14 @@ pub fn run() {
             commands::lab::lab_probe_target_plan,
             commands::lab::lab_fetch_public_nodes,
             commands::lab::lab_probe_node,
+            commands::lab::lab_diagnose_nat,
             // 方案 B：EasyTier 一键组网口令 & 在线成员探测
             commands::devices::easytier_detect_status,
             commands::devices::easytier_generate_invite,
             commands::devices::easytier_join_invite,
+            // 方案 A：自建中转 9 位 ID 码状态与在线探测
+            commands::devices::relay_id_status,
+            commands::devices::relay_resolve_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

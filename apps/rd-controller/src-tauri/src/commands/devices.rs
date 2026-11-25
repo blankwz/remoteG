@@ -1847,6 +1847,168 @@ pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultD
     })
 }
 
+// ---------------------------------------------------------------------------
+// 方案 A：RustDesk 风格 9 位设备 ID 码（基于本机证书指纹派生 + rd-relay 在线查址）
+// ---------------------------------------------------------------------------
+
+fn derive_numeric_id_from_fp(fp: &[u8; 32]) -> u32 {
+    let raw = u64::from_le_bytes(fp[..8].try_into().expect("fp 前 8 字节"));
+    100_000_000 + (raw % 900_000_000) as u32
+}
+
+fn format_9digit_id(id: u32) -> String {
+    format!("{:03} {:03} {:03}", id / 1_000_000, (id / 1_000) % 1_000, id % 1_000)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayIdStatusDto {
+    pub numeric_id: String,
+    pub raw_id: u32,
+    pub relay_addr: Option<String>,
+    pub fingerprint_short: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayResolveIdResultDto {
+    pub ok: bool,
+    pub online: bool,
+    pub numeric_id: String,
+    pub rtt_ms: Option<f64>,
+    pub peer_fingerprint_short: Option<String>,
+    pub detail: String,
+}
+
+/// 返回本机真实派生的 9 位设备 ID 码与当前配置的中转地址。
+#[tauri::command]
+pub fn relay_id_status(state: State<'_, ConnManager>) -> Result<RelayIdStatusDto, String> {
+    let fp = state.identity().fingerprint();
+    let raw_id = derive_numeric_id_from_fp(&fp.0);
+    let relay_addr = read_agent_config().and_then(|c| c.relay_addr);
+    Ok(RelayIdStatusDto {
+        numeric_id: format_9digit_id(raw_id),
+        raw_id,
+        relay_addr,
+        fingerprint_short: fp.short_hex().to_string(),
+    })
+}
+
+/// 向指定自建 `rd-relay` 发起真实 9 位 ID 在线查询（TYPE_LOOKUP_ID = 7），验证对方是否已注册到该中转服务器。
+#[tauri::command]
+pub async fn relay_resolve_id(
+    relay_addr: String,
+    numeric_id: String,
+) -> Result<RelayResolveIdResultDto, String> {
+    let digits: String = numeric_id.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 9 {
+        return Ok(RelayResolveIdResultDto {
+            ok: false,
+            online: false,
+            numeric_id: digits,
+            rtt_ms: None,
+            peer_fingerprint_short: None,
+            detail: "请输入 9 位数字设备 ID（如 482 916 305）".into(),
+        });
+    }
+    let id_num: u32 = digits.parse().map_err(|_| "设备 ID 格式无效".to_string())?;
+    let formatted = format_9digit_id(id_num);
+
+    let trimmed = relay_addr.trim();
+    if trimmed.is_empty() {
+        return Ok(RelayResolveIdResultDto {
+            ok: false,
+            online: false,
+            numeric_id: formatted,
+            rtt_ms: None,
+            peer_fingerprint_short: None,
+            detail: "请先选择或填写自建中转服务器地址（如 45.x.x.x:21118）".into(),
+        });
+    }
+    let host_port = if trimmed.contains(':') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}:21118")
+    };
+    let target = match crate::conn::resolve_addr(&host_port, 21118).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(RelayResolveIdResultDto {
+                ok: false,
+                online: false,
+                numeric_id: formatted,
+                rtt_ms: None,
+                peer_fingerprint_short: None,
+                detail: format!("中转地址解析失败：{e}"),
+            });
+        }
+    };
+
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("绑定本地 UDP 失败：{e}"))?;
+
+    let mut req = [0u8; 13];
+    req[8] = 7; // TYPE_LOOKUP_ID
+    req[9..13].copy_from_slice(&id_num.to_le_bytes());
+
+    let t0 = std::time::Instant::now();
+    sock.send_to(&req, target)
+        .await
+        .map_err(|e| format!("发送 ID 查询失败：{e}"))?;
+
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(std::time::Duration::from_millis(2500), sock.recv_from(&mut buf)).await {
+        Ok(Ok((n, _))) if n >= 10 && buf[8] == 8 => {
+            let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
+            if buf[9] == 1 && n >= 42 {
+                let fp_hex: String = buf[10..18].iter().map(|b| format!("{b:02x}")).collect();
+                Ok(RelayResolveIdResultDto {
+                    ok: true,
+                    online: true,
+                    numeric_id: formatted,
+                    rtt_ms: Some(rtt),
+                    peer_fingerprint_short: Some(fp_hex.clone()),
+                    detail: format!("对方 ID 在线！中转延迟 {rtt:.1}ms · 指纹 {fp_hex}（支持 P2P 打洞 + 中转兜底）"),
+                })
+            } else {
+                Ok(RelayResolveIdResultDto {
+                    ok: true,
+                    online: false,
+                    numeric_id: formatted,
+                    rtt_ms: Some(rtt),
+                    peer_fingerprint_short: None,
+                    detail: format!("中转可达（{rtt:.1}ms），但该 9 位 ID 当前未上线（请确认对方也填了同一中转地址并已启动）"),
+                })
+            }
+        }
+        Ok(Ok(_)) => Ok(RelayResolveIdResultDto {
+            ok: false,
+            online: false,
+            numeric_id: formatted,
+            rtt_ms: None,
+            peer_fingerprint_short: None,
+            detail: "收到非 rd-relay 应答（请确认目标运行的是最新版 rd-relay）".into(),
+        }),
+        Ok(Err(e)) => Ok(RelayResolveIdResultDto {
+            ok: false,
+            online: false,
+            numeric_id: formatted,
+            rtt_ms: None,
+            peer_fingerprint_short: None,
+            detail: format!("查询失败：{e}"),
+        }),
+        Err(_) => Ok(RelayResolveIdResultDto {
+            ok: false,
+            online: false,
+            numeric_id: formatted,
+            rtt_ms: None,
+            peer_fingerprint_short: None,
+            detail: "查询超时（>2500ms，请检查 VPS UDP 21118 放行与 rd-relay 进程）".into(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod easytier_invite_tests {
     use super::*;

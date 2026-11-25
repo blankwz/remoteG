@@ -291,6 +291,31 @@ export async function mockInvoke<T>(
       binaryPath: "C:\\tools\\easytier-core.exe",
       hint: "已加入组网「rd-mesh-1a2b3c」！重启后自动分配 10.126.x.x 内网 IP。",
     },
+    lab_diagnose_nat: {
+      natType: "cone",
+      label: "圆锥型 NAT（极易 P2P 打洞直连）",
+      advice: "两次探测公网端口完全一致！使用「EasyTier 组网」或「自建中转 (方案 A · 9位ID)」均可直接打洞实现 20~50ms P2P 直连。",
+      mappedA: "112.80.248.75:54321",
+      mappedB: "112.80.248.75:54321",
+      serverA: "stun.miwifi.com:3478",
+      serverB: "stun.chat.bilibili.com:3478",
+      rttAMs: 22.4,
+      rttBMs: 26.1,
+    },
+    relay_id_status: {
+      numericId: "482 916 305",
+      rawId: 482916305,
+      relayAddr: null,
+      fingerprintShort: "710fedcefbe23d73",
+    },
+    relay_resolve_id: {
+      ok: true,
+      online: true,
+      numericId: "482 916 305",
+      rttMs: 28.5,
+      peerFingerprintShort: "710fedcefbe23d73",
+      detail: "对方 ID 在线！中转延迟 28.5ms · 指纹 710fedcefbe23d73（支持 P2P 打洞 + 中转兜底）",
+    },
     lab_run_ab_bench: {
       netemSummary: "Netem 开启：+60ms (±10ms) · 丢包 4.0% (Burst 3)",
       runA: {

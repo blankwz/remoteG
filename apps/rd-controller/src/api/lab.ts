@@ -259,3 +259,19 @@ export function labProbeNode(
 ): Promise<NodeProbeResultDto> {
   return call("lab_probe_node", { kind, addr });
 }
+
+export interface NatDiagnosisDto {
+  natType: "cone" | "symmetric" | "unknown" | "blocked";
+  label: string;
+  advice: string;
+  mappedA: string | null;
+  mappedB: string | null;
+  serverA: string;
+  serverB: string;
+  rttAMs: number | null;
+  rttBMs: number | null;
+}
+
+export function labDiagnoseNat(stunAddrs: string[]): Promise<NatDiagnosisDto> {
+  return call("lab_diagnose_nat", { stunAddrs });
+}

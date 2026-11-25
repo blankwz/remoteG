@@ -2306,6 +2306,150 @@ pub async fn lab_probe_node(kind: String, addr: String) -> Result<NodeProbeResul
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NatDiagnosisDto {
+    /// `"cone"` | `"symmetric"` | `"unknown"` | `"blocked"`
+    pub nat_type: String,
+    pub label: String,
+    pub advice: String,
+    pub mapped_a: Option<String>,
+    pub mapped_b: Option<String>,
+    pub server_a: String,
+    pub server_b: String,
+    pub rtt_a_ms: Option<f64>,
+    pub rtt_b_ms: Option<f64>,
+}
+
+async fn stun_probe_on_socket(
+    sock: &tokio::net::UdpSocket,
+    raw_addr: &str,
+) -> Result<(f64, String), String> {
+    let host_port = strip_stun_scheme(raw_addr);
+    let mut addrs = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&host_port))
+        .await
+        .map_err(|_| "DNS 解析超时".to_string())?
+        .map_err(|e| format!("DNS 解析失败：{e}"))?;
+    let target = addrs
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| "未解析到可用 IPv4".to_string())?;
+
+    let uuid = uuid::Uuid::new_v4();
+    let mut txid = [0u8; 12];
+    txid.copy_from_slice(&uuid.as_bytes()[0..12]);
+
+    let mut req = [0u8; 20];
+    req[0] = 0x00;
+    req[1] = 0x01;
+    req[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    req[8..20].copy_from_slice(&txid);
+
+    let t0 = Instant::now();
+    sock.send_to(&req, target)
+        .await
+        .map_err(|e| format!("发包失败：{e}"))?;
+    let mut resp = [0u8; 512];
+    let (n, _) = tokio::time::timeout(Duration::from_millis(2500), sock.recv_from(&mut resp))
+        .await
+        .map_err(|_| "UDP 超时".to_string())?
+        .map_err(|e| format!("收包失败：{e}"))?;
+    let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
+    let mapped = parse_stun_mapped_addr(&resp[..n], &txid)
+        .ok_or_else(|| "未解析到公网映射地址".to_string())?;
+    Ok((rtt, mapped))
+}
+
+/// 真实双 STUN 同端口 NAT 穿透体检：用同一个本地 UDP 端口分别探测 2 个不同 STUN，对比公网映射端口判断圆锥型 / 对称型 NAT。
+#[tauri::command]
+pub async fn lab_diagnose_nat(stun_addrs: Vec<String>) -> Result<NatDiagnosisDto, String> {
+    let mut pool: Vec<String> = stun_addrs
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for fallback in [
+        "stun.miwifi.com:3478",
+        "stun.chat.bilibili.com:3478",
+        "stun.hitv.com:3478",
+        "stun.cloudflare.com:3478",
+    ] {
+        if !pool.iter().any(|x| x.eq_ignore_ascii_case(fallback)) {
+            pool.push(fallback.to_string());
+        }
+    }
+
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| format!("绑定本地 UDP 失败：{e}"))?;
+
+    let mut results: Vec<(String, f64, String)> = Vec::new();
+    for srv in &pool {
+        if let Ok((rtt, mapped)) = stun_probe_on_socket(&sock, srv).await {
+            results.push((srv.clone(), rtt, mapped));
+            if results.len() >= 2 {
+                break;
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Ok(NatDiagnosisDto {
+            nat_type: "blocked".into(),
+            label: "UDP 出口受限（STUN 全部无响应）".into(),
+            advice: "当前网络可能封锁了外部 UDP 3478 端口，建议直接使用「自建中转 (TCP/WSS)」或 EasyTier TCP 节点。".into(),
+            mapped_a: None,
+            mapped_b: None,
+            server_a: pool.first().cloned().unwrap_or_default(),
+            server_b: pool.get(1).cloned().unwrap_or_default(),
+            rtt_a_ms: None,
+            rtt_b_ms: None,
+        });
+    }
+
+    if results.len() == 1 {
+        let (sa, ra, ma) = results.remove(0);
+        return Ok(NatDiagnosisDto {
+            nat_type: "unknown".into(),
+            label: format!("仅 1 个 STUN 响应（公网映射 {ma}）"),
+            advice: "建议添加更多国内公共 STUN 后重测，以完成双端映射端口对比。".into(),
+            mapped_a: Some(ma),
+            mapped_b: None,
+            server_a: sa,
+            server_b: String::new(),
+            rtt_a_ms: Some(ra),
+            rtt_b_ms: None,
+        });
+    }
+
+    let (sa, ra, ma) = results.remove(0);
+    let (sb, rb, mb) = results.remove(0);
+    if ma == mb {
+        Ok(NatDiagnosisDto {
+            nat_type: "cone".into(),
+            label: "圆锥型 NAT（极易 P2P 打洞直连）".into(),
+            advice: "两次探测公网端口完全一致！使用「EasyTier 组网」或「自建中转 (方案 A · 9位ID)」均可直接打洞实现 20~50ms P2P 直连，不耗中转流量。".into(),
+            mapped_a: Some(ma),
+            mapped_b: Some(mb),
+            server_a: sa,
+            server_b: sb,
+            rtt_a_ms: Some(ra),
+            rtt_b_ms: Some(rb),
+        })
+    } else {
+        Ok(NatDiagnosisDto {
+            nat_type: "symmetric".into(),
+            label: "对称型 NAT（P2P 打洞困难）".into(),
+            advice: "访问不同外部节点时路由器分配了不同端口，纯 P2P 容易失败；推荐在「自建中转 (方案 A)」部署国内低延迟 VPS 中转，或在「EasyTier 组网」选用国内高速节点兜底。".into(),
+            mapped_a: Some(ma),
+            mapped_b: Some(mb),
+            server_a: sa,
+            server_b: sb,
+            rtt_a_ms: Some(ra),
+            rtt_b_ms: Some(rb),
+        })
+    }
+}
+
 #[cfg(test)]
 mod stun_and_pool_tests {
     use super::*;

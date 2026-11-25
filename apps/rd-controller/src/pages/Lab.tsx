@@ -16,6 +16,7 @@ import {
   labApplyTransport,
   labApplyTuning,
   labBenchmarkAllRoutes,
+  labDiagnoseNat,
   labFetchPublicNodes,
   labGetState,
   labListProfiles,
@@ -33,6 +34,7 @@ import {
   type LabLiveStateDto,
   type LabProfile,
   type LabTransportConfig,
+  type NatDiagnosisDto,
   type NetemConfigDto,
   type RealPlanProbeResultDto,
   type RealTestPlanDto,
@@ -47,9 +49,14 @@ import {
   getRelayAddr,
   listDevices,
   probeDevice,
+  relayIdStatus,
+  relayResolveId,
+  setRelayAddr,
   tailscalePing,
   type DeviceDto,
   type EasyTierStatusDto,
+  type RelayIdStatusDto,
+  type RelayResolveIdResultDto,
 } from "../api/devices";
 import { deployRelaySsh } from "../api/relayDeploy";
 import {
@@ -527,7 +534,6 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       // ignore
     }
   }, []);
-  const [poolExpanded, setPoolExpanded] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(true);
   const logBoxRef = useRef<HTMLDivElement | null>(null);
   const [poolFilter, setPoolFilter] = useState<"all" | "stun" | "easytier" | "relay">("all");
@@ -545,7 +551,16 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [batchNodeText, setBatchNodeText] = useState("");
   const [probingPool, setProbingPool] = useState(false);
   const [probingNodeId, setProbingNodeId] = useState<string | null>(null);
-  const [etExpanded, setEtExpanded] = useState(false);
+  const [activeModeTab, setActiveModeTab] = useState<"direct" | "easytier" | "stun" | "relay">("easytier");
+  const [modeBodyOpen, setModeBodyOpen] = useState(false);
+  const [selectedEtNodeIds, setSelectedEtNodeIds] = useState<string[]>([]);
+  const [natBusy, setNatBusy] = useState(false);
+  const [natResult, setNatResult] = useState<NatDiagnosisDto | null>(null);
+  const [relayIdInfo, setRelayIdInfo] = useState<RelayIdStatusDto | null>(null);
+  const [peerNumericIdInput, setPeerNumericIdInput] = useState("");
+  const [selectedRelayNodeAddr, setSelectedRelayNodeAddr] = useState("");
+  const [relayLookupBusy, setRelayLookupBusy] = useState(false);
+  const [relayLookupRes, setRelayLookupRes] = useState<RelayResolveIdResultDto | null>(null);
   const [etStatus, setEtStatus] = useState<EasyTierStatusDto | null>(null);
   const [etBusy, setEtBusy] = useState(false);
   const [etJoinInput, setEtJoinInput] = useState("");
@@ -625,6 +640,12 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       .then((st) => {
         setEtStatus(st);
         if (st.inviteCode) setEtInviteCode(st.inviteCode);
+      })
+      .catch(() => undefined);
+    void relayIdStatus()
+      .then((info) => {
+        setRelayIdInfo(info);
+        if (info.relayAddr) setSelectedRelayNodeAddr(info.relayAddr);
       })
       .catch(() => undefined);
   }, [targetDeviceId]);
@@ -1338,17 +1359,27 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   }, [pushLog]);
 
   const handleGenerateEtInvite = useCallback(async () => {
+    const etNodes = serverPool.filter((n) => inferNodeKind(n) === "easytier");
+    const picked = etNodes.filter((n) => selectedEtNodeIds.includes(n.id));
+    const finalPeers =
+      picked.length > 0
+        ? picked.map((n) => n.addr)
+        : etNodes
+            .filter((n) => n.status === "ok")
+            .sort((a, b) => (a.lastRttMs ?? 9999) - (b.lastRttMs ?? 9999))
+            .slice(0, 3)
+            .map((n) => n.addr);
+    if (finalPeers.length === 0) {
+      showToast("请先在下方拉取或粘贴 EasyTier 节点并测速，再勾选至少 1 个可用节点");
+      pushLog("warn", "[EasyTier] 尚未勾选可用 EasyTier 引导节点，请先拉取/粘贴节点并测速勾选");
+      return;
+    }
     setEtBusy(true);
     try {
-      const bestEtPeers = serverPool
-        .filter((n) => inferNodeKind(n) === "easytier" && n.status !== "fail")
-        .sort((a, b) => (a.lastRttMs ?? 9999) - (b.lastRttMs ?? 9999))
-        .slice(0, 3)
-        .map((n) => n.addr);
-      const res = await easytierGenerateInvite(bestEtPeers);
+      const res = await easytierGenerateInvite(finalPeers);
       setEtInviteCode(res.inviteCode);
-      showToast(res.hint);
-      pushLog("ok", `[EasyTier] ${res.hint}`);
+      showToast(`已用所选 ${finalPeers.length} 个节点生成口令！复制发给对方粘贴即可`);
+      pushLog("ok", `[EasyTier] 已使用 ${finalPeers.join(", ")} 生成组网口令`);
       const st = await easytierDetectStatus().catch(() => null);
       if (st) setEtStatus(st);
     } catch (e) {
@@ -1358,7 +1389,94 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     } finally {
       setEtBusy(false);
     }
-  }, [pushLog, serverPool, showToast]);
+  }, [pushLog, selectedEtNodeIds, serverPool, showToast]);
+
+  // STUN 穿透体检：双 STUN 同端口真实判断圆锥型 / 对称型 NAT
+  const handleDiagnoseNat = useCallback(async () => {
+    setNatBusy(true);
+    pushLog("info", "开始双 STUN 同端口真实 NAT 穿透体检…");
+    try {
+      const stunList = serverPool
+        .filter((n) => inferNodeKind(n) === "stun" && n.status !== "fail")
+        .sort((a, b) => (a.lastRttMs ?? 9999) - (b.lastRttMs ?? 9999))
+        .map((n) => n.addr);
+      const res = await labDiagnoseNat(stunList);
+      setNatResult(res);
+      pushLog(
+        res.natType === "cone" ? "ok" : "warn",
+        `[NAT 体检] ${res.label}（${res.serverA} → ${res.mappedA ?? "无"}；${res.serverB} → ${res.mappedB ?? "无"}）`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      pushLog("warn", `[NAT 体检] 失败：${msg}`);
+    } finally {
+      setNatBusy(false);
+    }
+  }, [pushLog, serverPool]);
+
+  // 方案 A：设置本机中转地址 & 查询对方 9 位 ID 在线状态
+  const handleSaveGlobalRelay = useCallback(
+    async (addr: string) => {
+      const trimmed = addr.trim();
+      if (!trimmed) {
+        showToast("请先填写或选择一个自建中转地址");
+        return;
+      }
+      try {
+        await setRelayAddr(trimmed);
+        setSelectedRelayNodeAddr(trimmed);
+        setDefaultRelayAddr(trimmed);
+        const info = await relayIdStatus().catch(() => null);
+        if (info) setRelayIdInfo(info);
+        showToast(`已将 ${trimmed} 设为本机中转服务器（重启后生效）`);
+        pushLog("ok", `[方案 A · 中转] 本机中转服务器已更新为 ${trimmed}`);
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [pushLog, showToast],
+  );
+
+  const handleResolvePeerId = useCallback(async () => {
+    const relay = selectedRelayNodeAddr.trim() || defaultRelayAddr.trim();
+    if (!relay) {
+      showToast("请先选择或填写自建中转服务器地址");
+      return;
+    }
+    setRelayLookupBusy(true);
+    setRelayLookupRes(null);
+    pushLog("info", `[方案 A · 9位ID] 正在通过中转 ${relay} 查询对方 ID「${peerNumericIdInput.trim()}」…`);
+    try {
+      const res = await relayResolveId(relay, peerNumericIdInput);
+      setRelayLookupRes(res);
+      pushLog(res.online ? "ok" : "warn", `[方案 A · 9位ID] ${res.detail}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      pushLog("warn", `[方案 A · 9位ID] 查询异常：${msg}`);
+    } finally {
+      setRelayLookupBusy(false);
+    }
+  }, [defaultRelayAddr, peerNumericIdInput, pushLog, selectedRelayNodeAddr, showToast]);
+
+  const handleBindRelayIdPlan = useCallback(() => {
+    const relay = selectedRelayNodeAddr.trim() || defaultRelayAddr.trim();
+    if (!relay) {
+      showToast("请先填写或选择中转服务器地址");
+      return;
+    }
+    const idLabel = relayLookupRes?.numericId || peerNumericIdInput.trim() || "中转直连";
+    const plan: RealTestPlanDto = {
+      planId: `plan-relay-${Date.now()}`,
+      planName: `自建中转 · ID ${idLabel}`,
+      mode: "relay",
+      targetAddr: baseTargetIp || "192.168.1.10",
+      relayAddr: relay,
+      rounds: 3,
+    };
+    savePlansForTarget([...activePlans, plan]);
+    showToast(`已绑定方案「${plan.planName}」`);
+    pushLog("ok", `已绑定自建中转方案「${plan.planName}」(${relay})`);
+  }, [activePlans, baseTargetIp, defaultRelayAddr, peerNumericIdInput, pushLog, relayLookupRes, savePlansForTarget, selectedRelayNodeAddr, showToast]);
 
   const handleJoinEtInvite = useCallback(async () => {
     const code = etJoinInput.trim();
@@ -1951,7 +2069,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           </div>
         )}
 
-        {/* 共用打洞 (STUN) / EasyTier / 自建中转服务器节点池（默认收起为 1 行摘要，点开即可批量添加/拉取/测速/SSH 部署） */}
+        {/* ── 4 模式分标签配置台（点哪种方式，下方只展示它自己的节点、体检与配置） ── */}
         <div
           style={{
             padding: "10px 12px",
@@ -1963,551 +2081,664 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             gap: "10px",
           }}
         >
+          {/* 顶部 4 个连接方式标签 + 收起开关 */}
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-              <strong style={{ fontSize: "13px" }}>
-                🌐 公共 & 自建节点池（{serverPool.length} 个）
-              </strong>
-              {(() => {
-                const fastest = serverPool.find((n) => n.status === "ok" && n.lastRttMs !== null);
-                return fastest ? (
-                  <span style={{ fontSize: "11.5px", color: "#3fb950" }}>
-                    最快：{fastest.name} ({fastest.lastRttMs}ms)
-                  </span>
-                ) : (
-                  <span style={{ fontSize: "11.5px", opacity: 0.65 }}>
-                    公共 STUN 零隐私风险 · 展开可批量粘贴或一键拉取
-                  </span>
-                );
-              })()}
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-              <button
-                type="button"
-                className={styles.btn}
-                disabled={fetchingPublic}
-                onClick={() => {
-                  setPoolExpanded(true);
-                  void handleFetchPublicNodes();
-                }}
-              >
-                {fetchingPublic ? "⏳ 拉取中…" : "🌐 实时获取公共节点"}
-              </button>
-              <button
-                type="button"
-                className={styles.btn}
-                aria-expanded={poolExpanded}
-                onClick={() => setPoolExpanded((v) => !v)}
-              >
-                {poolExpanded ? "▲ 收起节点池" : "▼ 展开管理 / 批量添加"}
-              </button>
-            </div>
-          </div>
-
-          {poolExpanded && (
-            <>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
-                <button
-                  type="button"
-                  className={`${styles.btn} ${styles.btnPrimary}`}
-                  disabled={probingPool || serverPool.length === 0}
-                  onClick={() => void handleProbeServerPool()}
-                >
-                  {probingPool ? "⏳ 测速中…" : "🔍 一键全池测速"}
-                </button>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  onClick={() => setShowBatchAdd((v) => !v)}
-                >
-                  {showBatchAdd ? "收起批量添加" : "+ 批量添加（一行一个）"}
-                </button>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  onClick={() => setShowSubInput((v) => !v)}
-                  title="配置自定义 EasyTier 公共节点订阅源 URL"
-                >
-                  订阅源
-                </button>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  onClick={() => setShowSshDeploy((v) => !v)}
-                >
-                  {showSshDeploy ? "收起 SSH 部署" : "🚀 SSH 一键部署"}
-                </button>
-              </div>
-
-          {/* 分类筛选 + 清理超时节点 */}
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }} role="tablist" aria-label="连接与组网方式">
               {(
                 [
-                  ["all", `全部 (${serverPool.length})`],
-                  ["stun", `公共 STUN (${serverPool.filter((n) => inferNodeKind(n) === "stun").length})`],
-                  ["easytier", `EasyTier (${serverPool.filter((n) => inferNodeKind(n) === "easytier").length})`],
-                  ["relay", `自建中转 (${serverPool.filter((n) => inferNodeKind(n) === "relay").length})`],
+                  ["direct", "直连 / Tailscale"],
+                  ["easytier", `EasyTier 组网 (${serverPool.filter((n) => inferNodeKind(n) === "easytier").length})`],
+                  ["stun", `STUN 穿透体检 (${serverPool.filter((n) => inferNodeKind(n) === "stun").length})`],
+                  ["relay", `自建中转 · 9位ID (${serverPool.filter((n) => inferNodeKind(n) === "relay").length})`],
                 ] as const
-              ).map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setPoolFilter(k)}
-                  style={{
-                    padding: "3px 10px",
-                    borderRadius: "999px",
-                    fontSize: "11.5px",
-                    cursor: "pointer",
-                    border:
-                      poolFilter === k
-                        ? "1px solid rgba(88, 166, 255, 0.7)"
+              ).map(([tabId, label]) => {
+                const active = activeModeTab === tabId && modeBodyOpen;
+                return (
+                  <button
+                    key={tabId}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => {
+                      if (activeModeTab === tabId && modeBodyOpen) {
+                        setModeBodyOpen(false);
+                      } else {
+                        setActiveModeTab(tabId);
+                        setModeBodyOpen(true);
+                        if (tabId === "easytier" || tabId === "stun" || tabId === "relay") {
+                          setPoolFilter(tabId);
+                        }
+                      }
+                    }}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: "8px",
+                      fontSize: "12.5px",
+                      fontWeight: active ? 600 : 500,
+                      cursor: "pointer",
+                      border: active
+                        ? "1px solid rgba(88, 166, 255, 0.75)"
                         : "1px solid rgba(255, 255, 255, 0.14)",
-                    background:
-                      poolFilter === k ? "rgba(88, 166, 255, 0.16)" : "rgba(0, 0, 0, 0.2)",
-                    color: "inherit",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {serverPool.some((n) => n.status === "fail") && (
-              <button
-                type="button"
-                className={styles.btn}
-                onClick={() => {
-                  const kept = serverPool.filter((n) => n.status !== "fail");
-                  saveServerPool(kept);
-                  showToast(`已清理 ${serverPool.length - kept.length} 个超时节点`);
-                }}
-              >
-                🧹 清理超时节点
-              </button>
-            )}
-          </div>
-
-          {/* 可选自定义订阅 URL */}
-          {showSubInput && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", padding: "8px", borderRadius: "8px", background: "rgba(0,0,0,0.22)" }}>
-              <input
-                type="text"
-                value={customSubUrl}
-                onChange={(e) => setCustomSubUrl(e.currentTarget.value)}
-                placeholder="可选：填入 EasyTier 社区节点 API / txt 订阅地址（留空用内置源）"
-                aria-label="自定义公共节点订阅地址"
-                style={{ flex: "1 1 260px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnPrimary}`}
-                disabled={fetchingPublic}
-                onClick={() => void handleFetchPublicNodes()}
-              >
-                保存并拉取
-              </button>
-            </div>
-          )}
-
-          {/* 批量添加节点（一行一个节点，自动识别 STUN / EasyTier / 自建中转） */}
-          {showBatchAdd && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "10px", borderRadius: "8px", background: "rgba(88,166,255,0.06)", border: "1px solid rgba(88,166,255,0.28)" }}>
-              <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-                <span style={{ fontSize: "12px", fontWeight: 600 }}>
-                  📋 批量粘贴节点（一行一个，支持纯地址或「名称,地址」，自动去重）
-                </span>
-                <select
-                  className={styles.select}
-                  aria-label="批量节点类型"
-                  value={batchNodeKind}
-                  onChange={(e) => setBatchNodeKind(e.target.value as "auto" | "stun" | "easytier" | "relay")}
-                >
-                  <option value="auto">自动识别类型（推荐）</option>
-                  <option value="stun">全部作为 公共 STUN</option>
-                  <option value="easytier">全部作为 EasyTier</option>
-                  <option value="relay">全部作为 自建中转</option>
-                </select>
-              </div>
-              <textarea
-                rows={4}
-                value={batchNodeText}
-                onChange={(e) => setBatchNodeText(e.currentTarget.value)}
-                placeholder={"一行一个节点，例如：\nstun.miwifi.com:3478\nstun.chat.bilibili.com:3478\ntcp://public.easytier.top:11010\n阿里云上海, 45.x.x.x:21118"}
-                aria-label="批量节点输入框"
-                style={{
-                  width: "100%",
-                  boxSizing: "border-box",
-                  padding: "8px 10px",
-                  borderRadius: "6px",
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  background: "rgba(0,0,0,0.32)",
-                  color: "inherit",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontSize: "12px",
-                  lineHeight: 1.5,
-                  resize: "vertical",
-                }}
-              />
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  onClick={() => setShowBatchAdd(false)}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.btn} ${styles.btnPrimary}`}
-                  onClick={handleBatchAddNodes}
-                >
-                  批量加入节点池
-                </button>
-              </div>
-            </div>
-          )}
-
-          {serverPool.filter((n) => poolFilter === "all" || inferNodeKind(n) === poolFilter).length === 0 ? (
-            <div style={{ fontSize: "12px", opacity: 0.72, lineHeight: 1.6 }}>
-              当前暂无节点。推荐先点右上角 <strong>「🌐 实时获取公共节点」</strong> 一键拉取国内高速 STUN 打洞服务器（小米/B站/腾讯/芒果/GitHub 保活源）与 EasyTier 社区节点，再点 <strong>「🔍 一键全池测速」</strong> 找出延迟最低的节点；如需独享高速中转，点 <strong>「🚀 SSH 一键部署」</strong>。
-            </div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(255px, 1fr))", gap: "8px", maxHeight: "240px", overflowY: "auto", paddingRight: "2px" }}>
-              {serverPool
-                .filter((n) => poolFilter === "all" || inferNodeKind(n) === poolFilter)
-                .map((node) => {
-                  const kind = inferNodeKind(node);
-                  const kindLabel = kind === "stun" ? "STUN" : kind === "easytier" ? "EASYTIER" : "RELAY";
-                  return (
-                    <div
-                      key={node.id}
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "5px",
-                        padding: "8px 10px",
-                        borderRadius: "8px",
-                        fontSize: "12px",
-                        border:
-                          node.status === "ok"
-                            ? "1px solid rgba(63, 185, 80, 0.45)"
-                            : node.status === "fail"
-                              ? "1px solid rgba(248, 81, 73, 0.4)"
-                              : "1px solid rgba(255, 255, 255, 0.12)",
-                        background: "rgba(0, 0, 0, 0.28)",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
-                        <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {node.status === "ok" ? "🟢" : node.status === "fail" ? "🔴" : "⚪"} {node.name}
-                        </span>
-                        <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
-                          <span style={{ fontSize: "10px", padding: "1px 5px", borderRadius: "4px", background: "rgba(255,255,255,0.08)" }}>
-                            {kindLabel}
-                          </span>
-                          <button
-                            type="button"
-                            title="点击单独测速并刷新延迟"
-                            aria-label={`测速刷新 ${node.name} 延迟`}
-                            disabled={probingPool || probingNodeId === node.id}
-                            onClick={() => void handleProbeSingleNode(node)}
-                            style={{
-                              cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
-                              background: "rgba(255, 255, 255, 0.06)",
-                              border: "1px solid rgba(255, 255, 255, 0.14)",
-                              borderRadius: "4px",
-                              padding: "1px 6px",
-                              fontWeight: 700,
-                              fontSize: "11.5px",
-                              color:
-                                probingNodeId === node.id
-                                  ? "#58a6ff"
-                                  : node.status === "ok"
-                                    ? "#3fb950"
-                                    : node.status === "fail"
-                                      ? "#f85149"
-                                      : "inherit",
-                            }}
-                          >
-                            {probingNodeId === node.id
-                              ? "⏳…"
-                              : node.lastRttMs !== null
-                                ? `${node.lastRttMs}ms`
-                                : node.status === "fail"
-                                  ? "超时"
-                                  : "测速"}
-                          </button>
-                        </div>
-                      </div>
-                      <code style={{ opacity: 0.78, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {node.addr}
-                      </code>
-                      {node.mappedAddr && (
-                        <div style={{ fontSize: "11px", color: "#58a6ff" }}>
-                          公网映射：{node.mappedAddr}
-                        </div>
-                      )}
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", marginTop: "2px" }}>
-                        <button
-                          type="button"
-                          onClick={() => handleBindNodeToTarget(node)}
-                          style={{
-                            padding: "2px 8px",
-                            borderRadius: "5px",
-                            fontSize: "11px",
-                            cursor: "pointer",
-                            border: "1px solid rgba(88,166,255,0.45)",
-                            background: "rgba(88,166,255,0.12)",
-                            color: "inherit",
-                          }}
-                        >
-                          + 绑定到当前目标
-                        </button>
-                        <div style={{ display: "inline-flex", gap: "4px" }}>
-                          <button
-                            type="button"
-                            aria-label={`收藏节点 ${node.name}`}
-                            title={node.favorite ? "取消置顶" : "收藏置顶"}
-                            onClick={() =>
-                              saveServerPool(
-                                sortServerPool(
-                                  serverPool.map((n) =>
-                                    n.id === node.id ? { ...n, favorite: !n.favorite } : n,
-                                  ),
-                                ),
-                              )
-                            }
-                            style={{ background: "none", border: "none", color: node.favorite ? "#e3b341" : "inherit", opacity: node.favorite ? 1 : 0.45, cursor: "pointer", padding: "0 3px" }}
-                          >
-                            {node.favorite ? "★" : "☆"}
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`移除节点 ${node.name}`}
-                            onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
-                            style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 3px" }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          )}
-
-          {showSshDeploy && (
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "8px",
-                padding: "10px",
-                borderRadius: "8px",
-                background: "rgba(63, 185, 80, 0.06)",
-                border: "1px solid rgba(63, 185, 80, 0.3)",
-                alignItems: "center",
-              }}
-            >
-              <input
-                type="text"
-                value={sshName}
-                onChange={(e) => setSshName(e.currentTarget.value)}
-                placeholder="节点名（如：香港 VPS）"
-                aria-label="新节点名称"
-                style={{ flex: "1 1 120px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <input
-                type="text"
-                value={sshHost}
-                onChange={(e) => setSshHost(e.currentTarget.value)}
-                placeholder="SSH 主机 IP（如 45.x.x.x）"
-                aria-label="部署节点 SSH 主机"
-                style={{ flex: "1 1 150px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <input
-                type="text"
-                value={sshPort}
-                onChange={(e) => setSshPort(e.currentTarget.value)}
-                placeholder="端口 22"
-                aria-label="部署节点 SSH 端口"
-                style={{ width: "68px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <input
-                type="text"
-                value={sshUser}
-                onChange={(e) => setSshUser(e.currentTarget.value)}
-                placeholder="root"
-                aria-label="部署节点 SSH 用户"
-                style={{ width: "80px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <input
-                type="text"
-                value={sshKeyPath}
-                onChange={(e) => setSshKeyPath(e.currentTarget.value)}
-                placeholder="私钥路径（留空用默认 ~/.ssh）"
-                aria-label="部署节点 SSH 私钥"
-                style={{ flex: "1 1 160px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-              />
-              <select
-                className={styles.select}
-                aria-label="部署模式"
-                value={sshMode}
-                onChange={(e) => setSshMode(e.target.value as "udp" | "docker")}
-              >
-                <option value="udp">UDP 直连 (systemd 21118)</option>
-                <option value="docker">Docker 容器化部署</option>
-              </select>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnPrimary}`}
-                disabled={sshBusy}
-                onClick={() => void handleLabSshDeploy()}
-              >
-                {sshBusy ? "⏳ 正在上传并启动…" : "🚀 上传启动并测速"}
-              </button>
-            </div>
-          )}
-            </>
-          )}
-        </div>
-
-        {/* 方案 B：EasyTier 双端一键组网（生成/粘贴口令，双端自动分配 10.126.x.x 彻底脱离 Tailscale 卡顿） */}
-        <div
-          style={{
-            padding: "10px 12px",
-            borderRadius: "10px",
-            background: "rgba(255, 255, 255, 0.025)",
-            border: "1px solid rgba(255, 255, 255, 0.09)",
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-          }}
-        >
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-              <strong style={{ fontSize: "13px" }}>
-                EasyTier 双端一键组网（摆脱 Tailscale 绕道卡顿）
-              </strong>
-              <span style={{ fontSize: "11.5px", color: etStatus?.enabled ? "#3fb950" : "inherit", opacity: etStatus?.enabled ? 1 : 0.65 }}>
-                {etStatus?.enabled
-                  ? `已加入 ${etStatus.networkName} · 本机 ${etStatus.virtualIp || "重启后分配 10.126.x.x"} · 对端 ${etStatus.peers.length} 台`
-                  : "双端粘贴同一条口令，自动分配 10.126.x.x 直连内网 IP"}
-              </span>
+                      background: active ? "rgba(88, 166, 255, 0.18)" : "rgba(0, 0, 0, 0.22)",
+                      color: "inherit",
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
             <button
               type="button"
               className={styles.btn}
-              aria-expanded={etExpanded}
-              onClick={() => setEtExpanded((v) => !v)}
+              aria-expanded={modeBodyOpen}
+              onClick={() => setModeBodyOpen((v) => !v)}
             >
-              {etExpanded ? "▲ 收起组网" : "▼ 展开口令组网"}
+              {modeBodyOpen ? "收起配置区" : "展开配置区"}
             </button>
           </div>
 
-          {etExpanded && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {etStatus && !etStatus.installed && (
-                <div style={{ fontSize: "12px", padding: "8px 10px", borderRadius: "6px", background: "rgba(229, 181, 103, 0.1)", border: "1px solid rgba(229, 181, 103, 0.35)" }}>
-                  本机未检测到 <code>easytier-core</code>：请先下载 EasyTier（<code>easytier-core</code> + <code>easytier-cli</code>）放入软件配置目录的 <code>tools</code> 文件夹或系统 PATH，即可自动识别。
+          {modeBodyOpen && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", paddingTop: "2px" }}>
+              {/* 公共复用：批量添加（一行一个）文本框，随当前标签页默认类型自动匹配 */}
+              {showBatchAdd && activeModeTab !== "direct" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "10px", borderRadius: "8px", background: "rgba(88,166,255,0.06)", border: "1px solid rgba(88,166,255,0.28)" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                      批量粘贴节点（一行一个，支持纯地址或「名称,地址」，自动去重）
+                    </span>
+                    <select
+                      className={styles.select}
+                      aria-label="批量节点类型"
+                      value={batchNodeKind}
+                      onChange={(e) => setBatchNodeKind(e.target.value as "auto" | "stun" | "easytier" | "relay")}
+                    >
+                      <option value="auto">自动识别类型（推荐）</option>
+                      <option value="stun">全部作为 公共 STUN</option>
+                      <option value="easytier">全部作为 EasyTier</option>
+                      <option value="relay">全部作为 自建中转</option>
+                    </select>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={batchNodeText}
+                    onChange={(e) => setBatchNodeText(e.currentTarget.value)}
+                    placeholder={"一行一个节点，例如：\nstun.miwifi.com:3478\ntcp://public.easytier.top:11010\n阿里云上海, 45.x.x.x:21118"}
+                    aria-label="批量节点输入框"
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      padding: "8px 10px",
+                      borderRadius: "6px",
+                      border: "1px solid rgba(255,255,255,0.16)",
+                      background: "rgba(0,0,0,0.32)",
+                      color: "inherit",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontSize: "12px",
+                      lineHeight: 1.5,
+                      resize: "vertical",
+                    }}
+                  />
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: "6px" }}>
+                    <button type="button" className={styles.btn} onClick={() => setShowBatchAdd(false)}>
+                      取消
+                    </button>
+                    <button type="button" className={`${styles.btn} ${styles.btnPrimary}`} onClick={handleBatchAddNodes}>
+                      批量加入节点池
+                    </button>
+                  </div>
                 </div>
               )}
 
-              {/* A 端：生成组网口令 */}
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-                <button
-                  type="button"
-                  className={`${styles.btn} ${styles.btnPrimary}`}
-                  disabled={etBusy}
-                  onClick={() => void handleGenerateEtInvite()}
-                >
-                  {etBusy ? "处理中…" : "生成组网口令（创建网络）"}
-                </button>
-                {etInviteCode && (
-                  <>
-                    <input
-                      type="text"
-                      readOnly
-                      value={etInviteCode}
-                      aria-label="当前 EasyTier 组网口令"
-                      style={{ flex: "1 1 240px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(63,185,80,0.4)", background: "rgba(0,0,0,0.3)", color: "#3fb950", fontFamily: "monospace", fontSize: "11.5px" }}
-                    />
-                    <button
-                      type="button"
-                      className={styles.btn}
-                      onClick={() => {
-                        void navigator.clipboard?.writeText(etInviteCode);
-                        showToast("已复制组网口令，发给对方粘贴加入即可");
-                      }}
-                    >
-                      复制口令
-                    </button>
-                  </>
-                )}
-              </div>
+              {/* ═══ TAB 1：直连 / Tailscale ═══ */}
+              {activeModeTab === "direct" && (
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "8px 10px", borderRadius: "8px", background: "rgba(0,0,0,0.22)" }}>
+                  <div style={{ fontSize: "12px", lineHeight: 1.6, opacity: 0.88 }}>
+                    <div>
+                      <strong>当前目标地址：</strong>
+                      <code>{baseTargetIp || "尚未输入 IP"}</code>
+                      {baseTargetIp.startsWith("100.")
+                        ? "（Tailscale 虚拟 IP：若实测延迟 > 200ms 说明走了海外 DERP 中继，建议切到「EasyTier 组网」或「自建中转 · 9位ID」）"
+                        : "（局域网 / 公网直连地址：同一局域网下支持 4K@144Hz 极限低延迟）"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`${styles.btn} ${styles.btnPrimary}`}
+                    onClick={() => {
+                      setShowAddPlan(true);
+                      setEditingPlanId(null);
+                      setNewPlanMode(baseTargetIp.startsWith("100.") ? "tailscale" : "direct");
+                      setNewPlanAddr(baseTargetIp);
+                      setNewPlanName(baseTargetIp.startsWith("100.") ? "Tailscale 直连" : "局域网直连");
+                    }}
+                  >
+                    + 添加直连方案
+                  </button>
+                </div>
+              )}
 
-              {/* B 端：粘贴口令加入 */}
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-                <input
-                  type="text"
-                  value={etJoinInput}
-                  onChange={(e) => setEtJoinInput(e.currentTarget.value)}
-                  placeholder="粘贴对方发来的 rd-et://... 组网口令，一键加入同一内网"
-                  aria-label="粘贴 EasyTier 组网口令"
-                  style={{ flex: "1 1 260px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
-                />
-                <button
-                  type="button"
-                  className={styles.btn}
-                  disabled={etBusy}
-                  onClick={() => void handleJoinEtInvite()}
-                >
-                  一键加入组网
-                </button>
-                <button
-                  type="button"
-                  className={styles.btn}
-                  disabled={etBusy}
-                  onClick={() => void handleRefreshEtStatus()}
-                >
-                  刷新在线成员
-                </button>
-              </div>
-
-              {/* 在线组网成员（直接绑定对方的 10.126.x.x） */}
-              {etStatus && etStatus.peers.length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-                  {etStatus.peers.map((p) => (
-                    <div
-                      key={p.ipv4}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "8px",
-                        padding: "6px 10px",
-                        borderRadius: "8px",
-                        border: "1px solid rgba(63,185,80,0.4)",
-                        background: "rgba(0,0,0,0.28)",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <strong>{p.hostname}</strong>
-                      <code style={{ color: "#58a6ff" }}>{p.ipv4}</code>
-                      <span style={{ opacity: 0.78 }}>
-                        {p.cost}{p.latencyMs !== null ? ` · ${p.latencyMs}ms` : ""}
+              {/* ═══ TAB 2：EasyTier 组网（方案 B：勾选已测活节点 → 生成口令 → 绑定 10.126.x.x） ═══ */}
+              {activeModeTab === "easytier" && (() => {
+                const etNodes = serverPool.filter((n) => inferNodeKind(n) === "easytier");
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          disabled={fetchingPublic}
+                          onClick={() => void handleFetchPublicNodes()}
+                        >
+                          {fetchingPublic ? "拉取中…" : "实时拉取公共节点"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          disabled={probingPool || etNodes.length === 0}
+                          onClick={() => {
+                            setPoolFilter("easytier");
+                            void handleProbeServerPool();
+                          }}
+                        >
+                          {probingPool ? "测速中…" : "测本组延迟"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          onClick={() => {
+                            setBatchNodeKind("easytier");
+                            setShowBatchAdd((v) => !v);
+                          }}
+                        >
+                          + 批量粘贴节点
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          onClick={() => setShowSubInput((v) => !v)}
+                        >
+                          自定义订阅源
+                        </button>
+                      </div>
+                      <span style={{ fontSize: "11.5px", opacity: 0.72 }}>
+                        勾选 1~3 个绿灯节点后生成口令，双端粘贴即分配 10.126.x.x 直连
                       </span>
+                    </div>
+
+                    {showSubInput && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center", padding: "8px", borderRadius: "8px", background: "rgba(0,0,0,0.22)" }}>
+                        <input
+                          type="text"
+                          value={customSubUrl}
+                          onChange={(e) => setCustomSubUrl(e.currentTarget.value)}
+                          placeholder="填入 EasyTier 社区节点 API 或 txt 订阅地址（留空用内置源）"
+                          aria-label="自定义公共节点订阅地址"
+                          style={{ flex: "1 1 260px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+                        />
+                        <button type="button" className={`${styles.btn} ${styles.btnPrimary}`} disabled={fetchingPublic} onClick={() => void handleFetchPublicNodes()}>
+                          保存并拉取
+                        </button>
+                      </div>
+                    )}
+
+                    {/* EasyTier 节点勾选网格 */}
+                    {etNodes.length === 0 ? (
+                      <div style={{ fontSize: "12px", opacity: 0.7 }}>
+                        暂无 EasyTier 引导节点：点上方「实时拉取公共节点」或「+ 批量粘贴节点」添加后即可勾选生成口令。
+                      </div>
+                    ) : (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: "8px", maxHeight: "170px", overflowY: "auto" }}>
+                        {etNodes.map((node) => {
+                          const checked = selectedEtNodeIds.includes(node.id);
+                          return (
+                            <div
+                              key={node.id}
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                                padding: "8px 10px",
+                                borderRadius: "8px",
+                                fontSize: "12px",
+                                border: checked
+                                  ? "1px solid rgba(88,166,255,0.75)"
+                                  : node.status === "ok"
+                                    ? "1px solid rgba(63,185,80,0.45)"
+                                    : "1px solid rgba(255,255,255,0.12)",
+                                background: checked ? "rgba(88,166,255,0.1)" : "rgba(0,0,0,0.28)",
+                              }}
+                            >
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                                <label style={{ display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer", overflow: "hidden" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() =>
+                                      setSelectedEtNodeIds((prev) =>
+                                        prev.includes(node.id)
+                                          ? prev.filter((id) => id !== node.id)
+                                          : [...prev, node.id],
+                                      )
+                                    }
+                                  />
+                                  <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {node.name}
+                                  </span>
+                                </label>
+                                <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                                  <button
+                                    type="button"
+                                    title="点击单独测速并刷新延迟"
+                                    disabled={probingPool || probingNodeId === node.id}
+                                    onClick={() => void handleProbeSingleNode(node)}
+                                    style={{
+                                      cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
+                                      background: "rgba(255,255,255,0.06)",
+                                      border: "1px solid rgba(255,255,255,0.14)",
+                                      borderRadius: "4px",
+                                      padding: "1px 6px",
+                                      fontWeight: 700,
+                                      fontSize: "11px",
+                                      color: node.status === "ok" ? "#3fb950" : node.status === "fail" ? "#f85149" : "inherit",
+                                    }}
+                                  >
+                                    {probingNodeId === node.id ? "…" : node.lastRttMs !== null ? `${node.lastRttMs}ms` : node.status === "fail" ? "超时" : "测速"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    aria-label={`移除节点 ${node.name}`}
+                                    onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                                    style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 2px" }}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              </div>
+                              <code style={{ opacity: 0.78, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {node.addr}
+                              </code>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* EasyTier 口令生成 / 粘贴加入 / 在线成员 */}
+                    {etStatus && !etStatus.installed && (
+                      <div style={{ fontSize: "12px", padding: "7px 10px", borderRadius: "6px", background: "rgba(229, 181, 103, 0.1)", border: "1px solid rgba(229, 181, 103, 0.35)" }}>
+                        未检测到本机 <code>easytier-core</code>：请下载官方 EasyTier 放入配置目录 <code>tools/</code> 或系统 PATH 即可自动识别。
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                      <button
+                        type="button"
+                        className={`${styles.btn} ${styles.btnPrimary}`}
+                        disabled={etBusy}
+                        onClick={() => void handleGenerateEtInvite()}
+                      >
+                        {etBusy
+                          ? "处理中…"
+                          : selectedEtNodeIds.length > 0
+                            ? `用已选 ${selectedEtNodeIds.length} 个节点生成口令`
+                            : "用最快可用节点生成口令"}
+                      </button>
+                      {etInviteCode && (
+                        <>
+                          <input
+                            type="text"
+                            readOnly
+                            value={etInviteCode}
+                            aria-label="当前 EasyTier 组网口令"
+                            style={{ flex: "1 1 220px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(63,185,80,0.4)", background: "rgba(0,0,0,0.3)", color: "#3fb950", fontFamily: "monospace", fontSize: "11.5px" }}
+                          />
+                          <button
+                            type="button"
+                            className={styles.btn}
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(etInviteCode);
+                              showToast("已复制组网口令，发给对方粘贴即可");
+                            }}
+                          >
+                            复制口令
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                      <input
+                        type="text"
+                        value={etJoinInput}
+                        onChange={(e) => setEtJoinInput(e.currentTarget.value)}
+                        placeholder="粘贴对方发来的 rd-et://... 口令加入同一内网"
+                        aria-label="粘贴 EasyTier 组网口令"
+                        style={{ flex: "1 1 240px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+                      />
+                      <button type="button" className={styles.btn} disabled={etBusy} onClick={() => void handleJoinEtInvite()}>
+                        一键加入
+                      </button>
+                      <button type="button" className={styles.btn} disabled={etBusy} onClick={() => void handleRefreshEtStatus()}>
+                        刷新在线成员
+                      </button>
+                    </div>
+                    {etStatus && etStatus.peers.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {etStatus.peers.map((p) => (
+                          <div
+                            key={p.ipv4}
+                            style={{ display: "inline-flex", alignItems: "center", gap: "8px", padding: "5px 10px", borderRadius: "8px", border: "1px solid rgba(63,185,80,0.4)", background: "rgba(0,0,0,0.28)", fontSize: "12px" }}
+                          >
+                            <strong>{p.hostname}</strong>
+                            <code style={{ color: "#58a6ff" }}>{p.ipv4}</code>
+                            <span style={{ opacity: 0.78 }}>{p.cost}{p.latencyMs !== null ? ` · ${p.latencyMs}ms` : ""}</span>
+                            <button type="button" className={styles.btn} onClick={() => handleBindEtPeerIp(p.hostname, p.ipv4)}>
+                              + 绑定此 IP
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* ═══ TAB 3：STUN 穿透体检（测本机 NAT 类型 & 公网映射 IP:端口） ═══ */}
+              {activeModeTab === "stun" && (() => {
+                const stunNodes = serverPool.filter((n) => inferNodeKind(n) === "stun");
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                        <button
+                          type="button"
+                          className={`${styles.btn} ${styles.btnPrimary}`}
+                          disabled={natBusy}
+                          onClick={() => void handleDiagnoseNat()}
+                        >
+                          {natBusy ? "体检中…" : "一键 NAT 穿透体检"}
+                        </button>
+                        <button type="button" className={styles.btn} disabled={fetchingPublic} onClick={() => void handleFetchPublicNodes()}>
+                          {fetchingPublic ? "拉取中…" : "拉取公共 STUN"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          disabled={probingPool || stunNodes.length === 0}
+                          onClick={() => {
+                            setPoolFilter("stun");
+                            void handleProbeServerPool();
+                          }}
+                        >
+                          {probingPool ? "测速中…" : "测本组延迟"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.btn}
+                          onClick={() => {
+                            setBatchNodeKind("stun");
+                            setShowBatchAdd((v) => !v);
+                          }}
+                        >
+                          + 批量粘贴 STUN
+                        </button>
+                      </div>
+                      <span style={{ fontSize: "11.5px", opacity: 0.72 }}>
+                        STUN 仅测公网映射（零流量经过），需配合 EasyTier 或自建中转完成双端打洞
+                      </span>
+                    </div>
+
+                    {natResult && (
+                      <div
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: "8px",
+                          border: natResult.natType === "cone" ? "1px solid rgba(63,185,80,0.5)" : "1px solid rgba(229,181,103,0.5)",
+                          background: natResult.natType === "cone" ? "rgba(63,185,80,0.09)" : "rgba(229,181,103,0.09)",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "4px",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <strong>{natResult.label}</strong>
+                        <span style={{ opacity: 0.86 }}>{natResult.advice}</span>
+                        <div style={{ fontFamily: "monospace", fontSize: "11.5px", opacity: 0.85 }}>
+                          {natResult.mappedA && <span>节点 A ({natResult.serverA}) → {natResult.mappedA} ({natResult.rttAMs}ms)</span>}
+                          {natResult.mappedB && <span style={{ marginLeft: "12px" }}>节点 B ({natResult.serverB}) → {natResult.mappedB} ({natResult.rttBMs}ms)</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    {stunNodes.length > 0 && (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(245px, 1fr))", gap: "8px", maxHeight: "170px", overflowY: "auto" }}>
+                        {stunNodes.map((node) => (
+                          <div
+                            key={node.id}
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "4px",
+                              padding: "8px 10px",
+                              borderRadius: "8px",
+                              fontSize: "12px",
+                              border: node.status === "ok" ? "1px solid rgba(63,185,80,0.45)" : "1px solid rgba(255,255,255,0.12)",
+                              background: "rgba(0,0,0,0.28)",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                              <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
+                              <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                                <button
+                                  type="button"
+                                  title="点击单独测速并刷新延迟"
+                                  disabled={probingPool || probingNodeId === node.id}
+                                  onClick={() => void handleProbeSingleNode(node)}
+                                  style={{
+                                    cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
+                                    background: "rgba(255,255,255,0.06)",
+                                    border: "1px solid rgba(255,255,255,0.14)",
+                                    borderRadius: "4px",
+                                    padding: "1px 6px",
+                                    fontWeight: 700,
+                                    fontSize: "11px",
+                                    color: node.status === "ok" ? "#3fb950" : node.status === "fail" ? "#f85149" : "inherit",
+                                  }}
+                                >
+                                  {probingNodeId === node.id ? "…" : node.lastRttMs !== null ? `${node.lastRttMs}ms` : node.status === "fail" ? "超时" : "测速"}
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`移除节点 ${node.name}`}
+                                  onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                                  style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 2px" }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </div>
+                            <code style={{ opacity: 0.78, fontSize: "11px" }}>{node.addr}</code>
+                            {node.mappedAddr && <div style={{ fontSize: "11px", color: "#58a6ff" }}>公网映射：{node.mappedAddr}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* ═══ TAB 4：自建中转 · 9 位设备 ID 码（方案 A：双端注册 → 9 位 ID 打洞直连 + 中转兜底 + SSH 一键部署） ═══ */}
+              {activeModeTab === "relay" && (() => {
+                const relayNodes = serverPool.filter((n) => inferNodeKind(n) === "relay");
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {/* 本机 9 位 ID + 全局中转地址 */}
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "10px 12px", borderRadius: "8px", background: "rgba(88,166,255,0.07)", border: "1px solid rgba(88,166,255,0.28)" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px" }}>
+                        <span style={{ fontSize: "12px", opacity: 0.8 }}>本机 9 位 ID：</span>
+                        <strong style={{ fontFamily: "monospace", fontSize: "15px", letterSpacing: "1px", color: "#58a6ff" }}>
+                          {relayIdInfo?.numericId ?? "读取中…"}
+                        </strong>
+                        {relayIdInfo && (
+                          <button
+                            type="button"
+                            className={styles.btn}
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(relayIdInfo.numericId);
+                              showToast(`已复制本机 9 位 ID：${relayIdInfo.numericId}`);
+                            }}
+                          >
+                            复制本机 ID
+                          </button>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", flex: "1 1 280px", justifyContent: "flex-end" }}>
+                        <input
+                          type="text"
+                          value={selectedRelayNodeAddr}
+                          onChange={(e) => setSelectedRelayNodeAddr(e.currentTarget.value)}
+                          placeholder="自建中转地址（如 45.x.x.x:21118）"
+                          aria-label="自建中转服务器地址"
+                          style={{ flex: "1 1 180px", maxWidth: "240px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }}
+                        />
+                        <button type="button" className={styles.btn} onClick={() => void handleSaveGlobalRelay(selectedRelayNodeAddr)}>
+                          设为本机中转
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 输入对方 9 位 ID 实时查在线 & 绑定方案 */}
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+                      <input
+                        type="text"
+                        value={peerNumericIdInput}
+                        onChange={(e) => setPeerNumericIdInput(e.currentTarget.value)}
+                        placeholder="输入对方 9 位设备 ID（如 482 916 305）"
+                        aria-label="对方 9 位设备 ID"
+                        style={{ flex: "1 1 220px", padding: "6px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px", fontFamily: "monospace" }}
+                      />
+                      <button
+                        type="button"
+                        className={`${styles.btn} ${styles.btnPrimary}`}
+                        disabled={relayLookupBusy}
+                        onClick={() => void handleResolvePeerId()}
+                      >
+                        {relayLookupBusy ? "查询中…" : "查询对方 ID 在线"}
+                      </button>
+                      <button type="button" className={styles.btn} onClick={handleBindRelayIdPlan}>
+                        + 绑定 9位ID 方案
+                      </button>
+                      <button type="button" className={styles.btn} onClick={() => setShowSshDeploy((v) => !v)}>
+                        {showSshDeploy ? "收起 SSH 部署" : "SSH 一键部署 VPS"}
+                      </button>
                       <button
                         type="button"
                         className={styles.btn}
-                        onClick={() => handleBindEtPeerIp(p.hostname, p.ipv4)}
+                        onClick={() => {
+                          setBatchNodeKind("relay");
+                          setShowBatchAdd((v) => !v);
+                        }}
                       >
-                        + 绑定此 IP
+                        + 批量添加中转
                       </button>
                     </div>
-                  ))}
-                </div>
-              )}
+
+                    {relayLookupRes && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          padding: "7px 10px",
+                          borderRadius: "6px",
+                          border: relayLookupRes.online ? "1px solid rgba(63,185,80,0.5)" : "1px solid rgba(229,181,103,0.45)",
+                          background: relayLookupRes.online ? "rgba(63,185,80,0.09)" : "rgba(229,181,103,0.08)",
+                        }}
+                      >
+                        {relayLookupRes.detail}
+                      </div>
+                    )}
+
+                    {/* 自建中转节点网格 */}
+                    {relayNodes.length > 0 && (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(245px, 1fr))", gap: "8px", maxHeight: "150px", overflowY: "auto" }}>
+                        {relayNodes.map((node) => (
+                          <div
+                            key={node.id}
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "4px",
+                              padding: "8px 10px",
+                              borderRadius: "8px",
+                              fontSize: "12px",
+                              border: node.status === "ok" ? "1px solid rgba(63,185,80,0.45)" : "1px solid rgba(255,255,255,0.12)",
+                              background: "rgba(0,0,0,0.28)",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
+                              <span style={{ fontWeight: 600 }}>{node.name}</span>
+                              <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                                <button
+                                  type="button"
+                                  title="点击单独测速并刷新延迟"
+                                  disabled={probingPool || probingNodeId === node.id}
+                                  onClick={() => void handleProbeSingleNode(node)}
+                                  style={{
+                                    cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
+                                    background: "rgba(255,255,255,0.06)",
+                                    border: "1px solid rgba(255,255,255,0.14)",
+                                    borderRadius: "4px",
+                                    padding: "1px 6px",
+                                    fontWeight: 700,
+                                    fontSize: "11px",
+                                    color: node.status === "ok" ? "#3fb950" : node.status === "fail" ? "#f85149" : "inherit",
+                                  }}
+                                >
+                                  {probingNodeId === node.id ? "…" : node.lastRttMs !== null ? `${node.lastRttMs}ms` : node.status === "fail" ? "超时" : "测速"}
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`移除节点 ${node.name}`}
+                                  onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
+                                  style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 2px" }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </div>
+                            <code style={{ opacity: 0.78, fontSize: "11px" }}>{node.addr}</code>
+                            <div style={{ display: "flex", gap: "6px", marginTop: "2px" }}>
+                              <button type="button" className={styles.btn} onClick={() => setSelectedRelayNodeAddr(node.addr)}>
+                                选用此节点
+                              </button>
+                              <button type="button" className={styles.btn} onClick={() => handleBindNodeToTarget(node)}>
+                                + 绑定方案
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* SSH 一键上传部署自建中转 */}
+                    {showSshDeploy && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", padding: "10px", borderRadius: "8px", background: "rgba(63,185,80,0.06)", border: "1px solid rgba(63,185,80,0.3)", alignItems: "center" }}>
+                        <input type="text" value={sshName} onChange={(e) => setSshName(e.currentTarget.value)} placeholder="节点名（如：香港 VPS）" aria-label="新节点名称" style={{ flex: "1 1 120px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }} />
+                        <input type="text" value={sshHost} onChange={(e) => setSshHost(e.currentTarget.value)} placeholder="SSH 主机 IP（如 45.x.x.x）" aria-label="部署节点 SSH 主机" style={{ flex: "1 1 150px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }} />
+                        <input type="text" value={sshPort} onChange={(e) => setSshPort(e.currentTarget.value)} placeholder="端口 22" aria-label="部署节点 SSH 端口" style={{ width: "68px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }} />
+                        <input type="text" value={sshUser} onChange={(e) => setSshUser(e.currentTarget.value)} placeholder="root" aria-label="部署节点 SSH 用户" style={{ width: "80px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }} />
+                        <input type="text" value={sshKeyPath} onChange={(e) => setSshKeyPath(e.currentTarget.value)} placeholder="私钥路径（留空用 ~/.ssh）" aria-label="部署节点 SSH 私钥" style={{ flex: "1 1 150px", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.16)", background: "rgba(0,0,0,0.3)", color: "inherit", fontSize: "12px" }} />
+                        <select className={styles.select} aria-label="部署模式" value={sshMode} onChange={(e) => setSshMode(e.target.value as "udp" | "docker")}>
+                          <option value="udp">UDP 直连 (systemd 21118)</option>
+                          <option value="docker">Docker 容器化部署</option>
+                        </select>
+                        <button type="button" className={`${styles.btn} ${styles.btnPrimary}`} disabled={sshBusy} onClick={() => void handleLabSshDeploy()}>
+                          {sshBusy ? "正在上传并启动…" : "上传启动并测速"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
