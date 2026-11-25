@@ -7,6 +7,7 @@
 //! 本 bin 保留无头被控模式：无参数（双击）等价 `run`，命令行子命令供测试
 //! 与调试（`run --print-port`、`spike`）。托盘只属于 bin 模式。
 
+#[cfg(windows)]
 mod spike;
 mod tray;
 
