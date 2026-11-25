@@ -49,7 +49,8 @@ const ERR_UNAUTHENTICATED: u32 = 1;
 const ERR_TERMINAL_DISABLED: u32 = 30;
 /// 协议错误码 50:剪贴板操作失败(05_api §4,v0.1 追加)。
 const ERR_CLIPBOARD: u32 = 50;
-/// 协议错误码 70:免费版权益限制(T-029 商业化门控;升级 Pro 解除)。
+/// 协议错误码 70:免费版权益限制(T-029 保留协议码)。
+#[allow(dead_code)]
 const ERR_LICENSE_LIMIT: u32 = 70;
 /// 连接确认等待时长:超时未确认视为拒绝。
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -274,32 +275,6 @@ pub async fn handle_conn(state: Arc<AgentState>, conn: Conn) -> anyhow::Result<(
                 }
             }
         }
-        // 并发上限检查必须在回 HelloAck 之前完成，且复用 hello_req_id 回 Error，
-        // 避免控制端误以为握手成功随后瞬间被关闭只看到「离线」。
-        let is_pro = state
-            .license
-            .as_ref()
-            .is_some_and(|l| l.plan == rd_security::Plan::Pro);
-        if !is_pro
-            && state.peers.lock().expect("peers 锁中毒").len()
-                >= rd_security::license::FREE_CONN_MAX
-        {
-            tracing::info!(peer = peer_fp.short_hex(), "免费版并发连接已达上限,拒绝");
-            crate::audit::log(
-                "license_reject_conn",
-                &hello.device_name,
-                &peer_fp.short_hex(),
-                serde_json::json!({}),
-            );
-            ctl_tx
-                .send(&error_env(
-                    hello_req_id,
-                    ERR_LICENSE_LIMIT,
-                    "免费版同一时间只能 1 台电脑连接（当前已有其他设备连着这台电脑，请先断开或升级 Pro）",
-                ))
-                .await?;
-            return Ok(());
-        }
         // 沿用 Hello 的 req_id:控制端以 RPC(等响应)方式握手
         ctl_tx
             .send(&hello_ack(hello_req_id, hello.media_fec))
@@ -496,10 +471,29 @@ async fn run_pairing(
                     PairStep::Send(out) => {
                         // 内层信封 [ver][tag][payload]:tag 0x02(MAC 确认)
                         // = Agent 已校验对端 MAC、配对成功。
-                        // 两条出向消息都回 ok:true + spake2_msg 承载(见模块注释)。
+                        // 必须**先落盘写入信任列表，再回 PairResult{ok:true}**，
+                        // 彻底杜绝「对端收到 ok:true 立刻重连，但本机尚未写盘/写入被拒导致
+                        // 提示未信任、要求反复输配对码」的竞态与假成功问题！
                         let paired = out.get(1) == Some(&TAG_MAC);
-                        // 发送结果忽略:对端收到 MAC 后可能立即断开重连,
-                        // 连接关闭不能阻止下面信任列表的落盘
+                        if paired {
+                            if let Err(err) = persist_paired_trust(state, hello, peer_fp) {
+                                tracing::warn!(
+                                    peer = peer_fp.short_hex(),
+                                    "配对写入信任列表失败: {err:#}"
+                                );
+                                ctl_tx
+                                    .send(&Envelope {
+                                        req_id: env.req_id,
+                                        msg: Some(envelope::Msg::PairRes(PairResult {
+                                            ok: false,
+                                            spake2_msg: Vec::new(),
+                                            reason: format!("保存信任列表失败：{err}"),
+                                        })),
+                                    })
+                                    .await?;
+                                return Ok(false);
+                            }
+                        }
                         let _ = ctl_tx
                             .send(&Envelope {
                                 req_id: env.req_id,
@@ -511,13 +505,14 @@ async fn run_pairing(
                             })
                             .await;
                         if paired {
-                            finish_pairing(state, ctl_tx, hello, peer_fp).await?;
+                            let _ = ctl_tx.send(&hello_ack(0, hello.media_fec)).await;
                             return Ok(true);
                         }
                     }
                     // Agent 侧状态机不产生 Done(仅控制端返回);防御性按成功处理。
                     PairStep::Done => {
-                        finish_pairing(state, ctl_tx, hello, peer_fp).await?;
+                        persist_paired_trust(state, hello, peer_fp)?;
+                        let _ = ctl_tx.send(&hello_ack(0, hello.media_fec)).await;
                         return Ok(true);
                     }
                     PairStep::Failed(err) => {
@@ -552,66 +547,24 @@ async fn run_pairing(
     }
 }
 
-/// 配对成功收尾:写入信任列表并回 `HelloAck`。
-async fn finish_pairing(
+/// 配对成功收尾:在回发 `PairResult{ok:true}` 之前同步持久化到 `trusted.json`，
+/// 确保控制端拿到成功回包后立刻发起的 `connect_device` 100% 命中信任列表，
+/// 配对一次即可永久免码重连（不再被旧 2 设备门控静默吞掉）。
+fn persist_paired_trust(
     state: &Arc<AgentState>,
-    ctl_tx: &mut ControlTx,
     hello: &Hello,
     peer_fp: Fingerprint,
 ) -> anyhow::Result<()> {
-    // 免费版门控 2/2:受信任设备数上限(T-029;Pro 不限)。配对码已验证
-    // 正确仍在此时拦下——码是当场授权,门控是长期权益,两回事。
-    let is_pro = state
-        .license
-        .as_ref()
-        .is_some_and(|l| l.plan == rd_security::Plan::Pro);
-    if !is_pro {
-        let count = lock_trust(state).list().len();
-        if count >= rd_security::license::FREE_DEVICE_MAX as usize {
-            tracing::info!(
-                peer = peer_fp.short_hex(),
-                count,
-                "免费版信任设备已达上限,拒绝配对"
-            );
-            crate::audit::log(
-                "license_reject_pair",
-                &hello.device_name,
-                &peer_fp.short_hex(),
-                serde_json::json!({ "trusted": count }),
-            );
-            ctl_tx
-                .send(&Envelope {
-                    req_id: 0,
-                    msg: Some(envelope::Msg::PairRes(PairResult {
-                        ok: false,
-                        spake2_msg: Vec::new(),
-                        reason: format!(
-                            "免费版最多记住 {} 台电脑。删除不再用的设备(托盘→信任设备),或放入授权码升级。",
-                            rd_security::FREE_DEVICE_MAX
-                        ),
-                    })),
-                })
-                .await?;
-            return Ok(());
-        }
-    }
-    {
-        lock_trust(state)
-            .add(peer_fp, &hello.device_name)
-            .context("配对成功但写入信任列表失败")?;
-    }
-    tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已加入信任列表");
+    lock_trust(state)
+        .add(peer_fp, &hello.device_name)
+        .context("配对成功但写入信任列表失败")?;
+    tracing::info!(peer = peer_fp.short_hex(), name = %hello.device_name, "配对成功,已永久加入信任列表");
     crate::audit::log(
         "pair_success",
         &hello.device_name,
         &peer_fp.short_hex(),
         serde_json::json!({}),
     );
-    // HelloAck 尽力发送:对端配对成功后可能立即断开重连
-    // 配对成功后的主动推送(对端可能已断开重连),无对应请求,req_id=0
-    // 配对期 ack 同样回带协商位：会话上下文以 hello.media_fec 生效，ack 若
-    // 撒谎 false，控制端会按非 fec 路径解码而收不到视频流（两端认知分裂）
-    let _ = ctl_tx.send(&hello_ack(0, hello.media_fec)).await;
     Ok(())
 }
 
