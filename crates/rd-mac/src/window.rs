@@ -314,7 +314,7 @@ pub mod resize {
     }
 
     pub fn save_placement(hwnd: isize) -> Result<SavedPlacement> {
-        let rect = window_rect(hwnd).unwrap_or(Rect {
+        let rect = super::window_rect(hwnd).unwrap_or(Rect {
             x: 0,
             y: 0,
             w: 1280,
@@ -324,7 +324,7 @@ pub mod resize {
     }
 
     pub fn fit_window(hwnd: isize, client_w: u32, client_h: u32) -> Result<FitResult> {
-        let Some(cur) = window_rect(hwnd) else {
+        let Ok(cur) = window_rect(hwnd) else {
             return Ok(FitResult::NotResizable);
         };
         if cur.w == client_w && cur.h == client_h {
