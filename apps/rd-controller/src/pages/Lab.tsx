@@ -551,7 +551,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [batchNodeText, setBatchNodeText] = useState("");
   const [probingPool, setProbingPool] = useState(false);
   const [probingNodeId, setProbingNodeId] = useState<string | null>(null);
-  const [activeModeTab, setActiveModeTab] = useState<"direct" | "easytier" | "stun" | "relay">("easytier");
+  const [activeModeTab, setActiveModeTab] = useState<"direct" | "easytier" | "relay">("easytier");
   const [modeBodyOpen, setModeBodyOpen] = useState(false);
   const [selectedEtNodeIds, setSelectedEtNodeIds] = useState<string[]>([]);
   const [natBusy, setNatBusy] = useState(false);
@@ -2081,14 +2081,13 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
             gap: "10px",
           }}
         >
-          {/* 顶部 4 个连接方式标签 + 收起开关 */}
+          {/* 顶部 3 个真实连接方式标签 + 共用 NAT 体检按钮 + 收起开关 */}
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }} role="tablist" aria-label="连接与组网方式">
               {(
                 [
                   ["direct", "直连 / Tailscale"],
                   ["easytier", `EasyTier 组网 (${serverPool.filter((n) => inferNodeKind(n) === "easytier").length})`],
-                  ["stun", `STUN 穿透体检 (${serverPool.filter((n) => inferNodeKind(n) === "stun").length})`],
                   ["relay", `自建中转 · 9位ID (${serverPool.filter((n) => inferNodeKind(n) === "relay").length})`],
                 ] as const
               ).map(([tabId, label]) => {
@@ -2105,7 +2104,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                       } else {
                         setActiveModeTab(tabId);
                         setModeBodyOpen(true);
-                        if (tabId === "easytier" || tabId === "stun" || tabId === "relay") {
+                        if (tabId === "easytier" || tabId === "relay") {
                           setPoolFilter(tabId);
                         }
                       }
@@ -2128,15 +2127,77 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                 );
               })}
             </div>
-            <button
-              type="button"
-              className={styles.btn}
-              aria-expanded={modeBodyOpen}
-              onClick={() => setModeBodyOpen((v) => !v)}
-            >
-              {modeBodyOpen ? "收起配置区" : "展开配置区"}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                type="button"
+                className={styles.btn}
+                disabled={natBusy}
+                onClick={() => void handleDiagnoseNat()}
+                title="双 STUN 同端口检测本机 NAT 类型（EasyTier 与自建中转 P2P 打洞共用）"
+                style={
+                  natResult
+                    ? {
+                        borderColor:
+                          natResult.natType === "cone"
+                            ? "rgba(63, 185, 80, 0.55)"
+                            : "rgba(229, 181, 103, 0.55)",
+                        color: natResult.natType === "cone" ? "#3fb950" : "#e5b567",
+                      }
+                    : undefined
+                }
+              >
+                {natBusy
+                  ? "NAT 体检中…"
+                  : natResult
+                    ? natResult.natType === "cone"
+                      ? "圆锥 NAT · 可打洞"
+                      : natResult.natType === "symmetric"
+                        ? "对称 NAT · 建议中转"
+                        : "NAT 状态待确认"
+                    : "NAT 穿透体检"}
+              </button>
+              <button
+                type="button"
+                className={styles.btn}
+                aria-expanded={modeBodyOpen}
+                onClick={() => setModeBodyOpen((v) => !v)}
+              >
+                {modeBodyOpen ? "收起配置区" : "展开配置区"}
+              </button>
+            </div>
           </div>
+
+          {/* 共用 NAT 体检结论条（EasyTier 与自建中转打洞共用，点击 NAT 穿透体检后显示，可关闭） */}
+          {natResult && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "8px",
+                padding: "7px 10px",
+                borderRadius: "8px",
+                border: natResult.natType === "cone" ? "1px solid rgba(63,185,80,0.45)" : "1px solid rgba(229,181,103,0.45)",
+                background: natResult.natType === "cone" ? "rgba(63,185,80,0.08)" : "rgba(229,181,103,0.08)",
+                fontSize: "12px",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: "2px", flex: "1 1 320px" }}>
+                <strong>{natResult.label}</strong>
+                <span style={{ opacity: 0.85 }}>{natResult.advice}</span>
+                {natResult.mappedA && (
+                  <span style={{ fontFamily: "monospace", fontSize: "11px", opacity: 0.78 }}>
+                    公网映射：{natResult.mappedA} ({natResult.rttAMs}ms)
+                    {natResult.mappedB ? ` / ${natResult.mappedB} (${natResult.rttBMs}ms)` : ""}
+                  </span>
+                )}
+              </div>
+              <button type="button" className={styles.btn} onClick={() => setNatResult(null)}>
+                关闭
+              </button>
+            </div>
+          )}
 
           {modeBodyOpen && (
             <div style={{ display: "flex", flexDirection: "column", gap: "10px", paddingTop: "2px" }}>
@@ -2443,131 +2504,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                 );
               })()}
 
-              {/* ═══ TAB 3：STUN 穿透体检（测本机 NAT 类型 & 公网映射 IP:端口） ═══ */}
-              {activeModeTab === "stun" && (() => {
-                const stunNodes = serverPool.filter((n) => inferNodeKind(n) === "stun");
-                return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center", justifyContent: "space-between" }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnPrimary}`}
-                          disabled={natBusy}
-                          onClick={() => void handleDiagnoseNat()}
-                        >
-                          {natBusy ? "体检中…" : "一键 NAT 穿透体检"}
-                        </button>
-                        <button type="button" className={styles.btn} disabled={fetchingPublic} onClick={() => void handleFetchPublicNodes()}>
-                          {fetchingPublic ? "拉取中…" : "拉取公共 STUN"}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.btn}
-                          disabled={probingPool || stunNodes.length === 0}
-                          onClick={() => {
-                            setPoolFilter("stun");
-                            void handleProbeServerPool();
-                          }}
-                        >
-                          {probingPool ? "测速中…" : "测本组延迟"}
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.btn}
-                          onClick={() => {
-                            setBatchNodeKind("stun");
-                            setShowBatchAdd((v) => !v);
-                          }}
-                        >
-                          + 批量粘贴 STUN
-                        </button>
-                      </div>
-                      <span style={{ fontSize: "11.5px", opacity: 0.72 }}>
-                        STUN 仅测公网映射（零流量经过），需配合 EasyTier 或自建中转完成双端打洞
-                      </span>
-                    </div>
-
-                    {natResult && (
-                      <div
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: "8px",
-                          border: natResult.natType === "cone" ? "1px solid rgba(63,185,80,0.5)" : "1px solid rgba(229,181,103,0.5)",
-                          background: natResult.natType === "cone" ? "rgba(63,185,80,0.09)" : "rgba(229,181,103,0.09)",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "4px",
-                          fontSize: "12px",
-                        }}
-                      >
-                        <strong>{natResult.label}</strong>
-                        <span style={{ opacity: 0.86 }}>{natResult.advice}</span>
-                        <div style={{ fontFamily: "monospace", fontSize: "11.5px", opacity: 0.85 }}>
-                          {natResult.mappedA && <span>节点 A ({natResult.serverA}) → {natResult.mappedA} ({natResult.rttAMs}ms)</span>}
-                          {natResult.mappedB && <span style={{ marginLeft: "12px" }}>节点 B ({natResult.serverB}) → {natResult.mappedB} ({natResult.rttBMs}ms)</span>}
-                        </div>
-                      </div>
-                    )}
-
-                    {stunNodes.length > 0 && (
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(245px, 1fr))", gap: "8px", maxHeight: "170px", overflowY: "auto" }}>
-                        {stunNodes.map((node) => (
-                          <div
-                            key={node.id}
-                            style={{
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: "4px",
-                              padding: "8px 10px",
-                              borderRadius: "8px",
-                              fontSize: "12px",
-                              border: node.status === "ok" ? "1px solid rgba(63,185,80,0.45)" : "1px solid rgba(255,255,255,0.12)",
-                              background: "rgba(0,0,0,0.28)",
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "6px" }}>
-                              <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
-                              <div style={{ display: "inline-flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
-                                <button
-                                  type="button"
-                                  title="点击单独测速并刷新延迟"
-                                  disabled={probingPool || probingNodeId === node.id}
-                                  onClick={() => void handleProbeSingleNode(node)}
-                                  style={{
-                                    cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
-                                    background: "rgba(255,255,255,0.06)",
-                                    border: "1px solid rgba(255,255,255,0.14)",
-                                    borderRadius: "4px",
-                                    padding: "1px 6px",
-                                    fontWeight: 700,
-                                    fontSize: "11px",
-                                    color: node.status === "ok" ? "#3fb950" : node.status === "fail" ? "#f85149" : "inherit",
-                                  }}
-                                >
-                                  {probingNodeId === node.id ? "…" : node.lastRttMs !== null ? `${node.lastRttMs}ms` : node.status === "fail" ? "超时" : "测速"}
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={`移除节点 ${node.name}`}
-                                  onClick={() => saveServerPool(serverPool.filter((n) => n.id !== node.id))}
-                                  style={{ background: "none", border: "none", color: "inherit", opacity: 0.55, cursor: "pointer", padding: "0 2px" }}
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            </div>
-                            <code style={{ opacity: 0.78, fontSize: "11px" }}>{node.addr}</code>
-                            {node.mappedAddr && <div style={{ fontSize: "11px", color: "#58a6ff" }}>公网映射：{node.mappedAddr}</div>}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* ═══ TAB 4：自建中转 · 9 位设备 ID 码（方案 A：双端注册 → 9 位 ID 打洞直连 + 中转兜底 + SSH 一键部署） ═══ */}
+              {/* ═══ TAB 3：自建中转 · 9 位设备 ID 码（方案 A：双端注册 → 9 位 ID 打洞直连 + 中转兜底 + SSH 一键部署） ═══ */}
               {activeModeTab === "relay" && (() => {
                 const relayNodes = serverPool.filter((n) => inferNodeKind(n) === "relay");
                 return (
