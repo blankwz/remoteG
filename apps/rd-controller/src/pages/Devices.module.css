@@ -1039,3 +1039,490 @@
   font-size: var(--rd-fs-body);
   line-height: 1.8;
 }
+
+/* ============================================================================
+ * RustDesk 风格双区工作台（左栏：你的桌面 · 右栏：控制远程桌面 + 设备卡片网格）
+ * ============================================================================ */
+
+.rdShell {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
+}
+
+@media (max-width: 880px) {
+  .rdShell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 左侧固定面板：你的桌面 */
+.yourDesktop {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--rd-border);
+  border-top: 2px solid var(--rd-accent);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 3.5%) 0%, var(--rd-card) 100%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--rd-text-faint);
+}
+
+.desktopStatusRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.idBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--rd-border);
+  border-radius: 10px;
+  background: rgb(0 0 0 / 26%);
+}
+
+.idLabel {
+  font-size: 11px;
+  color: var(--rd-text-faint);
+}
+
+.idValueRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.idValue {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--rd-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copyMiniBtn {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 5%);
+  color: var(--rd-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.copyMiniBtn:hover {
+  background: rgb(61 126 255 / 16%);
+  border-color: rgb(61 126 255 / 45%);
+  color: var(--rd-text);
+}
+
+.pairHeroBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgb(61 126 255 / 26%);
+  border-radius: 10px;
+  background: rgb(61 126 255 / 7%);
+}
+
+.pairHeroCode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 5px;
+  color: var(--rd-accent-text);
+}
+
+.pairHeroCode[data-expired="true"] {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.genCodeBtn {
+  width: 100%;
+  height: 36px;
+  border: 1px solid rgb(61 126 255 / 40%);
+  border-radius: 8px;
+  background: rgb(61 126 255 / 14%);
+  color: var(--rd-accent-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.genCodeBtn:hover {
+  background: rgb(61 126 255 / 24%);
+  border-color: rgb(61 126 255 / 65%);
+  color: #fff;
+}
+
+.leftFooter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rd-border);
+}
+
+/* 右侧主区：控制远程桌面 + 设备网格 */
+.remoteWorkspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.connectHero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--rd-border);
+  border-radius: 12px;
+  background: var(--rd-card);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+.connectHeroHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.connectHeroTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rd-text);
+}
+
+.connectHeroBadge {
+  padding: 2px 9px;
+  border: 1px solid rgb(61 126 255 / 28%);
+  border-radius: 999px;
+  background: rgb(61 126 255 / 10%);
+  color: var(--rd-accent-text);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.connectHeroRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.heroInput {
+  flex: 1 1 240px;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 30%);
+  color: var(--rd-text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.heroInput:focus {
+  border-color: var(--rd-accent);
+  box-shadow: 0 0 0 3px rgb(61 126 255 / 18%);
+}
+
+.heroCodeInput {
+  width: 168px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 30%);
+  color: var(--rd-text);
+  font-size: 13px;
+  outline: none;
+}
+
+.heroCodeInput:focus {
+  border-color: var(--rd-accent);
+  box-shadow: 0 0 0 3px rgb(61 126 255 / 18%);
+}
+
+.heroSubmitBtn {
+  height: 40px;
+  padding: 0 20px;
+  border: 1px solid var(--rd-accent);
+  border-radius: 8px;
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.08s ease;
+}
+
+.heroSubmitBtn:hover:not(:disabled) {
+  background: var(--rd-accent-strong);
+}
+
+.heroSubmitBtn:disabled {
+  background: rgb(61 126 255 / 26%);
+  border-color: rgb(61 126 255 / 32%);
+  color: rgb(255 255 255 / 72%);
+  cursor: default;
+}
+
+/* 设备网格工具栏（统一按钮高度 34px） */
+.gridToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gridToolbarLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.gridToolbarRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbarBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--rd-border-strong);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 4%);
+  color: var(--rd-text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.toolbarBtn:hover:not(:disabled) {
+  background: rgb(255 255 255 / 9%);
+  border-color: rgb(255 255 255 / 24%);
+}
+
+.toolbarBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toolbarBtnPrimary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--rd-accent);
+  border-radius: 8px;
+  background: var(--rd-accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.toolbarBtnPrimary:hover:not(:disabled) {
+  background: var(--rd-accent-strong);
+}
+
+.toolbarSearch {
+  height: 34px;
+  width: 210px;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--rd-border);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 24%);
+  color: var(--rd-text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.toolbarSearch:focus {
+  border-color: var(--rd-accent);
+}
+
+/* RustDesk 风格多列设备卡片网格 */
+.deviceGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deviceCard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rd-border);
+  border-radius: 12px;
+  background: var(--rd-card);
+  overflow: visible;
+  transition:
+    border-color 0.14s ease,
+    transform 0.14s ease,
+    box-shadow 0.14s ease;
+}
+
+.deviceCard:hover {
+  border-color: rgb(61 126 255 / 45%);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgb(0 0 0 / 28%);
+}
+
+.cardPreview {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px 12px 10px;
+  height: 62px;
+  border-radius: 11px 11px 0 0;
+  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  background:
+    radial-gradient(circle at 20% 20%, rgb(61 126 255 / 14%), transparent 60%),
+    linear-gradient(135deg, rgb(255 255 255 / 4%) 0%, rgb(0 0 0 / 20%) 100%);
+}
+
+.cardPreview[data-online="true"] {
+  background:
+    radial-gradient(circle at 18% 20%, rgb(63 185 80 / 16%), transparent 58%),
+    linear-gradient(135deg, rgb(61 126 255 / 8%) 0%, rgb(0 0 0 / 18%) 100%);
+}
+
+.cardBadges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.netBadge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  color: var(--rd-text-dim);
+  font-size: 11px;
+}
+
+.netBadge[data-tailscale="true"] {
+  background: rgb(138 110 255 / 16%);
+  color: #c5b4ff;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px 10px;
+  flex: 1;
+}
+
+.cardTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rd-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardAddr {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  color: var(--rd-text-dim);
+}
+
+.cardMeta {
+  font-size: 11.5px;
+  color: var(--rd-text-faint);
+  margin-top: 2px;
+}
+
+.cardFooter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.cardConnectBtn {
+  flex: 1;
+  height: 34px;
+  border: 1px solid rgb(61 126 255 / 35%);
+  border-radius: 8px;
+  background: rgb(61 126 255 / 14%);
+  color: var(--rd-accent-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.cardConnectBtn:hover:not(:disabled) {
+  background: var(--rd-accent);
+  border-color: var(--rd-accent);
+  color: #fff;
+}
+
+.cardConnectBtn[data-online="false"] {
+  border-color: var(--rd-border-strong);
+  background: rgb(255 255 255 / 5%);
+  color: var(--rd-text-dim);
+}
+
+.cardConnectBtn[data-online="false"]:hover:not(:disabled) {
+  background: rgb(255 255 255 / 11%);
+  color: var(--rd-text);
+}
+
+.cardConnectBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

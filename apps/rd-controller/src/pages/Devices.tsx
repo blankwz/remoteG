@@ -635,553 +635,538 @@ export function Devices() {
 
   return (
     <main className={styles.page}>
-      <header className={styles.header}>
-        <h1 className={styles.title}>
-          设备
-          {devices.length > 0 && (
-            <span className={styles.titleMeta}>
-              {devices.length} 台 · {devices.filter((d) => d.online).length} 在线
-              {devices.some((d) => !d.online) &&
-                ` · ${devices.filter((d) => !d.online).length} 离线`}
-            </span>
-          )}
-        </h1>
-        <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={styles.actionBtn}
-            onClick={() => void onScan()}
-            disabled={scanning || busyId !== null}
-          >
-            <IconScan size={13} />
-            {scanning ? "扫描中…" : "扫描局域网"}
-          </button>
-          <button type="button" className={styles.addBtn} onClick={() => openAddDialog()}>
-            <IconPlus size={13} />
-            添加设备
-          </button>
-        </div>
-      </header>
+      <div className={styles.rdShell}>
+        {/* ── 左侧固定面板：RustDesk 风格「你的桌面（本机被控）」 ── */}
+        <aside className={styles.yourDesktop} aria-label="你的桌面与本机被控">
+          <span className={styles.eyebrow}>你的桌面 · THIS DESKTOP</span>
 
-      {/* RustDesk 风格顶部「控制远程桌面」快速连接栏（免填端口，直入完整桌面） */}
-      <form
-        onSubmit={(e) => void onQuickConnect(e)}
-        aria-label="快速连接远端设备"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "8px",
-          marginBottom: "14px",
-          padding: "14px 16px",
-          borderRadius: "12px",
-          background: "rgba(255, 255, 255, 0.04)",
-          border: "1px solid rgba(255, 255, 255, 0.1)",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
-          <strong style={{ fontSize: "14px" }}>🖥️ 控制远程桌面</strong>
-          <span style={{ fontSize: "12px", opacity: 0.7 }}>
-            连接后默认进入完整桌面（支持在会话内随时切单窗口 / 原生终端）
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            type="text"
-            value={quickAddr}
-            onChange={(e) => setQuickAddr(e.currentTarget.value)}
-            placeholder="输入对方 IP 或设备名（如 192.168.1.10 或 100.81.205.0，免填端口）"
-            aria-label="快速连接地址"
-            spellCheck={false}
-            style={{
-              flex: "1 1 240px",
-              minWidth: 0,
-              padding: "9px 12px",
-              borderRadius: "8px",
-              border: "1px solid rgba(255, 255, 255, 0.16)",
-              background: "rgba(0, 0, 0, 0.28)",
-              color: "inherit",
-              fontSize: "14px",
-            }}
-          />
-          <input
-            type="text"
-            value={quickCode}
-            onChange={(e) => setQuickCode(e.currentTarget.value)}
-            placeholder="6 位配对码（新设备选填）"
-            aria-label="快速连接配对码"
-            maxLength={6}
-            spellCheck={false}
-            style={{
-              width: "170px",
-              padding: "9px 12px",
-              borderRadius: "8px",
-              border: "1px solid rgba(255, 255, 255, 0.16)",
-              background: "rgba(0, 0, 0, 0.28)",
-              color: "inherit",
-              fontSize: "14px",
-            }}
-          />
-          <button
-            type="submit"
-            className={styles.addBtn}
-            style={{ padding: "9px 18px", fontSize: "14px" }}
-            disabled={quickBusy || busyId !== null || quickAddr.trim().length === 0}
-          >
-            {quickBusy ? "连接中…" : "连接桌面"}
-          </button>
-        </div>
-      </form>
-
-      {resume !== null && (
-        <button
-          type="button"
-          className={styles.resumeCard}
-          onClick={() => {
-            const target = devices.find((d) => d.id === resume.id);
-            if (target !== undefined) {
-              void onConnect(target);
-            }
-          }}
-          disabled={busyId !== null}
-          title="一键回到上次使用的设备"
-        >
-          <span className={styles.resumeLabel}>继续上次</span>
-          <span className={styles.resumeName}>
-            <span className={styles.dot} data-online={resume.online} aria-hidden="true" />
-            {resume.name}
-          </span>
-          <span className={styles.resumeGo}>进入 →</span>
-        </button>
-      )}
-
-      {error !== null && <p className={styles.error}>{error}</p>}
-      {notice !== null && <p className={styles.notice}>{notice}</p>}
-
-      {devices.length >= 3 && (
-        <input
-          className={styles.deviceSearch}
-          type="search"
-          placeholder={`搜索 ${devices.length} 台设备（按 / 聚焦）…`}
-          aria-label="搜索设备"
-          value={deviceQuery}
-          onChange={(e) => setDeviceQuery(e.currentTarget.value)}
-        />
-      )}
-
-      {host === null && hostDown && (
-        <div className={styles.hostCard} role="status">
-          <div className={styles.hostRow}>
-            <strong>本机被控</strong>
-            <span className={styles.hostDownTag}>被控服务不可用</span>
-          </div>
-          <p className={styles.hostDownHint}>
-            这台电脑也可以被其他设备远程控制，但现在查不到被控状态——被控功能可能没有成功启动。
-            常见原因：rd-agent 的被控服务没在运行（重启本应用试试）、本地端口被占用或被防火墙拦截。
-            该问题不影响你去控制别的电脑。
-          </p>
-          <div className={styles.hostRow}>
-            <button
-              type="button"
-              className={styles.actionBtn}
-              disabled={busyId !== null}
-              onClick={() => void pollHost()}
-            >
-              重新检查
-            </button>
-          </div>
-        </div>
-      )}
-
-      {host !== null && (
-        <section className={styles.hostCard} aria-label="本机被控状态">
-          {/* 常驻一行状态条：空闲态=待命+一键出码直达；被控态=被谁控制多久+红色切断 */}
-          <div className={styles.hostBar}>
-            {host.peers.length === 0 ? (
-              <>
-                <span className={styles.hostStateIdle}>本机待命</span>
-                {host.listenAddrs.length > 0 && (
-                  <button
-                    type="button"
-                    className={styles.linkBtn}
-                    title="点击复制本机地址，发给对方即可连接这台电脑"
-                    onClick={() => {
-                      const ip = formatDisplayAddr(host.listenAddrs[0] ?? "");
-                      void navigator.clipboard.writeText(ip).catch(() => undefined);
-                      setNotice(`已复制本机地址：${ip}`);
-                    }}
-                  >
-                    本机 IP：{formatDisplayAddr(host.listenAddrs[0] ?? "")}
-                  </button>
-                )}
-                {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
-                <span className={styles.hostSpacer} />
-                <button type="button" className={styles.actionBtn} onClick={() => void onGenerateCode()}>
-                  生成配对码
-                </button>
-              </>
-            ) : (
-              <>
-                <span className={styles.hostStateBusy}>正在被控制</span>
-                {host.peers.map((p) => (
-                  <span key={p.name} className={styles.hostPeer} title="对方开始控制本机的时长">
-                    「{p.name}」· {hostDuration(p.sinceSecs)}
-                  </span>
-                ))}
-                <span className={styles.hostSpacer} />
-                <button
-                  type="button"
-                  className={styles.cutBtn}
-                  title="立即断开对方的控制连接"
-                  disabled={cutting}
-                  onClick={() => void onCutPeers()}
-                >
-                  {cutting ? "切断中…" : "切断"}
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              className={styles.expandBtn}
-              aria-expanded={hostExpanded}
-              aria-label="本机被控详情"
-              title="监听地址 · 弱网纠错 · 指纹核对"
-              onClick={toggleHostExpanded}
-            >
-              {hostExpanded ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
-            </button>
-          </div>
-          {/* 展开/收起 aria-live 播报（文本变化即播报，无需额外入口） */}
-          <span className={styles.srOnly} role="status">{hostLiveMsg}</span>
-          {/* 配对码是一键出码的产物，直接显示在状态条下方（不收进展开层） */}
-          {pairCard !== null && (
-            <div className={styles.pairBlock} data-expired={pairRemainSecs === 0}>
-              <div className={styles.pairMain}>
-                <span className={styles.hostLabel}>
-                  {pairRemainSecs === 0
-                    ? "配对码已过期，请重新生成"
-                    : `对方添加设备时输入此配对码（还剩 ${Math.floor(pairRemainSecs / 60)}:${String(pairRemainSecs % 60).padStart(2, "0")}）`}
-                </span>
-                <code className={styles.pairCode} data-expired={pairRemainSecs === 0}>
-                  {pairCard.code}
-                </code>
-                {pairRemainSecs === 0 && (
-                  <button
-                    type="button"
-                    className={styles.actionBtn}
-                    onClick={() => void onGenerateCode()}
-                  >
-                    重新生成
-                  </button>
-                )}
-                {pairRemainSecs > 0 && (
-                  <span className={styles.pairNote}>已复制到剪贴板</span>
-                )}
+          {host === null && hostDown && (
+            <div role="status" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              <div className={styles.desktopStatusRow}>
+                <strong>本机被控</strong>
+                <span className={styles.hostDownTag}>被控服务不可用</span>
               </div>
-              <div className={styles.hostRow}>
-                <span className={styles.hostLabel}>对方要连的地址：</span>
-                {pairCard.addrs.map((a) => (
-                  <code key={a} className={styles.hostAddr}>
-                    <span className={styles.addrKind} data-tailscale={a.startsWith("100.")}>
-                      {a.startsWith("100.") ? "Tailscale" : "局域网"}
-                    </span>
-                    {a}
-                  </code>
-                ))}
-              </div>
-            </div>
-          )}
-          {hostExpanded && (
-            <div className={styles.hostDetails}>
-              {host.listenAddrs.length > 0 && (
-                <div className={styles.hostRow}>
-                  <span className={styles.hostLabel}>监听地址：</span>
-                  {host.listenAddrs.map((a) => (
-                    <code key={a} className={styles.hostAddr}>
-                      <span className={styles.addrKind} data-tailscale={a.startsWith("100.")}>
-                        {a.startsWith("100.") ? "Tailscale" : "局域网"}
-                      </span>
-                      {a}
-                    </code>
-                  ))}
-                </div>
-              )}
-              <div className={styles.hostRow}>
-                <label className={styles.fecToggle} title="开启后信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效">
-                  <input
-                    type="checkbox"
-                    className={styles.switchInput}
-                    checked={mediaFec}
-                    onChange={() => void onToggleMediaFec()}
-                  />
-                  <span className={styles.switchTrack} data-on={mediaFec} aria-hidden="true">
-                    <span className={styles.switchThumb} />
-                  </span>
-                  <span className={styles.fecText}>
-                    <span className={styles.fecTitle}>弱网纠错</span>
-                    <span className={styles.fecSub}>信号差时更稳 · 下次连接生效</span>
-                  </span>
-                </label>
-              </div>
-              <div className={styles.hostRow}>
-                <span className={styles.hostLabel}>
-                  安全核对：点设备卡右侧「⋯」菜单的「查看指纹」复制对方指纹，可与对方当面核对以防中间人。
-                </span>
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      {deviceQuery.trim().length > 0 && shownDevices.length === 0 && (
-        <p className={styles.empty}>没有匹配「{deviceQuery.trim()}」的设备。</p>
-      )}
-
-      {devices.length === 0 ? (
-        <div className={styles.emptyState}>
-          <div className={styles.emptyIcon} aria-hidden="true">
-            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-              <rect x="2.5" y="4" width="19" height="13" rx="2" />
-              <path d="M9 21h6M12 17.5V21" />
-              <circle cx="12" cy="10.5" r="2.6" />
-              <path d="M12 7.9v2.6l1.8 1.2" />
-            </svg>
-          </div>
-          <p className={styles.emptyTitle}>还没有可控制的设备</p>
-          <p className={styles.emptyHint}>
-            两步开始：对方电脑装好 rd-agent → 在这里添加并输入对方托盘显示的 6 位配对码。
-          </p>
-          <div className={styles.emptyActions}>
-            <button type="button" className={styles.addBtn} onClick={() => openAddDialog()}>
-              手动添加设备
-            </button>
-            <button
-              type="button"
-              className={styles.actionBtn}
-              onClick={() => void onScan()}
-              disabled={scanning || busyId !== null}
-            >
-              {scanning ? "扫描中…" : "扫描局域网发现"}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <ul className={styles.list}>
-          {shownDevices.map((d) => (
-            <li key={d.id} className={styles.card}>
+              <p className={styles.hostDownHint}>
+                查不到本机被控状态，可能端口被占用或被控核心未启动（不影响控制别的电脑）。
+              </p>
               <button
                 type="button"
-                className={styles.mainBtn}
-                onClick={() => void onConnect(d)}
+                className={styles.toolbarBtn}
                 disabled={busyId !== null}
-                title={`连接 ${d.name}（指纹 ${d.fingerprintHex.slice(0, 16)}…）`}
+                onClick={() => void pollHost()}
               >
-                <span className={styles.dot} data-online={d.online} aria-hidden="true" />
-                <span className={styles.info}>
-                  <span className={styles.name}>
-                    {d.name}
-                    <span className={styles.onlineTag} data-online={d.online}>
-                      {d.online ? "在线" : "离线"}
-                    </span>
-                  </span>
-                  <span className={styles.addr}>
-                    {formatDisplayAddr(d.addr)}
-                    {lastConnectedAt(d.id) !== null && (
-                      <span title="上次成功连接时间"> · 上次连接 {relativeTime(lastConnectedAt(d.id) as number)}</span>
-                    )}
-                    {getHostVersion(d.id) !== null && (
-                      <span title="被控端 rd-agent 版本"> · v{getHostVersion(d.id)}</span>
-                    )}
-                  </span>
-                </span>
-                {busyId === d.id && <span className={styles.connecting}>连接中…</span>}
-                {busyId !== d.id && (
-                  <span className={styles.connectCta}>{d.online ? "连接" : "唤醒连接"}</span>
-                )}
+                重新检查
               </button>
-              <div className={styles.actions}>
-                {confirmRemoveId === d.id ? (
+            </div>
+          )}
+
+          {host !== null && (
+            <section aria-label="本机被控状态" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className={styles.desktopStatusRow}>
+                {host.peers.length === 0 ? (
                   <>
-                    <button
-                      type="button"
-                      className={`${styles.actionBtn} ${styles.confirmDelete}`}
-                      onClick={() => {
-                        if (confirmArmed) {
-                          void onRemove(d);
-                        }
-                      }}
-                      disabled={busyId !== null || !confirmArmed}
-                      data-armed={confirmArmed}
-                      title={confirmArmed ? "此操作不可撤销" : "防误触：进度条走完即可点击"}
-                    >
-                      确认删除
-                      {!confirmArmed && (
-                        <span className={styles.confirmProgress} aria-hidden="true" />
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.actionBtn}
-                      onClick={() => setConfirmRemoveId(null)}
-                    >
-                      取消
-                    </button>
+                    <span className={styles.hostStateIdle}>本机待命</span>
+                    {host.paused && <span className={styles.hostPaused}>已暂停共享</span>}
                   </>
                 ) : (
-                  <DeviceRowMenu
-                    d={d}
-                    onAction={(a) => onMenuAction(d, a)}
-                  />
+                  <>
+                    <span className={styles.hostStateBusy}>正在被控制</span>
+                    {host.peers.map((p) => (
+                      <span key={p.name} className={styles.hostPeer} title="对方开始控制本机的时长">
+                        「{p.name}」· {hostDuration(p.sinceSecs)}
+                      </span>
+                    ))}
+                  </>
                 )}
-              </div>
-              {/* 线路测试结果归位到触发它的卡片内（等宽保留，失败项 err 色标注） */}
-              {linkTest !== null && linkTest.id === d.id && (
-                <div className={styles.linkTestOut} data-failed={linkTest.text.includes("没有成功")}>
-                  {linkTest.text}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* 扫描反馈（P0-2①）：扫完 0 结果曾毫无反馈；加载态 + 结果播报走
-       * 同一 role=status 区（文本变化即播报，screen reader 无需额外入口） */}
-      {(scanning || discovered !== null) && (
-        <p className={styles.scanStatus} role="status" aria-live="polite">
-          {scanning
-            ? "正在扫描局域网（约需 2 秒）…"
-            : discovered !== null && discovered.length > 0
-              ? `扫描完成：发现 ${discovered.length} 台设备`
-              : "扫描完成：没有发现新设备"}
-        </p>
-      )}
-      {discovered !== null && discovered.length === 0 && !scanning && (
-        <div className={styles.scanEmpty} role="presentation">
-          <div className={styles.scanEmptyIcon} aria-hidden="true">
-            <IconScan size={26} />
-          </div>
-          <p className={styles.scanEmptyTitle}>没有发现新设备</p>
-          <p className={styles.scanEmptyHint}>
-            可能是两台电脑不在同一局域网/WiFi，或对方 rd-agent 没在运行（看对方任务栏托盘图标）。
-            两步排查：确认连的是同一个路由器 → 让对方重启 rd-agent 后再扫一次；
-            知道对方 IP 的话也可以直接手动添加。
-          </p>
-          <div className={styles.emptyActions}>
-            <button
-              type="button"
-              className={styles.addBtn}
-              onClick={() => openAddDialog()}
-            >
-              手动添加设备
-            </button>
-            <button
-              type="button"
-              className={styles.actionBtn}
-              onClick={() => void onScan()}
-              disabled={busyId !== null}
-            >
-              再扫一次
-            </button>
-          </div>
-        </div>
-      )}
-
-      {discovered !== null && discovered.length > 0 && (
-        <section className={styles.scanSection} aria-label="局域网发现的设备">
-          <h2 className={styles.scanHeading}>
-            局域网发现（未配对 · 添加后仍需对方托盘配对码）
-          </h2>
-          <ul className={styles.list}>
-            {discovered.map((d) => (
-              <li key={d.addr} className={`${styles.card} ${styles.scanCard}`}>
-                <button
-                  type="button"
-                  className={styles.mainBtn}
-                  onClick={() => onPickDiscovered(d)}
-                  title="添加该设备（需再输托盘配对码）"
-                >
-                  <span className={`${styles.dot} ${styles.dotScan}`} aria-hidden="true" />
-                  <span className={styles.info}>
-                    <span className={styles.name}>
-                      {d.name}
-                      <span className={styles.unpairedTag}>未配对</span>
-                    </span>
-                    <span className={styles.addr}>{d.addr}</span>
-                  </span>
-                </button>
-                <div className={styles.actions}>
+                <span className={styles.hostSpacer} />
+                {host.peers.length > 0 && (
                   <button
                     type="button"
-                    className={styles.actionBtn}
-                    onClick={() => onPickDiscovered(d)}
+                    className={styles.cutBtn}
+                    title="立即断开对方的控制连接"
+                    disabled={cutting}
+                    onClick={() => void onCutPeers()}
                   >
-                    添加
+                    {cutting ? "切断中…" : "切断"}
                   </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+                )}
+                <button
+                  type="button"
+                  className={styles.expandBtn}
+                  aria-expanded={hostExpanded}
+                  aria-label="本机被控详情"
+                  title="监听地址 · 弱网纠错 · 指纹核对"
+                  onClick={toggleHostExpanded}
+                >
+                  {hostExpanded ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                </button>
+              </div>
 
-      <footer className={styles.hint}>
-        <span className={styles.footerRow}>
-          <button
-            type="button"
-            className={styles.helpToggle}
-            aria-expanded={helpOpen}
-            onClick={() => setHelpOpen((v) => !v)}
-          >
-            连不上对方？查看连接指南
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
-              style={{ transform: helpOpen ? "rotate(180deg)" : undefined }}
-            >
-              <path d="M6 9.5l6 6 6-6" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={styles.linkBtn}
-            onClick={() => void onOpenStudio()}
-            title="画质方案对比调试工具（高级）"
-          >
-            <IconLab size={12} />
-            方案实验室
-          </button>
-        </span>
-        {helpOpen && (
-          <ul className={styles.helpList}>
-            <li>
-              <b>同一 WiFi / 局域网：</b>
-              点「扫描局域网」自动发现对方，或直接填对方内网 IP（如 192.168.1.23）。
-            </li>
-            <li>
-              <b>跨网络（不在同一网络）：</b>
-              两台电脑都装并登录 Tailscale，互相可见后再连接。
+              <span className={styles.srOnly} role="status">{hostLiveMsg}</span>
+
+              {host.listenAddrs.length > 0 && (
+                <div className={styles.idBox}>
+                  <span className={styles.idLabel}>本机连接地址（发给对方即可被控）</span>
+                  <div className={styles.idValueRow}>
+                    <code className={styles.idValue} title={formatDisplayAddr(host.listenAddrs[0] ?? "")}>
+                      {formatDisplayAddr(host.listenAddrs[0] ?? "")}
+                    </code>
+                    <button
+                      type="button"
+                      className={styles.copyMiniBtn}
+                      onClick={() => {
+                        const ip = formatDisplayAddr(host.listenAddrs[0] ?? "");
+                        void navigator.clipboard.writeText(ip).catch(() => undefined);
+                        setNotice(`已复制本机地址：${ip}`);
+                      }}
+                    >
+                      复制
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {host.peers.length === 0 && (
+                <div className={styles.pairHeroBox}>
+                  <span className={styles.idLabel}>一次性配对码（5 分钟有效）</span>
+                  {pairCard !== null ? (
+                    <>
+                      <div className={styles.idValueRow}>
+                        <code className={styles.pairHeroCode} data-expired={pairRemainSecs === 0}>
+                          {pairCard.code}
+                        </code>
+                        <button
+                          type="button"
+                          className={styles.copyMiniBtn}
+                          onClick={() => void onGenerateCode()}
+                        >
+                          {pairRemainSecs === 0 ? "重新生成" : "刷新"}
+                        </button>
+                      </div>
+                      <span className={styles.hostLabel}>
+                        {pairRemainSecs === 0
+                          ? "配对码已过期，请重新生成"
+                          : `还剩 ${Math.floor(pairRemainSecs / 60)}:${String(pairRemainSecs % 60).padStart(2, "0")} · 已复制到剪贴板`}
+                      </span>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className={styles.genCodeBtn}
+                      onClick={() => void onGenerateCode()}
+                    >
+                      生成配对码
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {hostExpanded && (
+                <div className={styles.hostDetails}>
+                  {host.listenAddrs.length > 0 && (
+                    <div className={styles.hostRow}>
+                      <span className={styles.hostLabel}>监听地址：</span>
+                      {host.listenAddrs.map((a) => (
+                        <code key={a} className={styles.hostAddr}>
+                          <span className={styles.addrKind} data-tailscale={a.startsWith("100.")}>
+                            {a.startsWith("100.") ? "Tailscale" : "局域网"}
+                          </span>
+                          {formatDisplayAddr(a)}
+                        </code>
+                      ))}
+                    </div>
+                  )}
+                  <div className={styles.hostRow}>
+                    <label className={styles.fecToggle} title="开启后信号差时画面仍流畅不花屏（带宽多耗约 20%）；下次连接生效">
+                      <input
+                        type="checkbox"
+                        className={styles.switchInput}
+                        checked={mediaFec}
+                        onChange={() => void onToggleMediaFec()}
+                      />
+                      <span className={styles.switchTrack} data-on={mediaFec} aria-hidden="true">
+                        <span className={styles.switchThumb} />
+                      </span>
+                      <span className={styles.fecText}>
+                        <span className={styles.fecTitle}>弱网纠错</span>
+                        <span className={styles.fecSub}>信号差时更稳 · 下次连接生效</span>
+                      </span>
+                    </label>
+                  </div>
+                  <div className={styles.hostRow}>
+                    <span className={styles.hostLabel}>
+                      安全核对：点设备卡右上角「⋯」的「查看指纹」可核对身份防中间人。
+                    </span>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          <footer className={styles.leftFooter}>
+            <div className={styles.footerRow}>
+              <button
+                type="button"
+                className={styles.helpToggle}
+                aria-expanded={helpOpen}
+                onClick={() => setHelpOpen((v) => !v)}
+              >
+                连不上对方？
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  aria-hidden="true"
+                  style={{ transform: helpOpen ? "rotate(180deg)" : undefined }}
+                >
+                  <path d="M6 9.5l6 6 6-6" />
+                </svg>
+              </button>
               <button
                 type="button"
                 className={styles.linkBtn}
-                onClick={() => void openUrl("https://login.tailscale.com/admin/users").catch(() => undefined)}
+                onClick={() => void onOpenStudio()}
+                title="画质方案对比与链路实测（高级）"
               >
-                打开 Tailscale 管理后台
+                <IconLab size={12} />
+                方案实验室
               </button>
-              （邀请对方：Machines → Share → 生成邀请链接发给对方。）
-            </li>
-            <li>
-              <b>已用 Tailscale 还是连不上：</b>
-              确认两台电脑登录的是<strong>同一个账号网络（tailnet）</strong>，且对方 rd-agent 正在运行（托盘图标）。
-            </li>
-          </ul>
-        )}
-        <span className={styles.version}>rd-controller v{APP_VERSION}</span>
-      </footer>
+            </div>
+            {helpOpen && (
+              <ul className={styles.helpList}>
+                <li>
+                  <b>同局域网：</b>点「扫描局域网」或直接填对方内网 IP（免填端口）。
+                </li>
+                <li>
+                  <b>跨网络：</b>两台电脑登录同一 Tailscale 网络，填 100.x 地址即可直连。
+                  <button
+                    type="button"
+                    className={styles.linkBtn}
+                    onClick={() => void openUrl("https://login.tailscale.com/admin/users").catch(() => undefined)}
+                  >
+                    Tailscale 后台
+                  </button>
+                </li>
+              </ul>
+            )}
+            <span className={styles.version}>rd-controller v{APP_VERSION}</span>
+          </footer>
+        </aside>
+
+        {/* ── 右侧主工作区：控制远程桌面 + 多列设备卡片网格 ── */}
+        <div className={styles.remoteWorkspace}>
+          <form
+            className={styles.connectHero}
+            onSubmit={(e) => void onQuickConnect(e)}
+            aria-label="快速连接远端设备"
+          >
+            <div className={styles.connectHeroHead}>
+              <h1 className={styles.connectHeroTitle}>控制远程桌面</h1>
+              <span className={styles.connectHeroBadge}>默认直入完整桌面 · 4K@144Hz</span>
+            </div>
+            <div className={styles.connectHeroRow}>
+              <input
+                type="text"
+                className={styles.heroInput}
+                value={quickAddr}
+                onChange={(e) => setQuickAddr(e.currentTarget.value)}
+                placeholder="输入对方 IP 或设备名（如 192.168.1.10 或 100.81.205.0，免填端口）"
+                aria-label="快速连接地址"
+                spellCheck={false}
+              />
+              <input
+                type="text"
+                className={styles.heroCodeInput}
+                value={quickCode}
+                onChange={(e) => setQuickCode(e.currentTarget.value)}
+                placeholder="6 位配对码（新设备选填）"
+                aria-label="快速连接配对码"
+                maxLength={6}
+                spellCheck={false}
+              />
+              <button
+                type="submit"
+                className={styles.heroSubmitBtn}
+                disabled={quickBusy || busyId !== null || quickAddr.trim().length === 0}
+              >
+                {quickBusy ? "连接中…" : "连接桌面"}
+              </button>
+            </div>
+          </form>
+
+          {resume !== null && (
+            <button
+              type="button"
+              className={styles.resumeCard}
+              onClick={() => {
+                const target = devices.find((d) => d.id === resume.id);
+                if (target !== undefined) {
+                  void onConnect(target);
+                }
+              }}
+              disabled={busyId !== null}
+              title="一键回到上次使用的设备"
+            >
+              <span className={styles.resumeLabel}>继续上次</span>
+              <span className={styles.resumeName}>
+                <span className={styles.dot} data-online={resume.online} aria-hidden="true" />
+                {resume.name}
+              </span>
+              <span className={styles.resumeGo}>进入桌面 →</span>
+            </button>
+          )}
+
+          {error !== null && <p className={styles.error}>{error}</p>}
+          {notice !== null && <p className={styles.notice}>{notice}</p>}
+
+          <div className={styles.gridToolbar}>
+            <div className={styles.gridToolbarLeft}>
+              <h2 className={styles.title} style={{ fontSize: "15px" }}>
+                我的设备
+                {devices.length > 0 && (
+                  <span className={styles.titleMeta}>
+                    {devices.length} 台 · {devices.filter((d) => d.online).length} 在线
+                    {devices.some((d) => !d.online) &&
+                      ` · ${devices.filter((d) => !d.online).length} 离线`}
+                  </span>
+                )}
+              </h2>
+              {devices.length >= 3 && (
+                <input
+                  className={styles.toolbarSearch}
+                  type="search"
+                  placeholder={`搜索 ${devices.length} 台设备（按 / 聚焦）…`}
+                  aria-label="搜索设备"
+                  value={deviceQuery}
+                  onChange={(e) => setDeviceQuery(e.currentTarget.value)}
+                />
+              )}
+            </div>
+            <div className={styles.gridToolbarRight}>
+              <button
+                type="button"
+                className={styles.toolbarBtn}
+                onClick={() => void onScan()}
+                disabled={scanning || busyId !== null}
+              >
+                <IconScan size={13} />
+                {scanning ? "扫描中…" : "扫描局域网"}
+              </button>
+              <button
+                type="button"
+                className={styles.toolbarBtnPrimary}
+                onClick={() => openAddDialog()}
+              >
+                <IconPlus size={13} />
+                添加设备
+              </button>
+            </div>
+          </div>
+
+          {deviceQuery.trim().length > 0 && shownDevices.length === 0 && (
+            <p className={styles.empty}>没有匹配「{deviceQuery.trim()}」的设备。</p>
+          )}
+
+          {devices.length === 0 ? (
+            <div className={styles.emptyState}>
+              <div className={styles.emptyIcon} aria-hidden="true">
+                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+                  <rect x="2.5" y="4" width="19" height="13" rx="2" />
+                  <path d="M9 21h6M12 17.5V21" />
+                  <circle cx="12" cy="10.5" r="2.6" />
+                  <path d="M12 7.9v2.6l1.8 1.2" />
+                </svg>
+              </div>
+              <p className={styles.emptyTitle}>还没有已保存的设备</p>
+              <p className={styles.emptyHint}>
+                直接在上方输入对方 IP 与 6 位配对码即可连接，或点击「扫描局域网」自动发现附近电脑。
+              </p>
+              <div className={styles.emptyActions}>
+                <button type="button" className={styles.toolbarBtnPrimary} onClick={() => openAddDialog()}>
+                  手动添加设备
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolbarBtn}
+                  onClick={() => void onScan()}
+                  disabled={scanning || busyId !== null}
+                >
+                  {scanning ? "扫描中…" : "扫描局域网发现"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <ul className={styles.deviceGrid}>
+              {shownDevices.map((d) => {
+                const displayIp = formatDisplayAddr(d.addr);
+                const isTs = displayIp.startsWith("100.");
+                const isLoop = displayIp.startsWith("127.");
+                return (
+                  <li key={d.id} className={styles.deviceCard}>
+                    <div className={styles.cardPreview} data-online={d.online}>
+                      <div className={styles.cardBadges}>
+                        <span className={styles.dot} data-online={d.online} aria-hidden="true" />
+                        <span className={styles.onlineTag} data-online={d.online}>
+                          {d.online ? "在线" : "离线"}
+                        </span>
+                        <span className={styles.netBadge} data-tailscale={isTs}>
+                          {isTs ? "Tailscale" : isLoop ? "本机" : "局域网"}
+                        </span>
+                      </div>
+                      <DeviceRowMenu d={d} onAction={(a) => onMenuAction(d, a)} />
+                    </div>
+
+                    <div className={styles.cardBody}>
+                      <span className={styles.cardTitle} title={d.name}>
+                        {d.name}
+                      </span>
+                      <span className={styles.cardAddr}>{displayIp}</span>
+                      <span className={styles.cardMeta}>
+                        {lastConnectedAt(d.id) !== null
+                          ? `上次连接 ${relativeTime(lastConnectedAt(d.id) as number)}`
+                          : "已配对信任"}
+                        {getHostVersion(d.id) !== null ? ` · v${getHostVersion(d.id)}` : ""}
+                      </span>
+                    </div>
+
+                    <div className={styles.cardFooter}>
+                      {confirmRemoveId === d.id ? (
+                        <>
+                          <button
+                            type="button"
+                            className={`${styles.actionBtn} ${styles.confirmDelete}`}
+                            style={{ flex: 1, height: "34px" }}
+                            onClick={() => {
+                              if (confirmArmed) {
+                                void onRemove(d);
+                              }
+                            }}
+                            disabled={busyId !== null || !confirmArmed}
+                            data-armed={confirmArmed}
+                            title={confirmArmed ? "此操作不可撤销" : "防误触：进度条走完即可点击"}
+                          >
+                            确认删除
+                            {!confirmArmed && (
+                              <span className={styles.confirmProgress} aria-hidden="true" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.toolbarBtn}
+                            onClick={() => setConfirmRemoveId(null)}
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className={styles.cardConnectBtn}
+                          data-online={d.online}
+                          onClick={() => void onConnect(d)}
+                          disabled={busyId !== null}
+                          title={`连接 ${d.name} 完整桌面（指纹 ${d.fingerprintHex.slice(0, 16)}…）`}
+                        >
+                          {busyId === d.id
+                            ? "连接中…"
+                            : d.online
+                              ? "连接桌面"
+                              : "唤醒连接"}
+                        </button>
+                      )}
+                    </div>
+
+                    {linkTest !== null && linkTest.id === d.id && (
+                      <div
+                        className={styles.linkTestOut}
+                        style={{ margin: "0 12px 12px" }}
+                        data-failed={linkTest.text.includes("没有成功")}
+                      >
+                        {linkTest.text}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {(scanning || discovered !== null) && (
+            <p className={styles.scanStatus} role="status" aria-live="polite">
+              {scanning
+                ? "正在扫描局域网（约需 2 秒）…"
+                : discovered !== null && discovered.length > 0
+                  ? `扫描完成：发现 ${discovered.length} 台设备`
+                  : "扫描完成：没有发现新设备"}
+            </p>
+          )}
+          {discovered !== null && discovered.length === 0 && !scanning && (
+            <div className={styles.scanEmpty} role="presentation">
+              <div className={styles.scanEmptyIcon} aria-hidden="true">
+                <IconScan size={26} />
+              </div>
+              <p className={styles.scanEmptyTitle}>没有发现新设备</p>
+              <p className={styles.scanEmptyHint}>
+                可能是两台电脑不在同一局域网/WiFi，或对方未打开 rd-controller。可直接输入对方 IP 连接。
+              </p>
+              <div className={styles.emptyActions}>
+                <button
+                  type="button"
+                  className={styles.toolbarBtnPrimary}
+                  onClick={() => openAddDialog()}
+                >
+                  手动添加设备
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolbarBtn}
+                  onClick={() => void onScan()}
+                  disabled={busyId !== null}
+                >
+                  再扫一次
+                </button>
+              </div>
+            </div>
+          )}
+
+          {discovered !== null && discovered.length > 0 && (
+            <section className={styles.scanSection} aria-label="局域网发现的设备">
+              <h2 className={styles.scanHeading}>
+                局域网发现（未配对 · 点击输入对方 6 位配对码即可连接）
+              </h2>
+              <ul className={styles.deviceGrid}>
+                {discovered.map((d) => (
+                  <li key={d.addr} className={styles.deviceCard}>
+                    <div className={styles.cardPreview}>
+                      <div className={styles.cardBadges}>
+                        <span className={`${styles.dot} ${styles.dotScan}`} aria-hidden="true" />
+                        <span className={styles.unpairedTag}>未配对</span>
+                        <span className={styles.netBadge}>局域网</span>
+                      </div>
+                    </div>
+                    <div className={styles.cardBody}>
+                      <span className={styles.cardTitle}>{d.name}</span>
+                      <span className={styles.cardAddr}>{formatDisplayAddr(d.addr)}</span>
+                    </div>
+                    <div className={styles.cardFooter}>
+                      <button
+                        type="button"
+                        className={styles.cardConnectBtn}
+                        onClick={() => onPickDiscovered(d)}
+                      >
+                        配对并连接
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
+      </div>
 
       {showAdd && (
         <div
