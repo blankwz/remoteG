@@ -1900,13 +1900,11 @@ fn parse_stun_mapped_addr(buf: &[u8], txid: &[u8; 12]) -> Option<String> {
 /// 向指定 STUN 服务器发送真实 RFC 5389 UDP Binding Request，返回 (RTT ms, 公网映射 IP:端口)。
 async fn probe_stun_rfc5389(raw_addr: &str) -> Result<(f64, Option<String>), String> {
     let host_port = strip_stun_scheme(raw_addr);
-    let mut addrs = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::net::lookup_host(&host_port),
-    )
-    .await
-    .map_err(|_| "DNS 解析超时".to_string())?
-    .map_err(|e| format!("DNS 解析失败：{e}"))?;
+    let mut addrs =
+        tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&host_port))
+            .await
+            .map_err(|_| "DNS 解析超时".to_string())?
+            .map_err(|e| format!("DNS 解析失败：{e}"))?;
 
     let target = addrs
         .find(|a| a.is_ipv4())
@@ -2071,7 +2069,10 @@ pub async fn lab_fetch_public_nodes(
     let mut seen: std::collections::HashSet<String> =
         nodes.iter().map(|n| n.addr.to_ascii_lowercase()).collect();
     let mut fetched_online_count = 0usize;
-    let mut logs = vec![format!("已载入 {} 个内置国内/全球高速 STUN 节点", nodes.len())];
+    let mut logs = vec![format!(
+        "已载入 {} 个内置国内/全球高速 STUN 节点",
+        nodes.len()
+    )];
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -2080,7 +2081,8 @@ pub async fn lab_fetch_public_nodes(
         .map_err(|e| format!("初始化 HTTP 客户端失败：{e}"))?;
 
     // 1) 在线拉取 GitHub pradt2/always-online-stun 每小时更新存活表
-    let stun_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+    let stun_url =
+        "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
     match client.get(stun_url).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(body) = resp.text().await {
@@ -2127,7 +2129,10 @@ pub async fn lab_fetch_public_nodes(
 
     // 2) 在线拉取 EasyTier 公共社区订阅源（优先用户自定义 URL，其次社区公开 API）
     let mut easytier_sources: Vec<(&str, String)> = Vec::new();
-    if let Some(u) = custom_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    if let Some(u) = custom_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         easytier_sources.push(("自定义订阅", u));
     }
     easytier_sources.push((
@@ -2326,10 +2331,11 @@ async fn stun_probe_on_socket(
     raw_addr: &str,
 ) -> Result<(f64, String), String> {
     let host_port = strip_stun_scheme(raw_addr);
-    let mut addrs = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&host_port))
-        .await
-        .map_err(|_| "DNS 解析超时".to_string())?
-        .map_err(|e| format!("DNS 解析失败：{e}"))?;
+    let mut addrs =
+        tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(&host_port))
+            .await
+            .map_err(|_| "DNS 解析超时".to_string())?
+            .map_err(|e| format!("DNS 解析失败：{e}"))?;
     let target = addrs
         .find(|a| a.is_ipv4())
         .ok_or_else(|| "未解析到可用 IPv4".to_string())?;

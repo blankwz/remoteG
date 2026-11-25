@@ -144,7 +144,12 @@ pub fn numeric_id_from_fp(fp: &[u8; 32]) -> u32 {
 
 /// 格式化 9 位数字 ID 为 `xxx xxx xxx`。
 pub fn format_numeric_id(id: u32) -> String {
-    format!("{:03} {:03} {:03}", id / 1_000_000, (id / 1_000) % 1_000, id % 1_000)
+    format!(
+        "{:03} {:03} {:03}",
+        id / 1_000_000,
+        (id / 1_000) % 1_000,
+        id % 1_000
+    )
 }
 
 /// 编码 9 位 ID 查询报：`[u64 0][u8 7][u32 numeric_id LE]`（13 字节）。

@@ -1516,7 +1516,11 @@ fn b64url_decode(input: &str) -> Result<Vec<u8>, String> {
         }
         let n0 = (chunk[0] as u32) << 18;
         let n1 = (chunk[1] as u32) << 12;
-        let n2 = if chunk.len() > 2 { (chunk[2] as u32) << 6 } else { 0 };
+        let n2 = if chunk.len() > 2 {
+            (chunk[2] as u32) << 6
+        } else {
+            0
+        };
         let n3 = if chunk.len() > 3 { chunk[3] as u32 } else { 0 };
         let n = n0 | n1 | n2 | n3;
         out.push(((n >> 16) & 0xff) as u8);
@@ -1565,9 +1569,20 @@ fn decode_easytier_invite(raw: &str) -> Result<EasyTierInvitePayload, String> {
     Ok(payload)
 }
 
-fn detect_easytier_binaries(configured_core: &str, configured_cli: &str) -> (Option<String>, Option<String>) {
-    let core_name = if cfg!(windows) { "easytier-core.exe" } else { "easytier-core" };
-    let cli_name = if cfg!(windows) { "easytier-cli.exe" } else { "easytier-cli" };
+fn detect_easytier_binaries(
+    configured_core: &str,
+    configured_cli: &str,
+) -> (Option<String>, Option<String>) {
+    let core_name = if cfg!(windows) {
+        "easytier-core.exe"
+    } else {
+        "easytier-core"
+    };
+    let cli_name = if cfg!(windows) {
+        "easytier-cli.exe"
+    } else {
+        "easytier-cli"
+    };
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if !configured_core.trim().is_empty() {
@@ -1580,7 +1595,9 @@ fn detect_easytier_binaries(configured_core: &str, configured_cli: &str) -> (Opt
     #[cfg(windows)]
     {
         candidates.push(std::path::PathBuf::from(r"C:\tools\easytier-core.exe"));
-        candidates.push(std::path::PathBuf::from(r"C:\Program Files\EasyTier\easytier-core.exe"));
+        candidates.push(std::path::PathBuf::from(
+            r"C:\Program Files\EasyTier\easytier-core.exe",
+        ));
     }
     #[cfg(not(windows))]
     {
@@ -1706,9 +1723,11 @@ pub async fn easytier_detect_status() -> Result<EasyTierStatusDto, String> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let lat = item
-                    .get("lat_ms")
-                    .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()));
+                let lat = item.get("lat_ms").and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .or_else(|| v.as_f64())
+                });
                 if cost.eq_ignore_ascii_case("Local") && !ipv4.is_empty() {
                     local_vip = ipv4;
                 } else if !ipv4.is_empty() {
@@ -1764,13 +1783,27 @@ pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInvite
     write_agent_config(|table| {
         let mut sec = toml::value::Table::new();
         sec.insert("enabled".into(), toml::Value::Boolean(true));
-        sec.insert("binary_path".into(), toml::Value::String(binary_path.clone()));
+        sec.insert(
+            "binary_path".into(),
+            toml::Value::String(binary_path.clone()),
+        );
         sec.insert("cli_path".into(), toml::Value::String(cli_path.clone()));
-        sec.insert("network_name".into(), toml::Value::String(network_name.clone()));
-        sec.insert("network_secret".into(), toml::Value::String(network_secret.clone()));
+        sec.insert(
+            "network_name".into(),
+            toml::Value::String(network_name.clone()),
+        );
+        sec.insert(
+            "network_secret".into(),
+            toml::Value::String(network_secret.clone()),
+        );
         sec.insert(
             "peer_urls".into(),
-            toml::Value::Array(final_peers.iter().map(|s| toml::Value::String(s.clone())).collect()),
+            toml::Value::Array(
+                final_peers
+                    .iter()
+                    .map(|s| toml::Value::String(s.clone()))
+                    .collect(),
+            ),
         );
         // 留空由 EasyTier 内置 DHCP 自动分配唯一 10.126.126.x 虚拟内网 IP（避免双端冲突）
         sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
@@ -1810,13 +1843,28 @@ pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultD
     write_agent_config(|table| {
         let mut sec = toml::value::Table::new();
         sec.insert("enabled".into(), toml::Value::Boolean(true));
-        sec.insert("binary_path".into(), toml::Value::String(binary_path.clone()));
+        sec.insert(
+            "binary_path".into(),
+            toml::Value::String(binary_path.clone()),
+        );
         sec.insert("cli_path".into(), toml::Value::String(cli_path.clone()));
-        sec.insert("network_name".into(), toml::Value::String(payload.n.clone()));
-        sec.insert("network_secret".into(), toml::Value::String(payload.s.clone()));
+        sec.insert(
+            "network_name".into(),
+            toml::Value::String(payload.n.clone()),
+        );
+        sec.insert(
+            "network_secret".into(),
+            toml::Value::String(payload.s.clone()),
+        );
         sec.insert(
             "peer_urls".into(),
-            toml::Value::Array(payload.p.iter().map(|s| toml::Value::String(s.clone())).collect()),
+            toml::Value::Array(
+                payload
+                    .p
+                    .iter()
+                    .map(|s| toml::Value::String(s.clone()))
+                    .collect(),
+            ),
         );
         sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
         sec.insert("no_tun".into(), toml::Value::Boolean(false));
@@ -1857,7 +1905,12 @@ fn derive_numeric_id_from_fp(fp: &[u8; 32]) -> u32 {
 }
 
 fn format_9digit_id(id: u32) -> String {
-    format!("{:03} {:03} {:03}", id / 1_000_000, (id / 1_000) % 1_000, id % 1_000)
+    format!(
+        "{:03} {:03} {:03}",
+        id / 1_000_000,
+        (id / 1_000) % 1_000,
+        id % 1_000
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1958,7 +2011,12 @@ pub async fn relay_resolve_id(
         .map_err(|e| format!("发送 ID 查询失败：{e}"))?;
 
     let mut buf = [0u8; 64];
-    match tokio::time::timeout(std::time::Duration::from_millis(2500), sock.recv_from(&mut buf)).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(2500),
+        sock.recv_from(&mut buf),
+    )
+    .await
+    {
         Ok(Ok((n, _))) if n >= 10 && buf[8] == 8 => {
             let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
             if buf[9] == 1 && n >= 42 {
@@ -1969,7 +2027,9 @@ pub async fn relay_resolve_id(
                     numeric_id: formatted,
                     rtt_ms: Some(rtt),
                     peer_fingerprint_short: Some(fp_hex.clone()),
-                    detail: format!("对方 ID 在线！中转延迟 {rtt:.1}ms · 指纹 {fp_hex}（支持 P2P 打洞 + 中转兜底）"),
+                    detail: format!(
+                        "对方 ID 在线！中转延迟 {rtt:.1}ms · 指纹 {fp_hex}（支持 P2P 打洞 + 中转兜底）"
+                    ),
                 })
             } else {
                 Ok(RelayResolveIdResultDto {
@@ -1978,7 +2038,9 @@ pub async fn relay_resolve_id(
                     numeric_id: formatted,
                     rtt_ms: Some(rtt),
                     peer_fingerprint_short: None,
-                    detail: format!("中转可达（{rtt:.1}ms），但该 9 位 ID 当前未上线（请确认对方也填了同一中转地址并已启动）"),
+                    detail: format!(
+                        "中转可达（{rtt:.1}ms），但该 9 位 ID 当前未上线（请确认对方也填了同一中转地址并已启动）"
+                    ),
                 })
             }
         }
