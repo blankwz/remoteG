@@ -1374,17 +1374,22 @@ pub async fn lab_probe_target_plan(
         rounds
     ));
 
-    // 分支 1：自建中转 / 打洞服务器模式（支持 https/wss Workers 或 VPS ip:port）
-    if plan.mode == "relay" || plan.mode == "punch" {
-        let mode_label = if plan.mode == "punch" {
-            "打洞服务器"
-        } else {
-            "中转服务器"
+    // 分支 1：中转 / 打洞 / 无服务器穿透 / 隧道模式（relay / punch / cf_worker / frp / derp）
+    if matches!(
+        plan.mode.as_str(),
+        "relay" | "punch" | "cf_worker" | "frp" | "derp"
+    ) {
+        let mode_label = match plan.mode.as_str() {
+            "punch" => "P2P 打洞 (STUN)",
+            "cf_worker" => "Cloudflare Workers 穿透",
+            "frp" => "frp 隧道穿透",
+            "derp" => "DERP 中继节点",
+            _ => "自建中转服务器",
         };
         let relay_raw = plan.relay_addr.trim();
         if relay_raw.is_empty() {
             logs.push(format!(
-                "✗ 未选择或填写{mode_label}地址，无法测速（可点「SSH 一键部署新节点」）"
+                "✗ 未选择或填写{mode_label}地址，无法测速（可点「SSH 一键部署新节点」或从节点池选择）"
             ));
             return Ok(RealPlanProbeResultDto {
                 plan_id: plan.plan_id,
@@ -1406,6 +1411,16 @@ pub async fn lab_probe_target_plan(
                 logs,
             });
         }
+        // Cloudflare Workers / DERP 若未写协议前缀，自动补 https://；frp 若无协议走 TCP 握手实测
+        let effective_relay: String =
+            if (plan.mode == "cf_worker" || plan.mode == "derp") && !relay_raw.contains("://") {
+                format!("https://{relay_raw}")
+            } else if plan.mode == "frp" && !relay_raw.contains("://") {
+                format!("tcp://{}", normalize_probe_addr(relay_raw, 7000))
+            } else {
+                relay_raw.to_string()
+            };
+        let relay_raw = effective_relay.as_str();
         // STUN 公共/自建打洞服务器：发真实 RFC 5389 STUN Binding UDP 包（测真实延迟 + 公网映射 IP:端口）
         if plan.mode == "punch" && is_stun_addr(relay_raw) {
             logs.push(format!(
@@ -2031,6 +2046,22 @@ fn builtin_public_nodes() -> Vec<PublicNodeItemDto> {
             source: "Cloudflare".into(),
             note: "跨境/出海网络高可用打洞".into(),
         },
+        PublicNodeItemDto {
+            name: "Tailscale DERP · 香港".into(),
+            kind: "derp".into(),
+            addr: "https://derp20b.tailscale.com".into(),
+            region: "中国香港".into(),
+            source: "Tailscale DERP".into(),
+            note: "HTTPS 443 抗封锁中继参考节点".into(),
+        },
+        PublicNodeItemDto {
+            name: "Tailscale DERP · 东京".into(),
+            kind: "derp".into(),
+            addr: "https://derp12b.tailscale.com".into(),
+            region: "日本东京".into(),
+            source: "Tailscale DERP".into(),
+            note: "亚太低延迟 DERP 中继参考节点".into(),
+        },
     ]
 }
 
@@ -2255,7 +2286,7 @@ pub async fn lab_probe_node(kind: String, addr: String) -> Result<NodeProbeResul
         };
     }
 
-    // EasyTier / Relay / URL 节点：提取 host:port 测真实 TCP 握手延迟
+    // EasyTier / Relay / CF Workers / DERP / frp / URL 节点：提取 host:port 测真实 TCP 握手延迟
     let target = if trimmed.contains("://") {
         match parse_url_host_port(&trimmed) {
             Some((h, p)) => format!("{h}:{p}"),
@@ -2270,6 +2301,10 @@ pub async fn lab_probe_node(kind: String, addr: String) -> Result<NodeProbeResul
                 });
             }
         }
+    } else if k == "cf_worker" || k == "derp" {
+        normalize_probe_addr(&trimmed, 443)
+    } else if k == "frp" {
+        normalize_probe_addr(&trimmed, 7000)
     } else {
         normalize_probe_addr(&trimmed, if k == "easytier" { 11010 } else { 21118 })
     };

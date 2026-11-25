@@ -199,6 +199,53 @@
   opacity: 0.6;
 }
 
+.navRight {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--rd-border);
+  background: var(--rd-card);
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color var(--rd-dur-fast) var(--rd-ease),
+    background-color var(--rd-dur-fast) var(--rd-ease),
+    color var(--rd-dur-fast) var(--rd-ease);
+}
+
+.modePill:hover {
+  border-color: var(--rd-border-strong);
+  color: var(--rd-text);
+}
+
+.modePillPro {
+  border-color: rgb(61 126 255 / 55%);
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+}
+
+.modeDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rd-ok);
+}
+
+.modePillPro .modeDot {
+  background: #6ea8ff;
+}
+
 /* ---- M0 spike 调试页（#/spike 直达，不在导航） ---- */
 
 .spike {

@@ -180,10 +180,21 @@ export function labListProfiles(): Promise<LabProfile[]> {
   return call("lab_list_profiles", {});
 }
 
+export type RemotePlanMode =
+  | "direct"
+  | "punch"
+  | "relay"
+  | "easytier"
+  | "tailscale"
+  | "zerotier"
+  | "cf_worker"
+  | "frp"
+  | "derp";
+
 export interface RealTestPlanDto {
   planId: string;
   planName: string;
-  mode: "direct" | "tailscale" | "punch" | "relay" | "easytier";
+  mode: RemotePlanMode;
   targetAddr: string;
   relayAddr: string;
   rounds: number;
@@ -223,9 +234,11 @@ export function labDeleteProfile(id: string): Promise<LabProfile[]> {
   return call("lab_delete_profile", { id });
 }
 
+export type PoolNodeKind = "stun" | "easytier" | "relay" | "cf_worker" | "frp" | "derp";
+
 export interface PublicNodeItemDto {
   name: string;
-  kind: "stun" | "easytier" | "relay";
+  kind: PoolNodeKind;
   addr: string;
   region: string;
   source: string;
@@ -254,7 +267,7 @@ export function labFetchPublicNodes(
 }
 
 export function labProbeNode(
-  kind: "stun" | "easytier" | "relay" | "punch",
+  kind: PoolNodeKind | "punch",
   addr: string,
 ): Promise<NodeProbeResultDto> {
   return call("lab_probe_node", { kind, addr });

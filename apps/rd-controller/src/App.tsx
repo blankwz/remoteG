@@ -19,7 +19,7 @@ import { VideoCanvas } from "./video/VideoCanvas";
 import { IconGear } from "./ui/Icon";
 import { MacPermissionBanner } from "./ui/MacPermissionBanner";
 import { UpdateBanner } from "./ui/UpdateBanner";
-import { loadAdvancedMode, subscribeAdvancedMode } from "./ui/advancedMode";
+import { loadAdvancedMode, saveAdvancedMode, subscribeAdvancedMode } from "./ui/advancedMode";
 import styles from "./App.module.css";
 
 type Route =
@@ -218,6 +218,26 @@ function Nav({ active }: { active: Route["page"] }) {
             </a>
           </>
         )}
+      </div>
+      <div className={styles.navRight}>
+        <button
+          type="button"
+          className={advancedMode ? `${styles.modePill} ${styles.modePillPro}` : styles.modePill}
+          onClick={() => {
+            const next = !advancedMode;
+            saveAdvancedMode(next);
+            setAdvancedMode(next);
+          }}
+          title={
+            advancedMode
+              ? "当前：高级模式（已解锁实验室与底层调优）· 点击切回简洁模式"
+              : "当前：简洁模式（全自动零打扰）· 点击一键开启高级模式与实验室"
+          }
+          aria-pressed={advancedMode}
+        >
+          <span className={styles.modeDot} aria-hidden="true" />
+          {advancedMode ? "高级模式" : "简洁模式"}
+        </button>
       </div>
     </nav>
   );

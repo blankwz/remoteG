@@ -469,7 +469,26 @@ export function Settings() {
         </nav>
 
         <div className={styles.settingsContent}>
-          <h1 className={styles.title}>设置</h1>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+            <h1 className={styles.title}>设置</h1>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--rd-text-dim)" }}>
+              <span style={{ padding: "3px 8px", borderRadius: "999px", background: "rgba(70, 209, 126, 0.12)", color: "var(--rd-ok)", border: "1px solid rgba(70, 209, 126, 0.3)" }}>
+                ● 自动引擎已开启（LAN 自动发现 · 多路竞速 · 自适应 4K@144Hz）
+              </span>
+              <button
+                type="button"
+                className={styles.stepBtn}
+                onClick={() => {
+                  if (!advancedMode) {
+                    onToggleAdvancedMode(true);
+                  }
+                  window.location.hash = "#/lab";
+                }}
+              >
+                打开方案实验室 →
+              </button>
+            </div>
+          </div>
           <ul className={styles.list}>
             <li id="sec-general" className={styles.section}>⚙️ 常规与外观</li>
             <li className={styles.row}>

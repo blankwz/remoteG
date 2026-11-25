@@ -653,3 +653,582 @@
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+
+/* ---- 第一性原理双层实验室布局（智能连接中心 + 画质调优台） ---- */
+
+.layerTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.layerTab {
+  padding: 5px 12px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border);
+  background: var(--rd-card);
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-dim);
+  cursor: pointer;
+  transition: background var(--rd-dur-fast) var(--rd-ease), border-color var(--rd-dur-fast) var(--rd-ease);
+}
+
+.layerTab:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
+}
+
+.layerTabActive {
+  background: var(--rd-accent-soft);
+  border-color: var(--rd-accent);
+  color: var(--rd-accent-text);
+  font-weight: 600;
+}
+
+.toastBar {
+  padding: 8px 16px;
+  background: var(--rd-accent-soft);
+  border-bottom: 1px solid var(--rd-accent-strong);
+  color: var(--rd-accent-text);
+  font-size: var(--rd-fs-dim);
+}
+
+.centerBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.smartBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+}
+
+.textInput {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-dim);
+}
+
+.smallInput {
+  width: 84px;
+  padding: 6px 8px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-dim);
+}
+
+.hintBannerOk,
+.hintBannerWarn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--rd-radius);
+  font-size: var(--rd-fs-dim);
+}
+
+.hintBannerOk {
+  background: rgb(70 209 126 / 10%);
+  border: 1px solid rgb(70 209 126 / 45%);
+}
+
+.hintBannerWarn {
+  background: rgb(239 111 111 / 10%);
+  border: 1px solid rgb(239 111 111 / 45%);
+}
+
+.hintTextCol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hintActions {
+  display: flex;
+  gap: 6px;
+}
+
+.familyGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.familyCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius);
+  border: 1px solid var(--rd-border);
+  background: var(--rd-card);
+  color: var(--rd-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--rd-dur-fast) var(--rd-ease), background var(--rd-dur-fast) var(--rd-ease);
+}
+
+.familyCard:hover {
+  background: var(--rd-card-hover);
+  border-color: var(--rd-border-strong);
+}
+
+.familyCardActive {
+  border-color: var(--rd-accent);
+  background: var(--rd-accent-soft);
+}
+
+.familyCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.familyTitle {
+  font-size: var(--rd-fs-body);
+  font-weight: 600;
+}
+
+.familyStatus {
+  font-size: var(--rd-fs-micro);
+  font-family: var(--rd-font-mono);
+  color: var(--rd-text-dim);
+}
+
+.familyStatus[data-tone="ok"] {
+  color: var(--rd-ok);
+}
+
+.familySub {
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-dim);
+}
+
+.planFormCard,
+.planListCard,
+.drawerPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+}
+
+.planFormRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sectionHeadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sectionHeading {
+  margin: 0;
+  font-size: var(--rd-fs-body);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.linkMiniBtn {
+  background: transparent;
+  border: none;
+  color: var(--rd-accent-text);
+  font-size: var(--rd-fs-micro);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.natPill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--rd-fs-micro);
+  background: rgb(229 181 103 / 12%);
+  color: var(--rd-warn);
+  border: 1px solid rgb(229 181 103 / 40%);
+}
+
+.natPill[data-cone="true"] {
+  background: rgb(70 209 126 / 12%);
+  color: var(--rd-ok);
+  border-color: rgb(70 209 126 / 40%);
+}
+
+.planList,
+.poolList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.planRow,
+.poolItem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.planRowConfirmed {
+  border-color: rgb(70 209 126 / 55%);
+  background: rgb(70 209 126 / 6%);
+}
+
+.planInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.planTitleLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--rd-fs-body);
+}
+
+.modeTag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+}
+
+.defaultTag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgb(70 209 126 / 15%);
+  color: var(--rd-ok);
+  font-size: var(--rd-fs-micro);
+}
+
+.planAddrText {
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-dim);
+  font-family: var(--rd-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.planMetrics {
+  display: flex;
+  align-items: center;
+}
+
+.rttBadgeOk,
+.rttBadgeFail,
+.rttBadgeIdle {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+}
+
+.rttBadgeOk {
+  background: rgb(70 209 126 / 14%);
+  color: var(--rd-ok);
+}
+
+.rttBadgeFail {
+  background: rgb(239 111 111 / 14%);
+  color: var(--rd-err);
+}
+
+.rttBadgeIdle {
+  background: var(--rd-bg-deep);
+  color: var(--rd-text-dim);
+}
+
+.planActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.drawerBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inlineCode {
+  padding: 3px 8px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-accent-text);
+}
+
+.logPanel {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.logLine {
+  display: flex;
+  gap: 8px;
+  color: var(--rd-text-dim);
+}
+
+.logLine[data-level="ok"] {
+  color: var(--rd-ok);
+}
+
+.logLine[data-level="warn"] {
+  color: var(--rd-warn);
+}
+
+.logTime {
+  opacity: 0.7;
+  flex: none;
+}
+
+.emptyHint {
+  margin: 4px 0;
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-dim);
+}
+
+/* ---- Layer 2：画质与传输底层调优台 ---- */
+
+.tuningRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  max-width: 1240px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.tuningHeaderBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tuningHeaderLeft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.telemetryStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 8px;
+}
+
+.metricCell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+}
+
+.metricLabel {
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-dim);
+}
+
+.metricValue {
+  font-size: var(--rd-fs-dim);
+  font-family: var(--rd-font-mono);
+}
+
+.knobGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.knobCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+}
+
+.knobTitle {
+  margin: 0;
+  font-size: var(--rd-fs-body);
+  font-weight: 600;
+}
+
+.pillRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knobRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--rd-fs-dim);
+}
+
+.checkGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.checkRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--rd-fs-dim);
+}
+
+.sliderRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--rd-fs-dim);
+}
+
+.visualGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 10px;
+}
+
+.magWrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.stageBox {
+  position: relative;
+  width: 320px;
+  height: 180px;
+  border-radius: var(--rd-radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--rd-border);
+  background: var(--rd-bg-deep);
+}
+
+.rulerCanvas,
+.tileOverlayCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.tileOverlayCanvas {
+  pointer-events: none;
+}
+
+.zoomCanvas {
+  width: 180px;
+  height: 180px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-bg-deep);
+}
+
+.oscBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.abControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.abResultBox {
+  padding: 10px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--rd-fs-dim);
+}
+
+.abWinner {
+  color: var(--rd-ok);
+  font-weight: 600;
+}
+
+.abCompareRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+}

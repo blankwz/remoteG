@@ -194,4 +194,31 @@ describe("RD Geek Lab 极客操控台", () => {
       deviceId: "dev-studio",
     });
   });
+
+  it("智能连接中心覆盖 5 大远程方案家族并支持自定义方案绑定", async () => {
+    render(<Lab deviceId="dev-studio" />);
+    expect(await screen.findByText("局域网直连")).toBeTruthy();
+    expect(screen.getByText("P2P 打洞")).toBeTruthy();
+    expect(screen.getByText("自建中转")).toBeTruthy();
+    expect(screen.getByText("虚拟组网")).toBeTruthy();
+    expect(screen.getByText("轻量/无服务器")).toBeTruthy();
+
+    // 打开自定义方案表单，验证支持 Cloudflare Workers / frp / ZeroTier / DERP 等全部 9 种通道
+    fireEvent.click(screen.getByText("+ 自定义方案"));
+    const modeSelect = screen.getByLabelText("方案类型") as HTMLSelectElement;
+    const optionValues = Array.from(modeSelect.options).map((o) => o.value);
+    expect(optionValues).toEqual(
+      expect.arrayContaining([
+        "direct",
+        "punch",
+        "relay",
+        "easytier",
+        "tailscale",
+        "zerotier",
+        "cf_worker",
+        "frp",
+        "derp",
+      ]),
+    );
+  });
 });

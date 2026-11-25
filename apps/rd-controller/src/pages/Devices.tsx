@@ -246,7 +246,17 @@ export function Devices() {
     const hostTimer = window.setInterval(() => {
       void pollHost();
     }, 2000);
+    // 能自动就自动：进入设备页时后台静默扫描一次局域网，仅发现新设备时展示，空结果不打扰
+    let cancelled = false;
+    void discoverDevices()
+      .then((found) => {
+        if (!cancelled && Array.isArray(found) && found.length > 0) {
+          setDiscovered(found);
+        }
+      })
+      .catch(() => undefined);
     return () => {
+      cancelled = true;
       void unlisten.then((fn) => fn());
       window.clearInterval(hostTimer);
     };
@@ -438,7 +448,7 @@ export function Devices() {
             const ack = await connectDevice(d.id);
             rememberHostVersion(d.id, ack.hostVersion);
             rememberLastDeviceId(d.id);
-            window.location.hash = `#/windows/${d.id}`;
+            window.location.hash = `#/session/${d.id}?open=${DESKTOP_PRIMARY_ID}`;
           } catch {
             // 直连失败不回滚配对：设备已入库，用户可手动再连
             setNotice(`设备「${d.name}」已添加；连接未成功，可在列表中重试`);
@@ -498,7 +508,16 @@ export function Devices() {
   const onMenuAction = useCallback(
     (
       d: DeviceDto,
-      a: "disconnect" | "wake" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+      a:
+        | "disconnect"
+        | "wake"
+        | "copyAddr"
+        | "probe"
+        | "linkTest"
+        | "smartLab"
+        | "copyFp"
+        | "edit"
+        | "remove",
     ) => {
       switch (a) {
         case "disconnect":
@@ -518,6 +537,9 @@ export function Devices() {
           break;
         case "linkTest":
           void onLinkTest(d);
+          break;
+        case "smartLab":
+          window.location.hash = `#/lab/${d.id}`;
           break;
         case "copyFp":
           void navigator.clipboard
@@ -1304,7 +1326,16 @@ function DeviceRowMenu({
 }: {
   d: DeviceDto;
   onAction: (
-    a: "disconnect" | "wake" | "copyAddr" | "probe" | "linkTest" | "copyFp" | "edit" | "remove",
+    a:
+      | "disconnect"
+      | "wake"
+      | "copyAddr"
+      | "probe"
+      | "linkTest"
+      | "smartLab"
+      | "copyFp"
+      | "edit"
+      | "remove",
   ) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1350,6 +1381,15 @@ function DeviceRowMenu({
           </button>
           <button type="button" className={styles.menuItem} role="menuitem" onClick={() => act("probe")}>
             连通测试
+          </button>
+          <button
+            type="button"
+            className={styles.menuItem}
+            role="menuitem"
+            onClick={() => act("smartLab")}
+            title="进入方案实验室对该设备进行全方案自动寻优与自定义线路绑定"
+          >
+            智能寻优（实验室）
           </button>
           {d.addr.split(":")[0]?.startsWith("100.") && (
             <button
