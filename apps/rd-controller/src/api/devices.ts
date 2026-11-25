@@ -163,6 +163,8 @@ export interface DiscoveredDeviceDto {
 export interface DecodeCapsDto {
   h264Baseline420: boolean;
   h264High444: boolean;
+  hevc?: boolean;
+  av1?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,19 +234,42 @@ export function setDecodeCaps(caps: DecodeCapsDto): Promise<void> {
   return call("set_decode_caps", { caps });
 }
 
+/** 授权状态快照（设置页「版本与授权」）。 */
+export interface LicenseStatusDto {
+  plan: "free" | "pro";
+  name: string;
+  devicesMax: number;
+}
+
+export function getLicenseStatus(): Promise<LicenseStatusDto> {
+  return call("get_license_status");
+}
+
+export function activateLicense(code: string): Promise<LicenseStatusDto> {
+  return call("activate_license", { code });
+}
+
 /**
  * WebCodecs 解码能力探测（应用启动时调用一次）：
  * - H.264 Baseline 4:2:0：avc1.42E033（兜底能力，默认视为支持）；
  * - H.264 High 4:4:4：avc1.F40033（supports_444 探测）。
  */
 export async function probeDecodeCaps(): Promise<DecodeCapsDto> {
-  const [baseline, high444] = await Promise.all([
-    VideoDecoder.isConfigSupported({ codec: "avc1.42E033" }),
-    VideoDecoder.isConfigSupported({ codec: "avc1.F40033" }),
+  const safeProbe = (codec: string) =>
+    VideoDecoder.isConfigSupported({ codec })
+      .then((r) => r.supported === true)
+      .catch(() => false);
+  const [h264Baseline420, h264High444, hevc, av1] = await Promise.all([
+    safeProbe("avc1.42E033"),
+    safeProbe("avc1.F40033"),
+    safeProbe("hvc1.1.6.L153.B0"),
+    safeProbe("av01.0.12M.08"),
   ]);
   return {
-    h264Baseline420: baseline.supported === true,
-    h264High444: high444.supported === true,
+    h264Baseline420,
+    h264High444,
+    hevc,
+    av1,
   };
 }
 

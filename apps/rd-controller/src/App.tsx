@@ -9,6 +9,7 @@ import { getLastDeviceId, probeDecodeCaps, setDecodeCaps } from "./api/devices";
 import { spikeConnect } from "./api/spike";
 import { Hud } from "./hud/Hud";
 import { Devices } from "./pages/Devices";
+import { Lab } from "./pages/Lab";
 import { Session } from "./pages/Session";
 import { Windows } from "./pages/Windows";
 import { Settings } from "./pages/Settings";
@@ -17,11 +18,13 @@ import { H264Decoder } from "./video/decoder";
 import { VideoCanvas } from "./video/VideoCanvas";
 import { IconGear } from "./ui/Icon";
 import { UpdateBanner } from "./ui/UpdateBanner";
+import { loadAdvancedMode, subscribeAdvancedMode } from "./ui/advancedMode";
 import styles from "./App.module.css";
 
 type Route =
   | { page: "spike" }
   | { page: "devices" }
+  | { page: "lab"; deviceId: string | null }
   | { page: "windows"; deviceId: string }
   | { page: "session"; deviceId: string }
   | { page: "settings" };
@@ -36,6 +39,8 @@ function parseRoute(hash: string): Route {
   switch (parts[0]) {
     case "spike":
       return { page: "spike" };
+    case "lab":
+      return { page: "lab", deviceId: parts[1] ?? null };
     case "settings":
       return { page: "settings" };
     case "windows":
@@ -150,6 +155,7 @@ export default function App() {
       <UpdateBanner />
       {route.page === "spike" && <SpikePage />}
       {route.page === "devices" && <Devices />}
+      {route.page === "lab" && <Lab deviceId={route.deviceId} />}
       {route.page === "windows" && <Windows deviceId={route.deviceId} />}
       {route.page === "session" && <Session deviceId={route.deviceId} />}
       {route.page === "settings" && <Settings />}
@@ -160,6 +166,8 @@ export default function App() {
 /** 导航上「窗口列表 / 会话」指向的最后连接设备 id；没有时链接禁用。 */
 function Nav({ active }: { active: Route["page"] }) {
   const lastDeviceId = getLastDeviceId();
+  const [advancedMode, setAdvancedMode] = useState<boolean>(loadAdvancedMode);
+  useEffect(() => subscribeAdvancedMode(setAdvancedMode), []);
   const linkClass = (page: Route["page"]): string =>
     active === page
       ? `${styles.navLink} ${styles.navLinkActive}`
@@ -174,6 +182,15 @@ function Nav({ active }: { active: Route["page"] }) {
         <a className={linkClass("devices")} href="#/devices">
           设备
         </a>
+        {advancedMode && (
+          <a
+            className={linkClass("lab")}
+            href={lastDeviceId ? `#/lab/${lastDeviceId}` : "#/lab"}
+            title="方案实验室（高级模式）"
+          >
+            实验室
+          </a>
+        )}
         <a
           className={linkClass("settings")}
           href="#/settings"

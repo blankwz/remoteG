@@ -34,6 +34,10 @@ function mockReply(cmd: string): unknown {
         noTun: true,
         forwards: [],
       };
+    case "get_license_status":
+      return { plan: "free", name: "", devicesMax: 2 };
+    case "activate_license":
+      return { plan: "pro", name: "测试用户", devicesMax: 99 };
     default:
       return true;
   }
@@ -72,6 +76,10 @@ describe("relayAddrError 校验规则（P1-2）", () => {
 });
 
 describe("中继地址保存（P1-2）", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("rd.advancedMode", "1");
+  });
+
   it("格式错误：hint 位置出错误提示，且不写入后端", async () => {
     render(<Settings />);
     const input = await screen.findByLabelText("原生中继地址");
@@ -134,6 +142,39 @@ describe("自定义常用语添加（R16）", () => {
   });
 });
 
+describe("版本与授权一键激活", () => {
+  it("粘贴授权码点「激活」：调用 activate_license，成功切为专业版并提示重启生效", async () => {
+    render(<Settings />);
+    const input = await screen.findByLabelText("授权码");
+    fireEvent.change(input, { target: { value: "RD1.payload.sig" } });
+    fireEvent.click(screen.getByRole("button", { name: "激活" }));
+    await vi.waitFor(() => {
+      expect(
+        callMock.mock.calls.some(
+          ([cmd, args]) => cmd === "activate_license" && args?.code === "RD1.payload.sig",
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByText(/专业版（Pro）/)).toBeTruthy();
+    expect(await screen.findByText(/重启 rd-controller 后生效/)).toBeTruthy();
+  });
+
+  it("验签失败：红字 alert 显示后端原因，不清空输入框", async () => {
+    callMock.mockImplementation((cmd: string) =>
+      cmd === "activate_license"
+        ? Promise.reject(new Error("授权码格式错误（应为 RD1.payload.sig）"))
+        : Promise.resolve(mockReply(cmd)),
+    );
+    render(<Settings />);
+    const input = await screen.findByLabelText("授权码");
+    fireEvent.change(input, { target: { value: "bad-code" } });
+    fireEvent.click(screen.getByRole("button", { name: "激活" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("授权码格式错误");
+    expect((input as HTMLInputElement).value).toBe("bad-code");
+  });
+});
+
 describe("全局 UI 缩放（P1-4）", () => {
   it("切档即时改根节点变量并持久化", async () => {
     render(<Settings />);
@@ -159,6 +200,10 @@ describe("全局 UI 缩放（P1-4）", () => {
 });
 
 describe("EasyTier 组网设置（T-043）", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("rd.advancedMode", "1");
+  });
+
   it("启用但未填网络名：错误提示且不写入后端", async () => {
     render(<Settings />);
     const sw = await screen.findByRole("switch", { name: "启用 EasyTier 组网" });
@@ -224,5 +269,55 @@ describe("EasyTier 组网设置（T-043）", () => {
     expect(
       callMock.mock.calls.some(([cmd]) => cmd === "set_easytier"),
     ).toBe(false);
+  });
+});
+
+describe("简洁模式与高级模式 + SSH 一键部署中继（宪法 #2/#3）", () => {
+  it("默认简洁模式隐藏底层网络与实验室；切换高级模式后立即展开并持久化", async () => {
+    render(<Settings />);
+    expect(screen.queryByLabelText("原生中继地址")).toBeNull();
+    expect(screen.queryByLabelText("SSH 服务器地址")).toBeNull();
+
+    const modeSwitch = screen.getByRole("switch", { name: "高级模式（极客调优）" });
+    fireEvent.click(modeSwitch);
+
+    expect(window.localStorage.getItem("rd.advancedMode")).toBe("1");
+    expect(await screen.findByLabelText("原生中继地址")).toBeTruthy();
+    expect(await screen.findByLabelText("SSH 服务器地址")).toBeTruthy();
+  });
+
+  it("高级模式下填写 SSH 信息并点击一键上传并部署：调用 deploy_relay_ssh 并自动回填保存", async () => {
+    window.localStorage.setItem("rd.advancedMode", "1");
+    callMock.mockImplementation((cmd: string) => {
+      if (cmd === "deploy_relay_ssh") {
+        return Promise.resolve({
+          ok: true,
+          relayAddr: "1.2.3.4:21118",
+          summary: "部署成功！中继地址：1.2.3.4:21118",
+          log: "[✓] SSH 连接 root@1.2.3.4:22 成功\nRD_RELAY_DEPLOY_OK",
+        });
+      }
+      return Promise.resolve(mockReply(cmd));
+    });
+
+    render(<Settings />);
+    fireEvent.change(await screen.findByLabelText("SSH 服务器地址"), {
+      target: { value: "1.2.3.4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "一键上传并部署" }));
+
+    await vi.waitFor(() => {
+      expect(
+        callMock.mock.calls.some(
+          ([cmd, args]) => cmd === "deploy_relay_ssh" && args?.req?.host === "1.2.3.4",
+        ),
+      ).toBe(true);
+      expect(
+        callMock.mock.calls.some(
+          ([cmd, args]) => cmd === "set_relay_addr" && args?.relay === "1.2.3.4:21118",
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByText(/部署成功！中继地址：1\.2\.3\.4:21118/)).toBeTruthy();
   });
 });

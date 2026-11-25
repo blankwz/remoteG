@@ -1,0 +1,556 @@
+/* RD Geek Lab · 极客方案实验室样式表
+ *
+ * 严格遵循 R15 95.0 门禁纪律：
+ * - 字号唯一使用 --rd-fs-* 令牌（严禁裸 font-size: Npx）
+ * - 颜色唯一使用 --rd-* 令牌，对比度全部 ≥ 4.5:1
+ * - 同时支持「独立全屏页 (#/lab)」与「Session 右侧半透明极客抽屉 (Ctrl+Shift+L)」
+ */
+
+.labPage {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--rd-bg);
+  color: var(--rd-text);
+  overflow: hidden;
+}
+
+.labDrawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(1060px, 92vw);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  background: rgb(16 18 22 / 96%);
+  backdrop-filter: blur(14px);
+  border-left: 1px solid var(--rd-border-strong);
+  box-shadow: var(--rd-shadow-pop);
+  color: var(--rd-text);
+  overflow: hidden;
+}
+
+/* ---- 顶部极客状态栏 (Header + Target + Profile + Panic Reset) ---- */
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--rd-panel);
+  border-bottom: 1px solid var(--rd-border);
+  flex: none;
+}
+
+.titleGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.labBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  border: 1px solid var(--rd-accent-strong);
+  color: var(--rd-accent-text);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  font-weight: 600;
+}
+
+.labTitle {
+  margin: 0;
+  font-size: var(--rd-fs-title);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.targetPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-dim);
+}
+
+.dotOnline {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rd-ok);
+}
+
+.dotSandbox {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rd-warn);
+}
+
+.actionGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.select {
+  padding: 5px 10px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-dim);
+  font-family: var(--rd-font-mono);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border-strong);
+  background: var(--rd-card);
+  color: var(--rd-text);
+  font-size: var(--rd-fs-dim);
+  cursor: pointer;
+  transition: background var(--rd-dur-fast) var(--rd-ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--rd-card-hover);
+  border-color: var(--rd-accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnPrimary {
+  border-color: var(--rd-accent);
+  background: var(--rd-accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: var(--rd-accent-strong);
+  border-color: var(--rd-accent-strong);
+}
+
+.btnPanic {
+  border-color: var(--rd-err-solid);
+  background: var(--rd-err-solid);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.btnPanic:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+/* ---- 链路实时解剖拓扑条 (Pipeline Anatomy Bar) ---- */
+
+.anatomyBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--rd-bg-deep);
+  border-bottom: 1px solid var(--rd-border);
+  overflow-x: auto;
+  flex: none;
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+}
+
+.stageBox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+  white-space: nowrap;
+}
+
+.stageBoxAlert {
+  border-color: var(--rd-warn);
+}
+
+.stageLabel {
+  color: var(--rd-text-faint);
+  font-size: var(--rd-fs-micro);
+}
+
+.stageVal {
+  color: var(--rd-text);
+  font-weight: 600;
+  font-size: var(--rd-fs-dim);
+}
+
+.stageArrow {
+  color: var(--rd-text-faint);
+  padding: 0 2px;
+}
+
+/* ---- 主工作区：左侧四组硬核旋钮 + 右侧示波器/微距镜/A-B对决 ---- */
+
+.workspace {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.knobsPane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--rd-panel);
+  border-right: 1px solid var(--rd-border);
+  overflow-y: auto;
+}
+
+.knobCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.knobHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.knobTitle {
+  margin: 0;
+  font-size: var(--rd-fs-body);
+  font-weight: 600;
+  color: var(--rd-text);
+}
+
+.knobTag {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-accent-text);
+}
+
+.fieldRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--rd-fs-dim);
+}
+
+.fieldLabel {
+  color: var(--rd-text-dim);
+}
+
+.fieldValue {
+  font-family: var(--rd-font-mono);
+  color: var(--rd-text);
+  font-weight: 600;
+}
+
+.slider {
+  width: 100%;
+  accent-color: var(--rd-accent);
+  cursor: pointer;
+}
+
+.segGroup {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.segBtn {
+  flex: 1;
+  min-width: 58px;
+  padding: 4px 6px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text-dim);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  cursor: pointer;
+  text-align: center;
+}
+
+.segBtn:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-border-strong);
+}
+
+.segBtnActive {
+  background: var(--rd-accent-soft);
+  border-color: var(--rd-accent);
+  color: var(--rd-accent-text);
+  font-weight: 600;
+}
+
+.presetRow {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.presetChip {
+  padding: 3px 8px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text-dim);
+  font-size: var(--rd-fs-micro);
+  cursor: pointer;
+}
+
+.presetChip:hover {
+  color: var(--rd-text);
+  border-color: var(--rd-warn);
+}
+
+/* ---- 右侧仪表与微距检视区 ---- */
+
+.telemetryPane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.toastBar {
+  padding: 6px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  border: 1px solid var(--rd-accent-strong);
+  color: var(--rd-accent-text);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-dim);
+}
+
+.oscGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.oscCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.oscHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.oscName {
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-dim);
+}
+
+.oscBig {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-title);
+  font-weight: 700;
+  color: var(--rd-text);
+}
+
+.oscSub {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-faint);
+}
+
+.oscSvg {
+  width: 100%;
+  height: 54px;
+  background: var(--rd-bg-deep);
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-border);
+}
+
+/* ---- 1:1 微距像素检视镜 (400% Pixel Magnifier) ---- */
+
+.magCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.magHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.magMetrics {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-dim);
+}
+
+.metricGood {
+  color: var(--rd-ok);
+  font-weight: 700;
+}
+
+.metricWarn {
+  color: var(--rd-warn);
+  font-weight: 700;
+}
+
+.magSplit {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.sandboxStage {
+  position: relative;
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border);
+  border-radius: var(--rd-radius-sm);
+  overflow: hidden;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: crosshair;
+}
+
+.sandboxCanvasWrap {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 16 / 9;
+}
+
+.layerCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.zoomBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border-strong);
+  align-items: center;
+}
+
+.zoomCanvas {
+  width: 192px;
+  height: 192px;
+  border: 1px solid var(--rd-accent);
+  border-radius: 4px;
+  image-rendering: pixelated;
+  background: #000;
+}
+
+.zoomCaption {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-text-dim);
+  text-align: center;
+}
+
+/* ---- A/B 真栈矩阵对决面板 ---- */
+
+.abCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.abControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.abTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-dim);
+}
+
+.abTable th,
+.abTable td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rd-border);
+  text-align: left;
+}
+
+.abTable th {
+  color: var(--rd-text-dim);
+  font-weight: 600;
+  background: var(--rd-bg-deep);
+}
+
+.abVerdict {
+  padding: 8px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  border-left: 3px solid var(--rd-ok);
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text);
+}

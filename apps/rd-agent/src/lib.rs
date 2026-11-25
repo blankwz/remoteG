@@ -103,6 +103,8 @@ pub fn start(
     cli_listen: Option<SocketAddr>,
     test_pair_code: Option<String>,
 ) -> anyhow::Result<AgentRuntime> {
+    #[cfg(target_os = "macos")]
+    rd_mac::permissions::log_permission_status();
     let config = config::Config::load(config_dir)?;
     // 本机优先检测（D-013 包5）：幂等（线程已起则空转）
     host_activity::init();

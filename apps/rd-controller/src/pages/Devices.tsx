@@ -330,12 +330,12 @@ export function Devices() {
     }
   }, []);
 
-  /** 方案实验室（Studio 内嵌窗口，2026-10-28 融合）。经 bridge call()（D06）。 */
+  /** 方案实验室（v0.4 原生极客台：优先开独立窗口，demo/当前窗口亦支持直达 #/lab）。经 bridge call()（D06）。 */
   const onOpenStudio = useCallback(async () => {
     try {
       await call<void>("open_studio");
-    } catch (e) {
-      setError(`打开方案实验室没有成功：${errText(e)}。可稍后重试，或检查安装目录中的 Studio 组件`);
+    } catch {
+      window.location.hash = "#/lab";
     }
   }, []);
 
@@ -570,6 +570,49 @@ export function Devices() {
     };
   }, [showAdd, closeAdd]);
 
+  /** RustDesk 式顶部快速直连栏（宪法 #5）：输入 IP/地址（可选 6 位配对码）一步直连或自动配对。 */
+  const [quickAddr, setQuickAddr] = useState("");
+  const [quickCode, setQuickCode] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
+
+  const onQuickConnect = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const raw = quickAddr.trim();
+      if (raw.length === 0) {
+        return;
+      }
+      setError(null);
+      const norm = raw.includes(":") ? raw : `${raw}:21118`;
+      const existing = devices.find(
+        (d) => d.addr === raw || d.addr === norm || d.name.toLowerCase() === raw.toLowerCase(),
+      );
+      if (existing !== undefined) {
+        await onConnect(existing);
+        return;
+      }
+      const code = quickCode.trim();
+      if (code.length === 6) {
+        setQuickBusy(true);
+        try {
+          const added = await pairDevice(raw, code, undefined);
+          await refresh();
+          setQuickAddr("");
+          setQuickCode("");
+          await onConnect(added);
+        } catch (err) {
+          setError(`快速配对失败：${errText(err)}`);
+        } finally {
+          setQuickBusy(false);
+        }
+        return;
+      }
+      // 未配对设备且未填 6 位码：预填地址直达配对框
+      openAddDialog({ addr: raw });
+    },
+    [devices, onConnect, openAddDialog, quickAddr, quickCode, refresh],
+  );
+
   const updateForm = useCallback(
     (field: "addr" | "code" | "name" | "relay", value: string) => {
       setForm((prev) => ({ ...prev, [field]: value }));
@@ -606,6 +649,64 @@ export function Devices() {
           </button>
         </div>
       </header>
+
+      <form
+        onSubmit={(e) => void onQuickConnect(e)}
+        aria-label="快速连接远端设备"
+        style={{
+          display: "flex",
+          gap: "8px",
+          alignItems: "center",
+          flexWrap: "wrap",
+          marginBottom: "14px",
+          padding: "10px 12px",
+          borderRadius: "10px",
+          background: "rgba(255, 255, 255, 0.04)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+        }}
+      >
+        <input
+          type="text"
+          value={quickAddr}
+          onChange={(e) => setQuickAddr(e.currentTarget.value)}
+          placeholder="输入远端 IP 或设备名快速直连（如 192.168.1.10）"
+          aria-label="快速连接地址"
+          spellCheck={false}
+          style={{
+            flex: "1 1 220px",
+            minWidth: 0,
+            padding: "7px 10px",
+            borderRadius: "6px",
+            border: "1px solid rgba(255, 255, 255, 0.14)",
+            background: "rgba(0, 0, 0, 0.25)",
+            color: "inherit",
+          }}
+        />
+        <input
+          type="text"
+          value={quickCode}
+          onChange={(e) => setQuickCode(e.currentTarget.value)}
+          placeholder="6 位配对码（新设备选填）"
+          aria-label="快速连接配对码"
+          maxLength={6}
+          spellCheck={false}
+          style={{
+            width: "160px",
+            padding: "7px 10px",
+            borderRadius: "6px",
+            border: "1px solid rgba(255, 255, 255, 0.14)",
+            background: "rgba(0, 0, 0, 0.25)",
+            color: "inherit",
+          }}
+        />
+        <button
+          type="submit"
+          className={styles.addBtn}
+          disabled={quickBusy || busyId !== null || quickAddr.trim().length === 0}
+        >
+          {quickBusy ? "连接中…" : "快速连接"}
+        </button>
+      </form>
 
       {resume !== null && (
         <button

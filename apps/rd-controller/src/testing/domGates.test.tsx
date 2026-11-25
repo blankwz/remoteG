@@ -14,6 +14,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { axeScan } from "./axeScan";
 import { useDismiss } from "../ui/useDismiss";
 import { Devices } from "../pages/Devices";
+import { Lab } from "../pages/Lab";
 import { Settings } from "../pages/Settings";
 import { Windows } from "../pages/Windows";
 import { WindowSidebar } from "../session/WindowSidebar";
@@ -67,6 +68,57 @@ function mockReply(cmd: string): unknown {
       return [
         { id: "101", title: "测试窗口 A", process: "a.exe", pid: 1, icon: null, x: 0, y: 0, w: 800, h: 600, dpi: 1, resizable: true, minimized: false },
         { id: "102", title: "测试窗口 B", process: "b.exe", pid: 2, icon: null, x: 0, y: 0, w: 600, h: 400, dpi: 1, resizable: true, minimized: true },
+      ];
+    case "lab_get_state":
+      return {
+        activeDeviceId: "dev-a",
+        activeAddr: "100.64.0.1:21118",
+        routeTag: "direct",
+        congestion: "bbr",
+        mediaFec: true,
+        fecOverheadPct: 20,
+        fecRecovered: 8,
+        fecLost: 0,
+        rttMs: 12,
+        quicCwndKb: 256,
+        quicSentPkts: 1000,
+        quicLostPkts: 2,
+        encoderName: "h264_nvenc",
+        hardwareEnc: true,
+        is444: false,
+        targetKbps: 8000,
+        videoKbps: 4200,
+        tileKbps: 360,
+        fpsCap: 60,
+        tileStillMs: 300,
+        tileBudgetPct: 50,
+        tilesSent: 42,
+        idrCount: 2,
+        netem: { enabled: false, delayMs: 0, jitterMs: 0, lossPct: 0, burstLen: 1, rateKbps: 0 },
+        netemDropped: 0,
+        netemDelayed: 0,
+        sandboxRunning: true,
+        sandboxPsnrDb: 46.5,
+        sandboxTextFidelityPct: 99.9,
+      };
+    case "lab_list_profiles":
+      return [
+        {
+          id: "geek-lan-444",
+          name: "⚡ 极客 LAN · 1:1 像素零损",
+          boundDeviceId: null,
+          transport: { routeMode: "direct", congestion: "bbr", mediaFec: false, fecOverheadPct: 15 },
+          codec: {
+            manualLock: true,
+            bitrateKbps: 20000,
+            maxFps: 60,
+            preferHw: true,
+            request444: true,
+            tileEnabled: true,
+            tileStillMs: 120,
+            tileBudgetPct: 65,
+          },
+        },
       ];
     default:
       return true;
@@ -254,6 +306,18 @@ describe("axe DOM 门禁扩展（R14：会话组件与窗口页）", () => {
   it("Windows 窗口页：两规则零违规", async () => {
     const { container } = render(<Windows deviceId="dev-a" />);
     await screen.findAllByText("测试窗口 A"); // 桌面地图+列表各渲染一份
+    const results = await axeScan(container);
+    const bad = results.violations.filter(
+      (v) => v.id === "aria-hidden-focus" || v.id === "nested-interactive",
+    );
+    expect(
+      bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join("; ")}`),
+    ).toEqual([]);
+  });
+
+  it("Lab 方案实验室极客台：aria-hidden-focus / nested-interactive 零违规", async () => {
+    const { container } = render(<Lab deviceId="dev-a" />);
+    await screen.findByText(/方案实验室 · 真栈操控台/);
     const results = await axeScan(container);
     const bad = results.violations.filter(
       (v) => v.id === "aria-hidden-focus" || v.id === "nested-interactive",

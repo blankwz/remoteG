@@ -9,6 +9,7 @@ pub mod conn;
 pub mod direct;
 pub mod framing;
 pub mod identity;
+pub mod netem;
 pub mod relay;
 pub mod relay_ws;
 pub mod verify;

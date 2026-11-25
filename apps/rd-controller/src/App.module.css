@@ -321,7 +321,7 @@
   background: var(--rd-accent-soft);
   border-bottom: 1px solid var(--rd-accent-strong);
   color: var(--rd-accent-text);
-  font-size: 13px;
+  font-size: var(--rd-fs-body);
 }
 .updateBtn {
   border: 1px solid var(--rd-accent-strong);
@@ -329,7 +329,7 @@
   color: var(--rd-accent-text);
   border-radius: 6px;
   padding: 3px 10px;
-  font-size: 12px;
+  font-size: var(--rd-fs-dim);
   cursor: pointer;
 }
 .updateBtn:hover {

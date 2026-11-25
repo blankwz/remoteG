@@ -4,6 +4,8 @@ pub mod crash;
 pub mod devices;
 pub mod files;
 pub mod input;
+pub mod lab;
+pub mod relay_deploy;
 pub mod session;
 pub mod spike;
 pub mod term;

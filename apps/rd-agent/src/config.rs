@@ -133,7 +133,7 @@ impl Default for Config {
             confirm_connection: false,
             terminal_enabled: true,
             refine_enabled: true,
-            max_fps: 120,
+            max_fps: 144,
             start_kbps: 8000,
             relay_addr: None,
             easytier: EasyTierAgentConfig::default(),

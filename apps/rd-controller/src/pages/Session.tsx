@@ -45,10 +45,12 @@ import { ShellMenu } from "../ui/ShellMenu";
 import {
   IconArrowLeft,
   IconEyeOff,
+  IconLab,
   IconLock,
   IconSidebar,
   IconTerminal,
 } from "../ui/Icon";
+import { Lab } from "./Lab";
 import type { FitMode } from "../api/session";
 import styles from "../session/Session.module.css";
 
@@ -107,6 +109,8 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [privacyOn, setPrivacyOn] = useState(false);
   // 文件传输面板显隐（T-031，工具栏「更多 → 文件传输」打开）
   const [showFiles, setShowFiles] = useState(false);
+  // 方案实验室极客抽屉显隐（v0.4，顶栏按钮打开）
+  const [showLabDrawer, setShowLabDrawer] = useState(false);
   /** 画质档位（受控真实态；localStorage 记忆上次选择）。 */
   const [quality, setQuality] = useState<Quality>(() => {
     const saved = window.localStorage.getItem("rd.quality");
@@ -461,6 +465,8 @@ export function Session({ deviceId }: { deviceId: string }) {
         setHelpOpen((v) => !v);
       } else if (e.key === "Escape" && helpOpenRef.current) {
         setHelpOpen(false);
+      } else if (e.key === "Escape") {
+        setShowLabDrawer(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -895,8 +901,24 @@ export function Session({ deviceId }: { deviceId: string }) {
           {showFiles && (
             <FilesPanel deviceId={deviceId} onClose={() => setShowFiles(false)} />
           )}
+          {showLabDrawer && (
+            <Lab
+              deviceId={deviceId}
+              drawer
+              onClose={() => setShowLabDrawer(false)}
+            />
+          )}
           {/* chip 簇右置（R11 D11：曾与 bar 同行挤偏工具栏中心 ~80px） */}
           <div className={styles.chipCluster}>
+            <button
+              type="button"
+              className={styles.toolBtn}
+              title="呼出方案实验室极客抽屉（边控远程窗口边热调编码/选路/FEC/Netem 并用 400% 微距镜检视文字清晰度）"
+              onClick={() => setShowLabDrawer((v) => !v)}
+            >
+              <IconLab size={12} />
+              极客实验室
+            </button>
             <button
               type="button"
               className={styles.disconnectBtn}

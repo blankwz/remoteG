@@ -146,6 +146,13 @@
         color: var(--accent-strong);
       }
 
+      .btn-disabled {
+        border-color: var(--border);
+        color: var(--text-dim);
+        opacity: 0.55;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
       /* 特性四宫格 */
       .grid {
         display: grid;
@@ -258,8 +265,8 @@
       <section class="hero wrap">
         <h1>只看出问题的那个窗口。</h1>
         <p class="tagline">
-          帮家人修电脑，不用看整个屏幕——<span class="accent">窗口级共享</span>，其他窗口他们看不见；
-          对方<span class="accent">免安装</span>，双击一个 exe、念 6 位码就能连；<span class="accent">不限速</span>，画质自动适配网络。
+          远程协助与办公，不用看整个屏幕——<span class="accent">窗口级共享</span>，其他窗口与聊天记录不在画面里；
+          对方<span class="accent">免安装</span>，双击 exe 弹出 6 位码就能连；同局域网开箱自动发现，跨网支持中继与组网，<span class="accent">不限速</span>。
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="#download">下载使用</a>
@@ -280,16 +287,16 @@
             <p>被控端是便携 exe，双击就跑；6 位配对码 + 指纹校验，连错了连不上。</p>
           </div>
           <div class="card">
-            <b>手机比例虚拟屏</b>
-            <p>远控连入自动建一块手机比例的屏幕，窗口居中铺好；触屏设备上直接手势操作——轻点、惯性滚动、长按右键。断开自动撤屏还原。</p>
+            <b>防打扰虚拟屏（可选）</b>
+            <p>按需安装随包虚拟屏驱动后，远控连入自动建独立虚拟屏并铺好窗口，不打扰对方物理桌面，断开自动撤屏还原。</p>
           </div>
           <div class="card">
-            <b>不限速</b>
-            <p>免费版不限画质速率（限设备数）；文字逐像素清晰，专用无损通道补细节。</p>
+            <b>不限速 · 文字超清</b>
+            <p>免费版不限画质速率（限 2 台信任设备）；1:1 像素映射配合静止区无损通道，小字表格同样清晰锐利。</p>
           </div>
           <div class="card">
             <b>被控端全程知情</b>
-            <p>连接要确认、托盘常显绿色状态、操作留审计日志；可随时一键暂停共享。</p>
+            <p>首次 6 位配对码授权、托盘常显绿色被控状态、操作写入本地审计日志；可随时一键暂停或切断共享。</p>
           </div>
           <div class="card">
             <b>自动更新</b>
@@ -304,8 +311,8 @@
           <h2>下载</h2>
           <div class="dl-item">
             <div class="dl-name">
-              <b>rd-controller（控制端）Windows</b>
-              <span>安装版：装在你操作的这台电脑上</span>
+              <b>rd 完整版（控制端 + 被控端）Windows</b>
+              <span>安装版：装在你自己的电脑上，既能控制别人，也能被别人控制</span>
             </div>
             <a
               class="btn btn-primary"
@@ -316,20 +323,8 @@
           </div>
           <div class="dl-item">
             <div class="dl-name">
-              <b>rd-controller（控制端）macOS</b>
-              <span>未签名 dmg：首次打开请右键 → 打开</span>
-            </div>
-            <a
-              class="btn btn-ghost"
-              data-release-asset=".dmg"
-              href="https://github.com/blankwz/remoteG/releases/latest"
-              >下载 macOS dmg</a
-            >
-          </div>
-          <div class="dl-item">
-            <div class="dl-name">
-              <b>rd-agent（被控端）Windows</b>
-              <span>便携 zip：解压后双击 rd-agent.exe 放到需要被帮的电脑上</span>
+              <b>rd-agent（极简被控端）Windows</b>
+              <span>绿色便携 zip：发给需要帮忙的家人，解压后双击 rd-agent.exe 自动弹出配对码</span>
             </div>
             <a
               class="btn btn-ghost"
@@ -338,10 +333,17 @@
               >下载 Windows 便携包</a
             >
           </div>
+          <div class="dl-item">
+            <div class="dl-name">
+              <b>macOS / 移动端控制端</b>
+              <span>当前版本仅支持 Windows 双端，macOS 与移动端控制端正在规划中</span>
+            </div>
+            <span class="btn btn-disabled" aria-disabled="true">开发中</span>
+          </div>
           <div id="dl-status"></div>
           <p class="dl-note">
-            校验：每个 Release 附 <code>checksums.sha256</code>，下载后可比对 SHA256。
-            免费版可用全部核心功能（限 2 台信任设备、1 路并发连接）。
+            网络说明：同一 WiFi / 局域网内开箱点击「扫描局域网」即可发现并连接；跨网络需配置自建中继、Tailscale 或 EasyTier。
+            校验：每个 Release 附 <code>checksums.sha256</code>。免费版可用全部核心功能（限 2 台信任设备、1 路并发连接）。
           </p>
         </div>
       </section>
@@ -387,12 +389,12 @@
       // 占位仓库（OWNER 未替换）或接口失败时保持静态 releases/latest 链接兜底。
       (function () {
         var status = document.getElementById("dl-status");
-        var base = "https://github.com/blankwz/remoteG";
-        if (base.indexOf("OWNER") >= 0) {
+        var repo = "blankwz/remoteG";
+        if (repo.indexOf("OWNER") >= 0) {
           status.textContent = "（下载地址待仓库就绪后自动指向最新 Release）";
           return;
         }
-        fetch(base + "/releases/latest", {
+        fetch("https://api.github.com/repos/" + repo + "/releases/latest", {
           headers: { Accept: "application/vnd.github+json" },
         })
           .then(function (r) {

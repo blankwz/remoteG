@@ -37,9 +37,9 @@ pub struct RateDecision {
 }
 
 const MIN_KBPS: u32 = 500;
-/// 上限 50 Mbps（2026-10-23 用户反馈鼠标移动发糊：hover 全窗变化时瞬时
-/// 码率需求远超 20M，LAN 千兆场景应允许带宽换画质；跨网由控制器自行收敛）。
-const MAX_KBPS: u32 = 50_000;
+/// 上限 200 Mbps（宪法要求 #1：局域网高分辨率 144Hz 场景允许千兆/2.5G 带宽换画质；
+/// 跨网场景由 baseline-adaptive 控制器按 RTT/丢包自行收敛）。
+const MAX_KBPS: u32 = 200_000;
 /// 拥塞降档因子 ×0.7（整型避免浮点）。
 const DROP_NUM: u32 = 7;
 const DROP_DEN: u32 = 10;
@@ -180,7 +180,7 @@ impl RateController {
     }
 }
 
-/// 收敛码率到 [500, 50_000] kbps。
+/// 收敛码率到 [500, 200_000] kbps。
 fn clamp_kbps(kbps: u32) -> u32 {
     kbps.clamp(MIN_KBPS, MAX_KBPS)
 }
@@ -310,10 +310,10 @@ mod tests {
         // 首样本建立基线；起始 500 已在下限，好样本稳态 2 连后 ×1.15
         assert_eq!(rc.update(normal()).kbps, 500);
         assert_eq!(rc.update(normal()).kbps, 575);
-        let mut rc = RateController::new(999_999, 60);
-        assert_eq!(rc.update(normal()).kbps, 50_000);
+        let mut rc = RateController::new(999_999, 144);
+        assert_eq!(rc.update(normal()).kbps, 200_000);
         for _ in 0..3 {
-            assert_eq!(rc.update(normal()).kbps, 50_000);
+            assert_eq!(rc.update(normal()).kbps, 200_000);
         }
     }
 

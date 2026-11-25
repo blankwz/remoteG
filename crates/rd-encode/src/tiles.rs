@@ -103,6 +103,11 @@ impl TileRefiner {
         (self.grid.cols() * BLOCK, self.grid.rows() * BLOCK)
     }
 
+    /// 动态调整静止判定阈值（方案实验室在线热调）。
+    pub fn set_still_ms(&mut self, still_ms: u32) {
+        self.still = Duration::from_millis(u64::from(still_ms.max(20)));
+    }
+
     /// 最近一次 [`on_frame`](Self::on_frame) 中发生变化的块数。
     ///
     /// 供上层做「静止帧 gating」：=0 表示本帧画面静止，可跳过视频帧编码

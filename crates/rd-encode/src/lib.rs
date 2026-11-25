@@ -143,6 +143,37 @@ pub fn create_best(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
     }
 }
 
+/// 按协商出的 [`rd_proto::v0::Codec`] 创建硬编编码器（支持 AV1 / HEVC / H.264 4:4:4 / H.264 4:2:0）。
+/// AV1 / HEVC 仅支持硬编，若本机不支持则返回明确错误供调用方降级 H.264。
+pub fn create_for_codec(
+    cfg: &EncoderConfig,
+    codec: rd_proto::v0::Codec,
+) -> Result<Box<dyn VideoEncoder>> {
+    match codec {
+        rd_proto::v0::Codec::H264420 => create_best_420(cfg),
+        rd_proto::v0::Codec::H264444 => create_best_444(cfg),
+        rd_proto::v0::Codec::Hevc444 | rd_proto::v0::Codec::Av1 => {
+            anyhow::ensure!(cfg.prefer_hw, "{codec:?} 仅支持硬件编码器");
+            #[cfg(all(windows, feature = "ffmpeg"))]
+            {
+                let enc = h264_ffmpeg::FfmpegEncoder::create_for_codec(cfg, codec)?;
+                let info = enc.info();
+                tracing::info!(
+                    name = info.name,
+                    hardware = info.hardware,
+                    codec = ?codec,
+                    "选用高刷/4K 硬件编码器"
+                );
+                Ok(Box::new(enc))
+            }
+            #[cfg(not(all(windows, feature = "ffmpeg")))]
+            Err(anyhow::anyhow!(
+                "当前构建未启用 ffmpeg 硬编，无法创建 {codec:?} 编码器"
+            ))
+        }
+    }
+}
+
 /// 4:2:0 创建路径（硬编探测失败回退 OpenH264）。
 fn create_best_420(cfg: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
     if cfg.prefer_hw {

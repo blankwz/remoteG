@@ -184,6 +184,12 @@ export function FloatingToolbar(props: Props) {
         </>
       )}
       <ToolBtn
+        icon={<IconFolder size={16} />}
+        label="文件"
+        title="文件传输：发送文件到远端或取回远端文件"
+        onClick={props.onFiles}
+      />
+      <ToolBtn
         icon={<IconLock size={16} />}
         label="锁屏"
         title="远端锁屏（Ctrl+Shift+L，3 秒内再点确认）"
@@ -370,13 +376,6 @@ function MorePanel(
           },
         ]
       : []),
-    {
-      key: "files",
-      icon: <IconFolder size={15} />,
-      label: "文件传输",
-      hint: "发送到远端 / 浏览远端文件",
-      on: props.onFiles,
-    },
     {
       key: "privacy",
       icon: props.privacyOn ? <IconEye size={15} /> : <IconEyeOff size={15} />,

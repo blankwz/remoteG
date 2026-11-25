@@ -5,9 +5,9 @@
 use crate::conn::ConnManager;
 use tauri::State;
 
-/// dump 目录（与 lib.rs panic hook 写入处同源：融合日志目录下 crash/）。
+/// dump 目录（与 lib.rs panic hook 写入处同源：日志目录下 crash/）。
 fn crash_dir() -> std::path::PathBuf {
-    rd_crash::crash_dir(&rd_agent::default_config_dir().join("app").join("logs"))
+    rd_crash::crash_dir(&crate::platform::app_log_dir())
 }
 
 /// 列出崩溃记录（时间倒序；只含元数据）。

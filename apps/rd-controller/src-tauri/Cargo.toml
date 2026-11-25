@@ -17,13 +17,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
-arboard = "3"
 bytes = "1"
 if-addrs = "0.13"
-switchboard-daemon = { path = "../../../switchboard/sdk/rust/switchboard-daemon" }
 qoi = "0.4"
-rd-agent = { path = "../../../apps/rd-agent" }
 rd-crash = { path = "../../../crates/rd-crash" }
+rd-encode = { path = "../../../crates/rd-encode" }
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }
 rd-touch-translate = { path = "../../../crates/rd-touch-translate" }
@@ -34,11 +32,10 @@ switchboard-mod-fec-rs = { path = "../../../switchboard/sdk/rust/switchboard-mod
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2.7.2"
-tauri-plugin-updater = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -47,8 +44,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.14"
 
+# 桌面端专属能力（Windows / macOS / Linux）：托盘图标、自动更新、系统剪贴板。
+# 移动端（iOS / Android）自动跳过，避免链接桌面端专属原生库（宪法 #4）。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+arboard = "3"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-updater = "2"
+
+# Windows + macOS 融合版专属：内嵌被控核心（rd-agent），使 Mac 与 Windows 均同时支持「控制别人 + 被别人控制」。
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+rd-agent = { path = "../../../apps/rd-agent" }
+
+# Windows 专属：托盘开机自启（winreg / Win32）。
 [target.'cfg(windows)'.dependencies]
-# tray_fusion（开机自启 HKCU Run）独占；与 windows crate 一样是 Windows 专属。
 winreg = "0.10"
 windows = { version = "0.62", features = [
     "Win32_Foundation",

@@ -25,7 +25,9 @@ message Envelope { uint32 req_id = 1; oneof msg {
   // momentum: 0 none/1 begin/2 continue/3 end)。
   ContinuousScroll continuous_scroll = 51;
   // v0.3(虚拟屏一期):用户手机比例虚拟屏的状态通知与换档(见 VirtualDisplayState)
-  VirtualDisplayState vdisplay_state = 52; SetDisplayWidth set_display_width = 53; } }
+  VirtualDisplayState vdisplay_state = 52; SetDisplayWidth set_display_width = 53;
+  // v0.4(方案实验室 RD Geek Lab):在线毫秒级热调与扩展遥测
+  LabTuning lab_tuning = 54; LabTelemetry lab_telemetry = 55; } }
 
 // 画质档位(T-028 F5):控制端手动选择,覆盖码率自适应。
 // window_id=0 表示会话内全部窗口;成功时 Agent 原样回 SetQuality(echo),
@@ -177,3 +179,39 @@ message VirtualDisplayState {
 // 成功回 SetDisplayWidth(echo,req_id 同请求)——用于回执;尺寸另由
 // VirtualDisplayState{SWITCHED} 通知。换档后帧管线按新尺寸重配并强制 IDR。
 message SetDisplayWidth { uint32 width = 1; }
+
+// ---------------------------------------------------------------------------
+// v0.4(方案实验室 RD Geek Lab):在线毫秒级热调与扩展遥测
+// ---------------------------------------------------------------------------
+// 控制端→Agent:在线毫秒级热调参数。成功原样 echo LabTuning。
+message LabTuning {
+  bool manual_lock = 1;           // true=锁定手动码率/帧率(停用自适应); false=恢复 Baseline-Adaptive
+  uint32 bitrate_kbps = 2;        // 手动锁定时目标总码率 (500 ~ 50000 kbps)
+  uint32 max_fps = 3;             // 手动锁定时目标帧率上限 (5 ~ 60 fps)
+  bool prefer_hw = 4;             // true=优先硬编(NVENC/QSV/AMF/MFT); false=强制 OpenH264 软编
+  bool request_444 = 5;           // true=尝试 YUV444 硬编; false=YUV420
+  bool tile_enabled = 6;          // 是否开启静止无损瓦片精修
+  uint32 tile_still_ms = 7;       // 静止判定阈值 (50 ~ 2000 ms, 默认 300)
+  uint32 tile_budget_pct = 8;     // 瓦片带宽预算占比 (5 ~ 80 %, 默认 50)
+  uint32 fec_overhead_pct = 9;    // RS-FEC 冗余比例 (5 ~ 100 %, 默认 20)
+  bool force_idr = 10;            // 立即强制所有窗口下一帧输出 IDR 关键帧并刷新瓦片
+}
+
+// Agent→控制端(req_id=0):随 StatsReport 周期性推送的底层管线解剖遥测。
+message LabTelemetry {
+  string encoder_name = 1;        // 当前生效编码器名称(如 "h264_nvenc" / "openh264")
+  bool hardware_enc = 2;          // 是否硬件编码
+  bool is_444 = 3;                // 当前是否 4:4:4 色度采样
+  uint32 target_kbps = 4;         // 当前分配的目标码率 (kbps)
+  uint32 video_kbps = 5;          // 实际 H.264 视频流发送码率 (kbps)
+  uint32 tile_kbps = 6;           // 实际 QOI 无损瓦片发送码率 (kbps)
+  uint32 fps_cap = 7;             // 当前生效帧率上限
+  uint32 tile_still_ms = 8;       // 当前生效瓦片静止阈值 (ms)
+  uint32 tile_budget_pct = 9;     // 当前生效瓦片预算占比 (%)
+  uint32 fec_overhead_pct = 10;   // 当前生效 FEC 冗余比 (%)
+  uint64 quic_cwnd_bytes = 11;    // Agent 侧 QUIC 拥塞窗口 (bytes)
+  uint64 quic_sent_pkts = 12;     // Agent 侧 QUIC 累计发包数
+  uint64 quic_lost_pkts = 13;     // Agent 侧 QUIC 累计丢包数
+  uint64 tiles_sent = 14;         // 累计发送无损瓦片数
+  uint64 idr_count = 15;          // 累计发送 IDR 关键帧数
+}

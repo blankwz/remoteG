@@ -70,6 +70,9 @@ pub struct RunArgs {
     /// 不启动托盘(服务/测试模式)。
     #[arg(long, default_value_t = false)]
     no_tray: bool,
+    /// 启动后静默驻留托盘（不自动弹出配对码窗口，开机自启使用）。
+    #[arg(long, default_value_t = false)]
+    minimized: bool,
     /// 把实际监听地址逐行打印到 stdout(供测试/脚本读取)。
     #[arg(long, default_value_t = false)]
     print_port: bool,
@@ -105,7 +108,11 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
 
     // E1 记账还原：上次进程崩溃时未复原的窗口布局，启动时逐条放回（窗口已
     // 关则跳过并记日志）
-    match rd_window_win::ledger::OperationLedger::open(&config_dir).recover() {
+    #[cfg(windows)]
+    let recover_res = rd_window_win::ledger::OperationLedger::open(&config_dir).recover();
+    #[cfg(not(windows))]
+    let recover_res = rd_mac::window::ledger::OperationLedger::open(&config_dir).recover();
+    match recover_res {
         Ok(0) => {}
         Ok(n) => tracing::info!(n, "已按账本恢复未复原的窗口布局"),
         Err(err) => tracing::warn!("窗口账本恢复失败: {err:#}"),
@@ -161,25 +168,33 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
             .context("启动更新 e2e 触发线程失败")?;
     }
 
-    park_main_thread(&runtime, args.no_tray)?;
+    park_main_thread(&runtime, args.no_tray, args.minimized)?;
     rt.shutdown_timeout(Duration::from_secs(2));
     Ok(())
 }
 
 /// 主线程驻留:Windows 默认跑托盘(永不返回);`--no-tray` 或非 Windows 等待 Ctrl+C。
 #[cfg(windows)]
-fn park_main_thread(runtime: &rd_agent::AgentRuntime, no_tray: bool) -> anyhow::Result<()> {
+fn park_main_thread(
+    runtime: &rd_agent::AgentRuntime,
+    no_tray: bool,
+    minimized: bool,
+) -> anyhow::Result<()> {
     if no_tray {
         wait_ctrl_c()
     } else {
-        tray::run(runtime)
+        tray::run(runtime, !minimized)
     }
 }
 
 /// 非 Windows 平台无托盘:一律等待 Ctrl+C(保持可 check/可运行)。
 #[cfg(not(windows))]
-fn park_main_thread(runtime: &rd_agent::AgentRuntime, no_tray: bool) -> anyhow::Result<()> {
-    let _ = (runtime, no_tray);
+fn park_main_thread(
+    runtime: &rd_agent::AgentRuntime,
+    no_tray: bool,
+    minimized: bool,
+) -> anyhow::Result<()> {
+    let _ = (runtime, no_tray, minimized);
     wait_ctrl_c()
 }
 

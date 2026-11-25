@@ -14,15 +14,27 @@ export const VIDEO_HEADER_LEN = 25;
 export const H264_CODEC_420 = "avc1.42E033";
 /** H.264 High 4:4:4 Predictive，level 5.1（与 probeDecodeCaps 的 444 探测一致）。 */
 export const H264_CODEC_444 = "avc1.F40033";
+/** HEVC (H.265) Main Profile Level 5.1（4K@144Hz 硬件解码）。 */
+export const HEVC_CODEC = "hvc1.1.6.L153.B0";
+/** AV1 Main Profile Level 5.0 8-bit（4K@144Hz 硬件解码）。 */
+export const AV1_CODEC = "av01.0.12M.08";
 
 /**
  * OpenWindowAck 的 codec 枚举名 → WebCodecs codec string。
  *
- * 仅 `H264_444` 映射 High 4:4:4；其余（H264_420、未来才支持的 HEVC/AV1、
- * `unknown(n)`、空值）一律回退 420 Baseline（默认解码路径，不破坏现状）。
+ * 支持 `AV1` / `HEVC_444` / `H264_444` / `H264_420`；未知值或空值一律回退 420 Baseline。
  */
 export function codecStringFor(codec: string | null | undefined): string {
-  return codec === "H264_444" ? H264_CODEC_444 : H264_CODEC_420;
+  switch (codec) {
+    case "AV1":
+      return AV1_CODEC;
+    case "HEVC_444":
+      return HEVC_CODEC;
+    case "H264_444":
+      return H264_CODEC_444;
+    default:
+      return H264_CODEC_420;
+  }
 }
 
 /** 视频帧头字段（小端，05_api §3）。u64 字段用 bigint 保留精度。 */

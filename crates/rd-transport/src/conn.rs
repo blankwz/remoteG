@@ -205,7 +205,7 @@ fn transport_config() -> TransportConfig {
     // BBR（D-013 包5）：跨 DERP 中继/高丢包路径下 Cubic 对丢包过敏、吞吐
     // 崩塌（跨网实测 fps=1/RTT 1.2s）；BBR 以带宽估测驱动、丢包鲁棒。
     // A/B 回退：RD_BBR=0 临时切回 Cubic（05_api §6.4 候选项的对比开关）。
-    if std::env::var("RD_BBR").as_deref() != Ok("0") {
+    if std::env::var("RD_BBR").as_deref() != Ok("0") && crate::netem::get_use_bbr() {
         tc.congestion_controller_factory(Arc::new(BbrFactory(Arc::new(BbrConfig::default()))));
     }
     tc
@@ -316,8 +316,11 @@ impl Conn {
         ))
     }
 
-    /// 发送 QUIC datagram（鼠标移动等低延迟输入）。
+    /// 发送 QUIC datagram（鼠标移动等低延迟输入 / FEC 视频分片）。
     pub fn send_datagram(&self, data: Bytes) -> anyhow::Result<()> {
+        if crate::netem::should_drop_dgram() {
+            return Ok(());
+        }
         self.conn
             .send_datagram(data)
             .map_err(|e| anyhow::anyhow!("send_datagram: {e}"))
@@ -325,10 +328,20 @@ impl Conn {
 
     /// 读取一个 QUIC datagram。
     pub async fn read_datagram(&self) -> anyhow::Result<Bytes> {
-        self.conn
-            .read_datagram()
-            .await
-            .map_err(|e| anyhow::anyhow!("read_datagram: {e}"))
+        loop {
+            let b = self
+                .conn
+                .read_datagram()
+                .await
+                .map_err(|e| anyhow::anyhow!("read_datagram: {e}"))?;
+            if crate::netem::should_drop_dgram() {
+                continue;
+            }
+            if let Some(d) = crate::netem::compute_frame_delay(b.len()) {
+                tokio::time::sleep(d).await;
+            }
+            return Ok(b);
+        }
     }
 
     /// QUIC 连接句柄（Clone，轻量）：供 fec/datagram 适配器复用同一条连接
@@ -564,6 +577,9 @@ impl DataRx {
         let mut payload = vec![0u8; len];
         // 已读帧头，此处中途结束属异常截断
         read_exact_full(&mut self.stream, &mut payload).await?;
+        if let Some(d) = crate::netem::compute_frame_delay(len) {
+            tokio::time::sleep(d).await;
+        }
         Ok(Bytes::from(payload))
     }
 }

@@ -25,8 +25,14 @@ use ffmpeg_next::util::frame::video::Video as FfmpegFrame;
 use crate::frame::{even_geometry, RawFrame};
 use crate::{EncodedAu, EncoderConfig, EncoderInfo, PixelFormat, VideoEncoder};
 
-/// Windows 常见硬编探测顺序（NVIDIA → Intel → AMD → 系统内置 MF）。
+/// Windows 常见 H.264 硬编探测顺序（NVIDIA → Intel → AMD → 系统内置 MF）。
 pub const HW_CANDIDATES: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"];
+
+/// Windows 常见 HEVC (H.265) 硬编探测顺序（突破 H.264 4096×4096 限制，支撑 4K@144Hz）。
+pub const HEVC_HW_CANDIDATES: &[&str] = &["hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_mf"];
+
+/// Windows 常见 AV1 硬编探测顺序（RTX 40 / Arc / RX 7000+，4K@144Hz 极高压缩比）。
+pub const AV1_HW_CANDIDATES: &[&str] = &["av1_nvenc", "av1_qsv", "av1_amf"];
 
 /// `AVERROR(EAGAIN)`（POSIX EAGAIN 在各平台均为 11）。
 const AVERROR_EAGAIN: i32 = -11;
@@ -99,6 +105,26 @@ impl FfmpegEncoder {
             }
         }
         Err(first_err.unwrap_or_else(|| anyhow::anyhow!("无可用硬编候选")))
+    }
+
+    /// 按协议 [`rd_proto::v0::Codec`] 选择对应硬编候选列表并创建首个可用编码器。
+    pub fn create_for_codec(cfg: &EncoderConfig, codec: rd_proto::v0::Codec) -> Result<Self> {
+        let candidates: &[&str] = match codec {
+            rd_proto::v0::Codec::Av1 => AV1_HW_CANDIDATES,
+            rd_proto::v0::Codec::Hevc444 => HEVC_HW_CANDIDATES,
+            rd_proto::v0::Codec::H264420 | rd_proto::v0::Codec::H264444 => HW_CANDIDATES,
+        };
+        let mut first_err = None;
+        for name in candidates {
+            match Self::try_new(cfg, name) {
+                Ok(enc) => return Ok(enc),
+                Err(e) => {
+                    tracing::debug!("硬编候选 {name} ({codec:?}) 不可用: {e:#}");
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        Err(first_err.unwrap_or_else(|| anyhow::anyhow!("无可用 {codec:?} 硬编候选")))
     }
 
     fn try_new(cfg: &EncoderConfig, codec_name: &'static str) -> Result<Self> {
@@ -391,22 +417,22 @@ fn open_encoder_with_options(
 /// 校验；未知选项会导致 avcodec_open2 失败，必须按编码器定制）。
 fn codec_options(codec_name: &str) -> Vec<(&'static str, &'static str)> {
     match codec_name {
-        "h264_nvenc" => vec![
+        "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => vec![
             ("preset", "p1"),
             ("tune", "ll"),
             ("delay", "0"),
             ("rc", "cbr"),
             ("forced-idr", "1"),
         ],
-        "h264_qsv" => vec![("async_depth", "1"), ("low_power", "0")],
-        "h264_amf" => vec![
+        "h264_qsv" | "hevc_qsv" | "av1_qsv" => vec![("async_depth", "1"), ("low_power", "0")],
+        "h264_amf" | "hevc_amf" | "av1_amf" => vec![
             ("usage", "lowlatency"),
             ("quality", "speed"),
             ("rc", "cbr"),
             ("async_depth", "1"),
         ],
         // Windows 10/11 系统内置；CBR 保证带宽可预测。
-        "h264_mf" => vec![("rate_control", "cbr")],
+        "h264_mf" | "hevc_mf" => vec![("rate_control", "cbr")],
         _ => Vec::new(),
     }
 }

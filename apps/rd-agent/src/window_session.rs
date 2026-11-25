@@ -54,7 +54,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use rd_capture_win::{CaptureOptions, CapturedFrame, WindowCapture};
+#[cfg(windows)]
+use rd_capture_win as sys_capture;
 use rd_encode::caps::{negotiate, probe_encode_caps};
 use rd_encode::dirty::Rect as DirtyRect;
 use rd_encode::frame::RawFrame;
@@ -62,21 +63,28 @@ use rd_encode::rate::RateController;
 use rd_encode::rate::RateInput;
 use rd_encode::tiles::{TileOut, TileRefiner};
 use rd_encode::{create_best, EncodedAu, EncoderConfig, PixelFormat, VideoEncoder};
+#[cfg(not(windows))]
+use rd_mac::capture as sys_capture;
+#[cfg(not(windows))]
+use rd_mac::window as sys_window;
 use rd_proto::v0::envelope::Msg;
 use rd_proto::v0::window_event::Kind;
 use rd_proto::v0::{
-    session_state, CloseWindow, Codec, Error, FitMode, ListWindows, OpenWindow, OpenWindowAck,
-    QualityPreset, RenderLevel, SessionState, SetQuality, StatsReport, ViewportInfo, WindowEvent,
-    WindowInfo, WindowList,
+    session_state, CloseWindow, Codec, Error, FitMode, LabTelemetry, LabTuning, ListWindows,
+    OpenWindow, OpenWindowAck, QualityPreset, RenderLevel, SessionState, SetQuality, StatsReport,
+    ViewportInfo, WindowEvent, WindowInfo, WindowList,
 };
 use rd_transport::framing::encode_video_header;
 use rd_transport::framing::{TILE_HEADER_LEN, VIDEO_HEADER_LEN};
 use rd_transport::{DataTx, StreamKind, TileHeader, VideoHeader};
-use rd_window_win::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
-use rd_window_win::resize::{fit_window, restore_placement, save_placement, target_client_size};
-use rd_window_win::resize::{FitResult, SavedPlacement};
-use rd_window_win::{list_windows, window_group, window_icon_png, GroupMember, WindowAttrs};
+#[cfg(windows)]
+use rd_window_win as sys_window;
 use switchboard_core::stages::{FrameSink, MediaAdapt};
+use sys_capture::{CaptureOptions, CapturedFrame, WindowCapture};
+use sys_window::events::{spawn_event_watcher, WatcherHandle, WindowEventRaw};
+use sys_window::resize::{fit_window, restore_placement, save_placement, target_client_size};
+use sys_window::resize::{FitResult, SavedPlacement};
+use sys_window::{list_windows, window_group, window_icon_png, GroupMember, WindowAttrs};
 use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -94,17 +102,16 @@ const ERR_QUALITY: u32 = 60;
 
 /// 手动画质档位的目标码率（kbps；下标 = `QualityPreset`，AUTO 不使用）。
 /// 上限仍受会话 `cfg` 约束见 `set_quality`——档位只升到配置允许的范围。
-const PRESET_KBPS: [u32; 4] = [0, 20_000, 8_000, 2_000];
+/// HIGH 档支持局域网高分辨率高刷（80 Mbps / 144 fps，对齐宪法 #1）。
+const PRESET_KBPS: [u32; 4] = [0, 80_000, 12_000, 2_000];
 /// 手动画质档位的帧率上限（fps；同上）。
-const PRESET_FPS: [u32; 4] = [0, 60, 30, 15];
+const PRESET_FPS: [u32; 4] = [0, 144, 60, 30];
 /// 同一窗口视口上报的去抖间隔（任务卡步骤 6）。
 const VIEWPORT_DEBOUNCE: Duration = Duration::from_millis(150);
 /// 瓦片 tick 周期（任务卡步骤 4）。
 const TILE_TICK: Duration = Duration::from_millis(50);
 /// 瓦片块静止判定阈值（架构 §3.2：区域静止 ≥300 ms 后精修）。
 const TILE_STILL_MS: u32 = 300;
-/// 瓦片预算占当前码率的比例（任务卡步骤 4：50% × 0.05 s）。
-const TILE_BUDGET_RATIO: f64 = 0.5;
 /// 事件广播通道容量（每连接一个订阅者，缓冲慢消费者）。
 const BROADCAST_CAP: usize = 256;
 /// 图标缓存条目上限（hwnd 复用/长期运行导致的过期条目靠整表清空兜底）。
@@ -145,6 +152,50 @@ static TOP_WINDOWS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static SERVICES: OnceLock<Mutex<HashMap<usize, ServiceEntry>>> = OnceLock::new();
 /// 连接标识 → 该连接窗口组内的子窗口 id 集合（is_open 对子窗口放行）。
 static CHILD_MEMBERS: OnceLock<Mutex<HashMap<usize, HashSet<u64>>>> = OnceLock::new();
+/// 方案实验室（v0.4）：全局在线热调参数与遥测原子状态。
+pub struct LabState {
+    pub manual_lock: AtomicBool,
+    pub manual_kbps: AtomicU32,
+    pub manual_fps: AtomicU32,
+    pub prefer_hw: AtomicBool,
+    pub request_444: AtomicBool,
+    pub tile_enabled: AtomicBool,
+    pub tile_still_ms: AtomicU32,
+    pub tile_budget_pct: AtomicU32,
+    pub fec_overhead_pct: AtomicU32,
+    pub config_gen: AtomicU32,
+    pub video_bytes: AtomicU64,
+    pub tile_bytes: AtomicU64,
+    pub tiles_sent: AtomicU64,
+    pub idr_count: AtomicU64,
+    pub enc_name: Mutex<&'static str>,
+    pub enc_hw: AtomicBool,
+    pub enc_444: AtomicBool,
+}
+
+static LAB_STATE: OnceLock<LabState> = OnceLock::new();
+
+pub fn lab_state() -> &'static LabState {
+    LAB_STATE.get_or_init(|| LabState {
+        manual_lock: AtomicBool::new(false),
+        manual_kbps: AtomicU32::new(8_000),
+        manual_fps: AtomicU32::new(60),
+        prefer_hw: AtomicBool::new(true),
+        request_444: AtomicBool::new(false),
+        tile_enabled: AtomicBool::new(true),
+        tile_still_ms: AtomicU32::new(TILE_STILL_MS),
+        tile_budget_pct: AtomicU32::new(50),
+        fec_overhead_pct: AtomicU32::new(20),
+        config_gen: AtomicU32::new(0),
+        video_bytes: AtomicU64::new(0),
+        tile_bytes: AtomicU64::new(0),
+        tiles_sent: AtomicU64::new(0),
+        idr_count: AtomicU64::new(0),
+        enc_name: Mutex::new("auto"),
+        enc_hw: AtomicBool::new(true),
+        enc_444: AtomicBool::new(false),
+    })
+}
 /// 管线世代号（进程级自增）：注册表条目的身份标识。同窗口快速重开时，旧
 /// 管线的收尾任务（[`pipe_cleanup`]，由发送任务在取消后异步触发）可能与
 /// "停旧建新"并发——仅按 window_id 移除会把新注册的管线误杀（管线消失
@@ -195,7 +246,7 @@ pub(crate) fn force_idr_owned(ctx: &SessionCtx) {
 
 /// 全部管线强制下一帧 IDR（fit 调度线程换档：虚拟屏尺寸变了，全部在途
 /// 参考链作废。跨会话广播，不区分 owner）。
-pub(crate) fn force_idr_all() {
+pub fn force_idr_all() {
     let map = pipes().lock().unwrap_or_else(lock_poisoned);
     for h in map.values() {
         h.drop_to_idr.store(true, Ordering::Relaxed);
@@ -514,9 +565,9 @@ static WATCHER: OnceLock<EventWatcher> = OnceLock::new();
 static WATCHER_INIT: Mutex<()> = Mutex::new(());
 
 /// E2 自扰静默窗（privacy::set 登记，桥接线程消费）。
-fn event_quiet() -> &'static Mutex<rd_window_win::quiet::QuietWindow> {
-    static Q: OnceLock<Mutex<rd_window_win::quiet::QuietWindow>> = OnceLock::new();
-    Q.get_or_init(|| Mutex::new(rd_window_win::quiet::QuietWindow::default()))
+fn event_quiet() -> &'static Mutex<sys_window::quiet::QuietWindow> {
+    static Q: OnceLock<Mutex<sys_window::quiet::QuietWindow>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(sys_window::quiet::QuietWindow::default()))
 }
 
 /// 单调秒基准（静默窗与节流共用；进程内一致即可）。
@@ -768,22 +819,23 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     // 布局快照先于还原（D-013 包2）：还原后 showCmd 已变为普通态，
     // 会话结束 `restore_placement` 将无法把窗口放回最小化——对最小化窗口
     // GetWindowPlacement 依旧返回正确 rcNormalPosition + showCmd=SW_MINIMIZE。
-    let saved =
-        match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
-            Ok(p) => {
-                // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
-                if let Err(err) = rd_window_win::ledger::OperationLedger::open(&ledger_dir())
-                    .record(wid as isize, "remote-session", &p)
-                {
-                    tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
-                }
-                Some(p)
+    let saved = match save_placement(attrs.as_ref().map_or(wid as isize, |a| a.hwnd)) {
+        Ok(p) => {
+            // E1 记账还原：改动前落盘（崩溃重启后 recover 可放回原布局）
+            if let Err(err) = sys_window::ledger::OperationLedger::open(&ledger_dir()).record(
+                wid as isize,
+                "remote-session",
+                &p,
+            ) {
+                tracing::warn!(window = format!("{wid:#x}"), "窗口账本记账失败: {err:#}");
             }
-            Err(err) => {
-                tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
-                None
-            }
-        };
+            Some(p)
+        }
+        Err(err) => {
+            tracing::warn!(window = format!("{wid:#x}"), "保存窗口布局失败: {err:#}");
+            None
+        }
+    };
     // 最小化自动还原（用户实测反馈 1：任何状态必须可控制）。最小化有两条
     // 呈现路径，都必须还原后再捕获：
     // - 在可捕获列表中（如资源管理器，最小化后客户区仍非 0）→ `minimized`
@@ -945,6 +997,7 @@ enum AfterRestore {
 }
 
 /// hwnd 是否处于最小化（iconic）。窗口不存在时返回 false（存在性判定另行处理）。
+#[cfg(windows)]
 fn is_iconic_window(hwnd: isize) -> bool {
     use std::ffi::c_void;
     use windows::Win32::Foundation::HWND;
@@ -952,12 +1005,13 @@ fn is_iconic_window(hwnd: isize) -> bool {
     unsafe { IsIconic(HWND(hwnd as *mut c_void)) }.as_bool()
 }
 
+#[cfg(not(windows))]
+fn is_iconic_window(_hwnd: isize) -> bool {
+    false
+}
+
 /// 最小化窗口投递还原命令（`ShowWindowAsync(SW_RESTORE)`）。
-///
-/// 用 Async 变体而非同步 `ShowWindow`（rd-window-win 私有 helper 同款）：
-/// 跨线程同步调用会在目标窗口线程挂起时阻塞调用方，open_window 的全局
-/// 串行锁会被单个 hung 窗口拖死；Async 只投递命令立即返回，生效与否由
-/// [`after_restore`] 轮询确认。
+#[cfg(windows)]
 fn restore_minimized(hwnd: isize) {
     use std::ffi::c_void;
     use windows::Win32::Foundation::HWND;
@@ -970,6 +1024,9 @@ fn restore_minimized(hwnd: isize) {
         );
     }
 }
+
+#[cfg(not(windows))]
+fn restore_minimized(_hwnd: isize) {}
 
 /// 还原生效确认：轮询重枚举直到窗口脱离最小化，或超时/消失。
 ///
@@ -1059,7 +1116,8 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
                 Arc::clone(&ctx.conn),
                 switchboard_core::types::PathKind::Direct,
             ));
-        let fec = switchboard_mod_fec_rs::FecRs::new(Default::default());
+        let fec = Arc::new(switchboard_mod_fec_rs::FecRs::new(Default::default()));
+        fec.set_overhead_pct(lab_state().fec_overhead_pct.load(Ordering::Relaxed));
         let bus = Arc::new(switchboard_core::telemetry::EventBus::new());
         let (sink, _src) = fec
             .bind(Arc::clone(&ch), ch, bus)
@@ -1069,6 +1127,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             VideoOut::Fec {
                 sink: tokio::sync::Mutex::new(sink),
                 next_fid: Arc::new(AtomicU32::new(0)),
+                fec,
             },
             u32::MAX,
         )
@@ -1245,7 +1304,7 @@ fn restore_saved(hwnd: isize, saved: &Option<SavedPlacement>) {
             tracing::warn!(hwnd = format!("{hwnd:#x}"), "恢复窗口布局失败: {err:#}");
         } else {
             // E1 记账还原：复原成功销账（崩溃兜底账本）
-            rd_window_win::ledger::OperationLedger::open(&ledger_dir()).clear(hwnd);
+            sys_window::ledger::OperationLedger::open(&ledger_dir()).clear(hwnd);
         }
     }
 }
@@ -1314,6 +1373,79 @@ pub async fn set_quality(ctx: &SessionCtx, req_id: u32, m: SetQuality) -> anyhow
         req_id,
     )
     .await
+}
+
+/// 方案实验室在线毫秒级热调（v0.4）：更新码控锁、目标码率/帧率、硬编/444 偏好、
+/// 无损瓦片阈值/预算比、FEC 冗余率，并可强制刷新 IDR。成功原样 echo。
+pub async fn apply_lab_tuning(ctx: &SessionCtx, req_id: u32, m: LabTuning) -> anyhow::Result<()> {
+    let ls = lab_state();
+    ls.manual_lock.store(m.manual_lock, Ordering::Relaxed);
+    if m.bitrate_kbps > 0 {
+        ls.manual_kbps
+            .store(m.bitrate_kbps.clamp(200, 200_000), Ordering::Relaxed);
+    }
+    if m.max_fps > 0 {
+        ls.manual_fps
+            .store(m.max_fps.clamp(5, 144), Ordering::Relaxed);
+    }
+    ls.prefer_hw.store(m.prefer_hw, Ordering::Relaxed);
+    ls.request_444.store(m.request_444, Ordering::Relaxed);
+    ls.tile_enabled.store(m.tile_enabled, Ordering::Relaxed);
+    if m.tile_still_ms > 0 {
+        ls.tile_still_ms
+            .store(m.tile_still_ms.clamp(20, 5000), Ordering::Relaxed);
+    }
+    ls.tile_budget_pct
+        .store(m.tile_budget_pct.clamp(0, 95), Ordering::Relaxed);
+    if m.fec_overhead_pct > 0 {
+        ls.fec_overhead_pct
+            .store(m.fec_overhead_pct.clamp(1, 200), Ordering::Relaxed);
+    }
+    ls.config_gen.fetch_add(1, Ordering::Relaxed);
+
+    // 若开启手动锁定，立即写入本会话所有窗口管线的 target_kbps 与 fps_cap
+    if m.manual_lock {
+        let key = ctx_key(ctx);
+        let kbps_total = ls.manual_kbps.load(Ordering::Relaxed);
+        let fps = ls.manual_fps.load(Ordering::Relaxed);
+        let slots: Vec<(u64, Arc<AtomicU32>, Arc<AtomicU32>)> = pipes()
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .iter()
+            .filter(|(_, h)| h.owner == key)
+            .map(|(id, h)| (*id, Arc::clone(&h.target_kbps), Arc::clone(&h.fps_cap)))
+            .collect();
+        if !slots.is_empty() {
+            let areas: Vec<u64> = {
+                let map = pipes().lock().unwrap_or_else(lock_poisoned);
+                slots
+                    .iter()
+                    .map(|(id, _, _)| map.get(id).map(|h| h.area).unwrap_or(1))
+                    .collect()
+            };
+            let shares = allocate_kbps(kbps_total, &areas);
+            for ((_, target, cap), kbps) in slots.into_iter().zip(shares) {
+                target.store(kbps, Ordering::Relaxed);
+                cap.store(fps, Ordering::Relaxed);
+            }
+        }
+    }
+
+    if m.force_idr {
+        force_idr_owned(ctx);
+    }
+
+    tracing::info!(
+        manual_lock = m.manual_lock,
+        kbps = m.bitrate_kbps,
+        fps = m.max_fps,
+        prefer_hw = m.prefer_hw,
+        tile_enabled = m.tile_enabled,
+        tile_still_ms = m.tile_still_ms,
+        fec_pct = m.fec_overhead_pct,
+        "方案实验室热调参数已生效"
+    );
+    ctx.send(Msg::LabTuning(m), req_id).await
 }
 
 /// 把档位立即写入管线槽位（不等下个 rate tick，控制端切档即时可感）。
@@ -1630,6 +1762,7 @@ fn encode_loop(run: PipeRun) {
     } = run;
     let mut pipe = FramePipeline::new(fps, kbps, refine, true, pixel_format);
     let mut applied_kbps = kbps;
+    let mut applied_gen = lab_state().config_gen.load(Ordering::Relaxed);
     let mut frame_seq: u32 = 0;
     // 最近一帧（瓦片 tick 需要；refine 关闭时不保留，省一帧内存）
     let mut last: Option<(u32, RawFrame)> = None;
@@ -1640,6 +1773,18 @@ fn encode_loop(run: PipeRun) {
     loop {
         if cancel.is_cancelled() {
             return;
+        }
+        // 方案实验室在线热调同步（v0.4）：检测到 config_gen 变化即同步瓦片/编码器参数
+        let cur_gen = lab_state().config_gen.load(Ordering::Relaxed);
+        if cur_gen != applied_gen {
+            applied_gen = cur_gen;
+            let ls = lab_state();
+            pipe.apply_lab_config(
+                ls.prefer_hw.load(Ordering::Relaxed),
+                ls.request_444.load(Ordering::Relaxed),
+                ls.tile_enabled.load(Ordering::Relaxed),
+                ls.tile_still_ms.load(Ordering::Relaxed),
+            );
         }
         // 瓦片 tick：按绝对期限执行（帧流持续时 recv 同样不会超时，见函数文档）
         let now = Instant::now();
@@ -1710,7 +1855,7 @@ fn encode_loop(run: PipeRun) {
                                 return; // 瓦片发送任务已退出
                             }
                         }
-                        if refine {
+                        if pipe.refine {
                             last = Some((frame_seq, raw));
                         }
                     }
@@ -1742,13 +1887,19 @@ fn retune_pipeline(pipe: &mut FramePipeline, target: &AtomicU32, applied: u32) -
     want
 }
 
-/// 瓦片 tick 字节预算 = 当前码率 × [`TILE_BUDGET_RATIO`] × tick 周期(0.05 s)。
+/// 瓦片 tick 字节预算 = 当前码率 × 动态预算比例 × tick 周期(0.05 s)。
 fn tile_budget_bytes(kbps: u32) -> usize {
-    (f64::from(kbps) * 1000.0 / 8.0 * TILE_BUDGET_RATIO * TILE_TICK.as_secs_f64()) as usize
+    let ratio = f64::from(
+        lab_state()
+            .tile_budget_pct
+            .load(Ordering::Relaxed)
+            .clamp(0, 95),
+    ) / 100.0;
+    (f64::from(kbps) * 1000.0 / 8.0 * ratio * TILE_TICK.as_secs_f64()) as usize
 }
 
 /// 捕获脏区（屏幕/帧坐标，i32 原点）→ 编码脏区（客户区坐标，u32）。
-fn dirty_rects(rects: Option<Vec<rd_capture_win::Rect>>) -> Option<Vec<DirtyRect>> {
+fn dirty_rects(rects: Option<Vec<sys_capture::Rect>>) -> Option<Vec<DirtyRect>> {
     rects.map(|rs| {
         rs.into_iter()
             .map(|r| DirtyRect {
@@ -1837,6 +1988,39 @@ impl FramePipeline {
         }
     }
 
+    /// 方案实验室（v0.4）：在线热调编码器偏好、色度采样、瓦片精修开关与静止阈值。
+    fn apply_lab_config(
+        &mut self,
+        prefer_hw: bool,
+        request_444: bool,
+        tile_enabled: bool,
+        tile_still_ms: u32,
+    ) {
+        let want_pf = if request_444 {
+            PixelFormat::Yuv444
+        } else {
+            PixelFormat::Yuv420
+        };
+        if self.prefer_hw != prefer_hw || self.pixel_format != want_pf {
+            self.prefer_hw = prefer_hw;
+            self.pixel_format = want_pf;
+            self.encoder = None;
+            self.last_size = None;
+            self.force_key = true;
+            self.need_feed = true;
+        }
+        if self.refine != tile_enabled {
+            self.refine = tile_enabled;
+            if let Some((w, h)) = self.last_size {
+                self.refiner = tile_enabled.then(|| TileRefiner::new(w, h, tile_still_ms));
+            } else {
+                self.refiner = None;
+            }
+        } else if let Some(r) = self.refiner.as_mut() {
+            r.set_still_ms(tile_still_ms);
+        }
+    }
+
     /// 处理一帧：脏块比对（失效回收）→ 尺寸变化处理 → 编码。
     fn process(
         &mut self,
@@ -1859,16 +2043,33 @@ impl FramePipeline {
                         prefer_hw: self.prefer_hw,
                         pixel_format: self.pixel_format,
                     };
-                    let enc = create_best(&cfg).context("创建视频编码器失败")?;
+                    let enc = match create_best(&cfg) {
+                        Ok(e) => e,
+                        Err(e) if self.pixel_format == PixelFormat::Yuv444 => {
+                            tracing::warn!("4:4:4 硬编创建失败，自动回退 4:2:0: {e:#}");
+                            self.pixel_format = PixelFormat::Yuv420;
+                            let mut cfg420 = cfg;
+                            cfg420.pixel_format = PixelFormat::Yuv420;
+                            create_best(&cfg420).context("创建视频编码器失败")?
+                        }
+                        Err(e) => return Err(e).context("创建视频编码器失败"),
+                    };
+                    let info = enc.info();
+                    let ls = lab_state();
+                    *ls.enc_name.lock().unwrap_or_else(lock_poisoned) = info.name;
+                    ls.enc_hw.store(info.hardware, Ordering::Relaxed);
+                    ls.enc_444
+                        .store(self.pixel_format == PixelFormat::Yuv444, Ordering::Relaxed);
                     self.encoder = Some(enc);
                 }
             }
             self.force_key = true;
             self.last_size = Some((raw.width, raw.height));
             self.need_feed = true; // reconfigure 后编码器可能重新缓冲
+            let still_ms = lab_state().tile_still_ms.load(Ordering::Relaxed);
             self.refiner = self
                 .refine
-                .then(|| TileRefiner::new(raw.width, raw.height, TILE_STILL_MS));
+                .then(|| TileRefiner::new(raw.width, raw.height, still_ms));
             tracing::info!(
                 width = raw.width,
                 height = raw.height,
@@ -1940,6 +2141,7 @@ enum VideoOut {
     Fec {
         sink: tokio::sync::Mutex<Box<dyn FrameSink>>,
         next_fid: Arc<AtomicU32>,
+        fec: Arc<switchboard_mod_fec_rs::FecRs>,
     },
 }
 
@@ -2005,7 +2207,10 @@ async fn video_send_task(
                             .await
                             .map(|_| ())
                             .map_err(|e| anyhow::anyhow!("{e:#}")),
-                        VideoOut::Fec { sink, next_fid } => {
+                        VideoOut::Fec { sink, next_fid, fec } => {
+                            fec.set_overhead_pct(
+                                lab_state().fec_overhead_pct.load(Ordering::Relaxed),
+                            );
                             // T-027：fec 无接收端 IDR 请求（v0.2），每 120 帧（≈2s）
                             // 兜底一个关键帧，限制画面卡死的最大时长
                             let fid = next_fid.fetch_add(1, Ordering::Relaxed);
@@ -2044,6 +2249,10 @@ async fn video_send_task(
                         break;
                     }
                     session_bytes.fetch_add(n, Ordering::Relaxed);
+                    lab_state().video_bytes.fetch_add(n, Ordering::Relaxed);
+                    if header.keyframe {
+                        lab_state().idr_count.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -2091,6 +2300,10 @@ async fn tile_send_task(
                         break;
                     }
                     session_bytes.fetch_add(n, Ordering::Relaxed);
+                    lab_state().tile_bytes.fetch_add(n, Ordering::Relaxed);
+                    if tile.fmt != rd_encode::tiles::FMT_INVALIDATE {
+                        lab_state().tiles_sent.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -2488,6 +2701,7 @@ fn child_window_info(m: &GroupMember) -> WindowInfo {
 }
 
 /// 窗口类名是否为弹出菜单（`#32768`）。`GetClassNameW` 为本地查询，不挂起。
+#[cfg(windows)]
 fn class_name_is_menu(hwnd: isize) -> bool {
     use std::ffi::c_void;
     use windows::Win32::Foundation::HWND;
@@ -2497,6 +2711,11 @@ fn class_name_is_menu(hwnd: isize) -> bool {
     let len = unsafe { GetClassNameW(h, &mut buf) };
     let n = (len.max(0) as usize).min(buf.len());
     String::from_utf16_lossy(&buf[..n]) == MENU_CLASS
+}
+
+#[cfg(not(windows))]
+fn class_name_is_menu(_hwnd: isize) -> bool {
+    false
 }
 
 /// 窗口组 diff 结果。
@@ -2640,6 +2859,20 @@ fn apply_rate(
         return; // 本会话暂无打开窗口
     }
 
+    // 方案实验室手动锁优先（v0.4）：manual_lock 开启时直接按实验室设定码率/帧率下发
+    let ls = lab_state();
+    if ls.manual_lock.load(Ordering::Relaxed) {
+        let kbps_total = ls.manual_kbps.load(Ordering::Relaxed);
+        let fps = ls.manual_fps.load(Ordering::Relaxed);
+        let areas: Vec<u64> = slots.iter().map(|s| s.area).collect();
+        let shares = allocate_kbps(kbps_total, &areas);
+        for (s, kbps) in slots.iter().zip(shares) {
+            s.target.store(kbps, Ordering::Relaxed);
+            s.fps_cap.store(fps, Ordering::Relaxed);
+        }
+        return;
+    }
+
     // 手动画质档位优先（T-028 F5）：非 AUTO 时停用自适应，按档位预算全量
     // 下发（编码器 set_bitrate / fps_cap 节流兜底网络劣化）；采样与决策
     // 全部跳过，改回 AUTO 后由下个 tick 无缝接管。
@@ -2730,7 +2963,55 @@ async fn send_stats(
     };
     if let Err(err) = ctx.send(Msg::Stats(report), 0).await {
         tracing::debug!("StatsReport 发送失败（连接可能已断）: {err:#}");
+        return;
     }
+
+    // 方案实验室扩展遥测（v0.4）：向控制端推送编码器、视频/瓦片分项码率、QUIC Cwnd 等真实底层指标
+    static PREV_VIDEO_BYTES: AtomicU64 = AtomicU64::new(0);
+    static PREV_TILE_BYTES: AtomicU64 = AtomicU64::new(0);
+    let ls = lab_state();
+    let v_now = ls.video_bytes.load(Ordering::Relaxed);
+    let t_now = ls.tile_bytes.load(Ordering::Relaxed);
+    let v_prev = PREV_VIDEO_BYTES.swap(v_now, Ordering::Relaxed);
+    let t_prev = PREV_TILE_BYTES.swap(t_now, Ordering::Relaxed);
+    let video_kbps = (v_now.saturating_sub(v_prev).saturating_mul(8) / 1000) as u32;
+    let tile_kbps = (t_now.saturating_sub(t_prev).saturating_mul(8) / 1000) as u32;
+
+    let (target_kbps, fps_cap) = {
+        let map = pipes().lock().unwrap_or_else(lock_poisoned);
+        let sum_target: u32 = map
+            .iter()
+            .filter(|(_, h)| h.owner == key)
+            .map(|(_, h)| h.target_kbps.load(Ordering::Relaxed))
+            .sum();
+        let cap: u32 = map
+            .iter()
+            .filter(|(_, h)| h.owner == key)
+            .map(|(_, h)| h.fps_cap.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(ls.manual_fps.load(Ordering::Relaxed));
+        (sum_target, cap)
+    };
+    let enc_name = (*ls.enc_name.lock().unwrap_or_else(lock_poisoned)).to_string();
+    let q_path = ctx.conn.stats().path;
+    let telem = LabTelemetry {
+        encoder_name: enc_name,
+        hardware_enc: ls.enc_hw.load(Ordering::Relaxed),
+        is_444: ls.enc_444.load(Ordering::Relaxed),
+        target_kbps,
+        video_kbps,
+        tile_kbps,
+        fps_cap,
+        tile_still_ms: ls.tile_still_ms.load(Ordering::Relaxed),
+        tile_budget_pct: ls.tile_budget_pct.load(Ordering::Relaxed),
+        fec_overhead_pct: ls.fec_overhead_pct.load(Ordering::Relaxed),
+        quic_cwnd_bytes: q_path.cwnd,
+        quic_sent_pkts: q_path.sent_packets,
+        quic_lost_pkts: q_path.lost_packets,
+        tiles_sent: ls.tiles_sent.load(Ordering::Relaxed),
+        idr_count: ls.idr_count.load(Ordering::Relaxed),
+    };
+    let _ = ctx.send(Msg::LabTelemetry(telem), 0).await;
 }
 
 /// 输入桌面名 == Winlogon → 工作站已锁定（安全桌面）。检测纯本地 Win32，
@@ -3227,8 +3508,8 @@ mod tests {
         assert!(PRESET_KBPS[mid] > PRESET_KBPS[low]);
         assert!(PRESET_FPS[hi] > PRESET_FPS[mid]);
         assert!(PRESET_FPS[mid] > PRESET_FPS[low]);
-        // 高档也不越过 RateController 的兜底上限语义（50M），低档可用即流畅
-        assert!(PRESET_KBPS[hi] <= 50_000);
+        // 高档也不越过 RateController 的兜底上限语义（200M），低档可用即流畅
+        assert!(PRESET_KBPS[hi] <= 200_000);
         assert!(PRESET_FPS[low] >= 10, "低档至少保留可用流畅度");
     }
 

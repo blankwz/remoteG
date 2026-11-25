@@ -5,21 +5,24 @@
 
 mod commands;
 mod conn;
+mod platform;
+#[cfg(windows)]
 mod tray_fusion;
 mod video_pump;
 
+#[cfg(any(windows, target_os = "macos"))]
 use std::sync::Arc;
 
+#[cfg(any(windows, target_os = "macos"))]
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 日志：stdout + 按天滚动文件双写（融合版目录 %APPDATA%\rd\app\logs\rd-app.*.log，
-    // 保留 7 天；托盘"打开日志目录"与此一致）。RUST_LOG=debug 可看更多细节。
+    // 日志：stdout + 按天滚动文件双写（保留 7 天）。RUST_LOG=debug 可看更多细节。
     // guard 必须存活至进程结束（run 的 event loop 不返回，局部绑定即可）。
     let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = {
-        let log_dir = rd_agent::default_config_dir().join("app").join("logs");
+        let log_dir = platform::app_log_dir();
         // 崩溃上报（T-040）：panic hook → logs/crash/*.json（元数据，无内存转储）
         rd_crash::install_panic_hook(
             "rd-controller",
@@ -69,61 +72,45 @@ pub fn run() {
         "controller identity ready (ephemeral, persisted in T-013)"
     );
 
-    // 方案实验室（Studio 内嵌，2026-10-28 用户需求「Studio 与 rd-controller 融合」）：
-    // 同进程托管方案测试/跑分 API 与界面，设备页「方案实验室」开窗口加载。
-    // 7500 被占 = 已有实例（独立 daemon），同一套 API，跳过即可。
-    // bench_dir 同步探测（review 补漏）：缺失时跑分对比页为空但不影响其他页。
-    tauri::async_runtime::spawn(async {
-        let static_dir = switchboard_daemon::default_static_dir();
-        let bench_dir = [
-            "switchboard/registry/bench",
-            "../registry/bench",
-            "../../registry/bench",
-            "../../../registry/bench",
-            "../../../../registry/bench",
-        ]
-        .iter()
-        .find(|c| std::path::Path::new(c).exists())
-        .map(|c| c.to_string());
-        if let Err(err) = switchboard_daemon::serve(7500, bench_dir, static_dir).await {
-            tracing::info!("方案实验室服务未启动(7500 占用=已有实例，不影响): {err:#}");
-        }
-    });
-
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .manage(state)
-        .setup(|app| {
-            // 被控核心启动（F-2）：融合身份目录独立于 bin 版（K3，干净起步）
-            let config_dir = rd_agent::default_config_dir().join("app");
-            let agent =
-                tauri::async_runtime::block_on(async { rd_agent::start(&config_dir, None, None) });
-            match agent {
-                Ok(runtime) => {
-                    tracing::info!(
-                        listen = ?runtime.bound,
-                        "被控核心已启动(融合模式)"
-                    );
-                    app.manage(Arc::clone(&runtime.state));
-                    let state_for_tray = Arc::clone(&runtime.state);
-                    tray_fusion::build(app.handle(), state_for_tray)?;
-                    // AgentRuntime 保活(常驻到 app 退出;丢句柄=状态与 peers 表引用断)
-                    app.manage(runtime);
-                }
-                Err(err) => {
-                    // 优雅降级（2026-10-27 用户实测闪退修复）：端口被占 =
-                    // 已有被控实例在跑（单实例锁，K7；独立 rd-agent.exe 或
-                    // 另一个本程序）——控制端功能照常可用，被控功能交给
-                    // 已有实例。**绝不为被控核心失败闪退整个应用**：
-                    // 用户的 主诉是控制别人，被控不可用只降级提示。
-                    // 被控类命令（State<AgentRuntime> 提取）会返回错误，
-                    // 前端按「被控服务未启动」展示。
-                    tracing::warn!(
-                        "被控核心未启动(已有实例或端口/目录冲突)，本窗口仅作为控制端: {err:#}"
-                    );
+        .setup(|_app| {
+            // 被控核心启动（Windows 与 macOS 融合版均内嵌 rd-agent；iOS / Android 作为纯控制端运行）
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                let config_dir = platform::app_config_dir();
+                let agent = tauri::async_runtime::block_on(async {
+                    rd_agent::start(&config_dir, None, None)
+                });
+                match agent {
+                    Ok(runtime) => {
+                        tracing::info!(
+                            listen = ?runtime.bound,
+                            "被控核心已启动(融合模式)"
+                        );
+                        _app.manage(Arc::clone(&runtime.state));
+                        #[cfg(windows)]
+                        {
+                            let state_for_tray = Arc::clone(&runtime.state);
+                            tray_fusion::build(_app.handle(), state_for_tray)?;
+                        }
+                        // AgentRuntime 保活(常驻到 app 退出;丢句柄=状态与 peers 表引用断)
+                        _app.manage(runtime);
+                    }
+                    Err(err) => {
+                        // 优雅降级：端口被占时控制端照常可用，绝不闪退
+                        tracing::warn!(
+                            "被控核心未启动(已有实例或端口/目录冲突)，本窗口仅作为控制端: {err:#}"
+                        );
+                    }
                 }
             }
             Ok(())
@@ -155,6 +142,8 @@ pub fn run() {
             commands::devices::set_relay_addr,
             commands::devices::get_easytier,
             commands::devices::set_easytier,
+            commands::devices::get_license_status,
+            commands::devices::activate_license,
             commands::devices::host_status,
             commands::devices::generate_pair_code,
             commands::devices::set_host_paused,
@@ -192,6 +181,21 @@ pub fn run() {
             commands::term::term_resize,
             // T-038：更新
             commands::update::restart_app,
+            // 宪法 #3：SSH 一键部署自建中转服务器
+            commands::relay_deploy::deploy_relay_ssh,
+            // v0.4：方案实验室（RD Geek Lab 原生极客台）
+            commands::lab::lab_get_state,
+            commands::lab::lab_apply_tuning,
+            commands::lab::lab_apply_transport,
+            commands::lab::lab_set_netem,
+            commands::lab::lab_panic_reset,
+            commands::lab::lab_start_sandbox,
+            commands::lab::lab_stop_sandbox,
+            commands::lab::lab_run_ab_bench,
+            commands::lab::lab_benchmark_all_routes,
+            commands::lab::lab_list_profiles,
+            commands::lab::lab_save_profile,
+            commands::lab::lab_delete_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

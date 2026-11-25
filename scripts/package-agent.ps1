@@ -1,4 +1,4 @@
-# package-agent.ps1 - Package Windows agent portable zip (T-026)
+﻿# package-agent.ps1 - Package Windows agent portable zip (T-026)
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/package-agent.ps1 [-AllowDevCert]
 # Prereq: FFMPEG_DIR points to a BtbN LGPL shared build (bin\*.dll + LICENSE); Rust stable + MSVC.
 # Output: dist/rd-agent-<version>-win64.zip (exe + LGPL DLLs + LICENSE + driver bundle, portable)
@@ -32,6 +32,8 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item $stage -ItemType Directory | Out-Null
 
 Copy-Item "$root\target\release\rd-agent.exe" $stage
+$guide = Join-Path $root "apps\rd-agent\使用说明.txt"
+if (Test-Path $guide) { Copy-Item $guide $stage }
 
 # Ship ffmpeg LGPL DLLs with the package (10_devops: LICENSE attached, no libx264)
 Copy-Item "$ffmpegBin\*.dll" $stage

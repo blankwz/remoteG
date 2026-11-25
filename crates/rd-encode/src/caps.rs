@@ -39,18 +39,75 @@ pub fn negotiate(enc: &[Codec], dec: &[Codec], dec_444: bool) -> Codec {
     }
 }
 
+/// 分辨率感知的编解码协商（宪法 #1：4K@144Hz 优先突破 H.264 4096 硬件上限）：
+/// - 超过 1440p（宽 > 2560 或高 > 1440）且双方支持时优先 `AV1` → `HEVC_444`；
+/// - 其余场景回落 [`negotiate`]（H.264 4:4:4 / 4:2:0）。
+pub fn negotiate_for_resolution(
+    enc: &[Codec],
+    dec: &[Codec],
+    dec_444: bool,
+    width: u32,
+    height: u32,
+) -> Codec {
+    let high_res = width > 2560 || height > 1440;
+    if high_res {
+        if enc.contains(&Codec::Av1) && dec.contains(&Codec::Av1) {
+            return Codec::Av1;
+        }
+        if enc.contains(&Codec::Hevc444) && dec.contains(&Codec::Hevc444) {
+            return Codec::Hevc444;
+        }
+    }
+    negotiate(enc, dec, dec_444)
+}
+
 fn probe_once() -> Vec<Codec> {
     #[cfg(all(windows, feature = "ffmpeg"))]
-    let has_444 = probe_444_any_hw();
+    let (has_444, has_hevc, has_av1) = (
+        probe_444_any_hw(),
+        probe_nv12_any_hw(crate::h264_ffmpeg::HEVC_HW_CANDIDATES),
+        probe_nv12_any_hw(crate::h264_ffmpeg::AV1_HW_CANDIDATES),
+    );
     #[cfg(not(all(windows, feature = "ffmpeg")))]
-    let has_444 = false;
+    let (has_444, has_hevc, has_av1) = (false, false, false);
 
     let mut caps = vec![Codec::H264420];
     if has_444 {
         caps.push(Codec::H264444);
     }
+    if has_hevc {
+        caps.push(Codec::Hevc444);
+    }
+    if has_av1 {
+        caps.push(Codec::Av1);
+    }
     tracing::info!("编码能力探测结果: {caps:?}");
     caps
+}
+
+/// 探测指定硬编候选列表（HEVC / AV1）能否以 NV12 正常编码 1 帧。
+#[cfg(all(windows, feature = "ffmpeg"))]
+fn probe_nv12_any_hw(candidates: &[&str]) -> bool {
+    let probe_cfg = crate::EncoderConfig {
+        width: PROBE_W,
+        height: PROBE_H,
+        fps: 60,
+        bitrate_kbps: 4_000,
+        prefer_hw: true,
+        pixel_format: crate::PixelFormat::Yuv420,
+    };
+    for &name in candidates {
+        let codec = if name.starts_with("av1") {
+            Codec::Av1
+        } else {
+            Codec::Hevc444
+        };
+        if crate::h264_ffmpeg::FfmpegEncoder::create_for_codec(&probe_cfg, codec).is_ok() {
+            tracing::info!("硬编 {codec:?} 可用（候选 {name}）");
+            return true;
+        }
+    }
+    false
 }
 
 /// 依次探测各硬编候选的 4:4:4 能力，首个成功者即为可用。

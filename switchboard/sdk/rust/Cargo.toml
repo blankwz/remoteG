@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["switchboard-core", "switchboard-bench", "switchboard-mod-fec-rs", "switchboard-mod-quinn", "switchboard-mod-kcp", "switchboard-mod-punch-stun", "switchboard-mod-easytier", "switchboard-daemon"]
+members = ["switchboard-core", "switchboard-bench", "switchboard-mod-fec-rs", "switchboard-mod-quinn", "switchboard-mod-kcp", "switchboard-mod-punch-stun", "switchboard-mod-easytier"]
 
 [workspace.package]
 version = "0.1.0"

@@ -16,8 +16,8 @@
 /// 托盘主循环:Windows 跑托盘消息泵(下方 `imp`);其他平台驻留待命,
 /// 行为与 `--no-tray` 一致(保持可 check/可运行)。
 #[cfg(windows)]
-pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
-    imp::run(runtime)
+pub fn run(runtime: &rd_agent::AgentRuntime, show_startup_code: bool) -> ! {
+    imp::run(runtime, show_startup_code)
 }
 
 /// 更新完整链（Windows）：托盘菜单与 main.rs 的 e2e 自动触发钩子共用
@@ -26,8 +26,8 @@ pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
 pub(crate) use imp::update_flow;
 
 #[cfg(not(windows))]
-pub fn run(runtime: &rd_agent::AgentRuntime) -> ! {
-    let _ = runtime;
+pub fn run(runtime: &rd_agent::AgentRuntime, show_startup_code: bool) -> ! {
+    let _ = (runtime, show_startup_code);
     tracing::info!("当前平台无托盘,进程驻留待命(Ctrl+C 退出)");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -71,6 +71,7 @@ mod imp {
     const ID_OPEN_LOGS: &str = "open-logs";
     const ID_REPORT_CRASH: &str = "report-crash";
     const ID_LICENSE: &str = "license";
+    const ID_INSTALL_VDISPLAY: &str = "install-vdisplay";
     const ID_CHECK_UPDATE: &str = "check-update";
     const ID_QUIT: &str = "quit";
     /// 设备菜单项 id 前缀,完整形式 `{DEVICE_ID_PREFIX}<conn_id>`。
@@ -108,7 +109,7 @@ mod imp {
     }
 
     /// 托盘入口:构建图标/菜单/托盘,主线程泵消息直至退出(永不返回)。
-    pub(super) fn run(runtime: &rd_agent::AgentRuntime) -> ! {
+    pub(super) fn run(runtime: &rd_agent::AgentRuntime, show_startup_code: bool) -> ! {
         // 自动检查更新（改造项 A 收口）：常驻线程静默轮询，未配渠道时零打扰
         spawn_auto_update_check(runtime);
         let state: Arc<AgentState> = Arc::clone(&runtime.state);
@@ -125,6 +126,8 @@ mod imp {
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, "打开日志目录", true, None);
         let report_crash_item = MenuItem::with_id(ID_REPORT_CRASH, "上报崩溃…", true, None);
         let license_item = MenuItem::with_id(ID_LICENSE, "授权…", true, None);
+        let install_vdisplay_item =
+            MenuItem::with_id(ID_INSTALL_VDISPLAY, "安装虚拟屏驱动…", true, None);
         let check_update_item = MenuItem::with_id(ID_CHECK_UPDATE, "检查更新", true, None);
         let quit_item = MenuItem::with_id(ID_QUIT, "退出", true, None);
 
@@ -139,6 +142,7 @@ mod imp {
         let _ = menu.append(&trust);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&check_update_item);
+        let _ = menu.append(&install_vdisplay_item);
         let _ = menu.append(&open_logs);
         let _ = menu.append(&report_crash_item);
         let _ = menu.append(&license_item);
@@ -184,6 +188,10 @@ mod imp {
             tracing::warn!("SetTimer 失败,菜单状态将仅在交互时刷新");
         }
         tracing::info!("托盘就绪");
+        // 小白双击 exe 启动时自动弹出配对码与地址卡片，避免静默进托盘被误认为“没打开”
+        if show_startup_code {
+            generate_and_show_pair_code(&state, true);
+        }
 
         let mut msg = MSG::default();
         loop {
@@ -215,41 +223,51 @@ mod imp {
         }
     }
 
+    /// 生成新配对码并弹窗展示（启动自动提示与托盘菜单共用）。
+    fn generate_and_show_pair_code(state: &Arc<AgentState>, is_startup: bool) {
+        let code = {
+            let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
+            pairing.new_code()
+        };
+        // 配对码只经 MessageBox 展示,不落日志;同时复制到剪贴板
+        tracing::info!("生成新配对码(5 分钟内有效)");
+        let copied = copy_to_clipboard(&code);
+        let code_line = if copied {
+            format!("{code}（已复制到剪贴板）")
+        } else {
+            code
+        };
+        // 首行展示本机可达地址(D-013:码+地址同屏,家人只需念两条信息)
+        let addrs: Vec<String> = state
+            .listen_addrs
+            .lock()
+            .expect("listen_addrs 锁中毒")
+            .iter()
+            .filter(|a| !a.ip().is_loopback())
+            .map(|a| a.to_string())
+            .collect();
+        let addr_lines = if addrs.is_empty() {
+            "（监听地址未就绪，请稍后在右下角托盘重点「生成配对码」）".to_string()
+        } else {
+            addrs.join("\n")
+        };
+        let body = if is_startup {
+            format!(
+                "rd 远程控制已启动！\n\n请把下面的地址和配对码发给帮你的人：\n{addr_lines}\n\n6 位配对码：{code_line}\n（5 分钟内有效；点「确定」关闭本提示后，程序会在右下角托盘继续运行）"
+            )
+        } else {
+            format!(
+                "把下面地址填进控制端「添加设备」：\n{addr_lines}\n\n6 位配对码：{code_line}\n（5 分钟内有效）"
+            )
+        };
+        show_pair_code_dialog(body);
+    }
+
     /// 菜单点击分发;除退出外的分支最后统一 `refresh` 即时反映状态。
     fn handle_menu_event(runtime: &rd_agent::AgentRuntime, ui: &mut TrayUi, id: &str) {
         let state: Arc<AgentState> = Arc::clone(&runtime.state);
         match id {
-            ID_GENERATE => {
-                let code = {
-                    let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
-                    pairing.new_code()
-                };
-                // 配对码只经 MessageBox 展示,不落日志;同时复制到剪贴板
-                tracing::info!("托盘生成新配对码(5 分钟内有效)");
-                let copied = copy_to_clipboard(&code);
-                let code_line = if copied {
-                    format!("{code}(已复制到剪贴板)")
-                } else {
-                    code
-                };
-                // 首行展示本机可达地址(D-013:码+地址同屏,家人只需念两条信息)
-                let addrs: Vec<String> = state
-                    .listen_addrs
-                    .lock()
-                    .expect("listen_addrs 锁中毒")
-                    .iter()
-                    .filter(|a| !a.ip().is_loopback())
-                    .map(|a| a.to_string())
-                    .collect();
-                let addr_lines = if addrs.is_empty() {
-                    "(监听地址未就绪,稍后再试)".to_string()
-                } else {
-                    addrs.join("\n")
-                };
-                show_pair_code_dialog(format!(
-                    "把下面地址填进控制端「添加设备」:\n{addr_lines}\n\n配对码:{code_line}"
-                ));
-            }
+            ID_GENERATE => generate_and_show_pair_code(&state, false),
             ID_AUTOSTART => {
                 let enable = ui.autostart_item.is_checked();
                 match set_autostart(enable) {
@@ -279,6 +297,7 @@ mod imp {
             ID_OPEN_LOGS => open_log_dir(),
             ID_REPORT_CRASH => report_crash(),
             ID_CHECK_UPDATE => check_update(runtime),
+            ID_INSTALL_VDISPLAY => install_vdisplay_driver(),
             ID_LICENSE => {
                 // 授权状态弹窗（T-029）：当前档位 + 升级操作说明（大白话）
                 show_pair_code_dialog(license_dialog_text(&state));
@@ -495,11 +514,52 @@ mod imp {
                 l.devices_max
             ),
             _ => format!(
-                "当前版本:免费版\n已信任 {trusted}/{} 台设备,同一时间支持 1 台电脑连接。\n\n升级专业版:\n1. 联系购买获得一串「授权码」\n2. 把授权码保存为文件: {}\\license.key\n3. 重启本程序即生效\n\n(免费版永久可用,无时间限制)",
+                "当前版本：免费版\n已信任 {trusted}/{} 台设备，同一时间支持 1 台电脑连接。\n\n升级专业版：\n• 如安装了 rd 完整版，可直接在「设置 → 版本与授权」中粘贴授权码一键激活。\n• 独立便携版请把授权码保存为：{}\\license.key 后重启本程序。\n\n（免费版永久可用，无时间限制）",
                 rd_security::FREE_DEVICE_MAX,
                 rd_agent::default_config_dir().display()
             ),
         }
+    }
+
+    /// 托盘一键引导安装随包虚拟屏驱动（告别翻找 driver\vdisplay\install-driver.cmd）。
+    fn install_vdisplay_driver() {
+        let script = rd_agent::updater::install_dir()
+            .ok()
+            .map(|d| d.join("driver").join("vdisplay").join("install-driver.cmd"));
+        let Some(script) = script.filter(|p| p.exists()) else {
+            show_pair_code_dialog(
+                "未找到随包虚拟屏驱动安装脚本（driver\\vdisplay\\install-driver.cmd）。\n\n请确认使用完整的 rd-agent 便携 zip 解压运行；不安装驱动也可以正常进行窗口级远程控制。"
+                    .to_string(),
+            );
+            return;
+        };
+        std::thread::spawn(move || {
+            let text = HSTRING::from(
+                "虚拟屏驱动可让远控连入时自动建一块独立屏幕，不打扰本机桌面（断开后自动撤屏还原）。\n\n安装过程需要确认一次管理员权限，无需重启电脑。是否现在安装？",
+            );
+            let title = HSTRING::from("rd 远程控制 · 安装虚拟屏驱动");
+            let choice = unsafe {
+                MessageBoxW(
+                    None,
+                    &text,
+                    &title,
+                    MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+                )
+            };
+            if choice != IDYES {
+                return;
+            }
+            match std::process::Command::new("cmd")
+                .args(["/C", "start", "", &script.to_string_lossy()])
+                .spawn()
+            {
+                Ok(_) => tracing::info!(path = %script.display(), "已启动虚拟屏驱动安装脚本"),
+                Err(err) => {
+                    tracing::warn!(path = %script.display(), "启动虚拟屏驱动安装脚本失败: {err}");
+                    show_pair_code_dialog(format!("启动安装脚本失败：{err}"));
+                }
+            }
+        });
     }
 
     /// 撤销对某设备的信任(D-013 包3/E4:被控端此前无撤销入口,控制端设备
@@ -556,7 +616,8 @@ mod imp {
         let key = hkcu.open_subkey_with_flags(AUTOSTART_RUN_KEY, winreg::enums::KEY_SET_VALUE)?;
         if enable {
             let exe = std::env::current_exe().context("定位当前 exe 失败")?;
-            key.set_value(AUTOSTART_VALUE, &exe.to_string_lossy().to_string())
+            let cmd = format!("\"{}\" run --minimized", exe.to_string_lossy());
+            key.set_value(AUTOSTART_VALUE, &cmd)
                 .context("写入 Run 键失败")?;
         } else {
             key.delete_value(AUTOSTART_VALUE)

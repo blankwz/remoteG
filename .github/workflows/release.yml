@@ -103,10 +103,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # bundle.resources 引用 studio 构建产物（dist 被 gitignore）——二轮 run
-          # 44463604147 暴露 tauri build.rs 校验 resources 路径失败，先构建 studio
-          pnpm -C switchboard/studio install --frozen-lockfile
-          pnpm -C switchboard/studio build
           pnpm -C apps/rd-controller install --frozen-lockfile
           pnpm -C apps/rd-controller tauri build
           # 未签名安装包；NSIS 产物与 updater .sig 在根 target/release/bundle/nsis/
@@ -118,12 +114,38 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/nsis/*.sig
 
+  controller-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/rd-controller/pnpm-lock.yaml
+      - name: Build controller (macOS dmg + updater artifacts)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm -C apps/rd-controller install --frozen-lockfile
+          pnpm -C apps/rd-controller tauri build
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rd-controller-macos
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/macos/*.app.tar.gz.sig
+
   publish:
-    # 首跑缺陷：controller-macos job 摘除——融合版 controller 链接 rd-agent，
-    # 其 capture/window 模块 #[cfg(windows)]，从未能在 macOS 编译（此前零次
-    # 真实运行未暴露）。跨平台支持待 rd-agent 解耦改造；下方 latest.json 的
-    # darwin-aarch64 分支已容错（无 .app.tar.gz 即不写该平台），恢复 job 时自动接上。
-    needs: [agent-windows, controller-windows]
+    # 宪法 #4：rd-agent 与 ffmpeg-bin 已按 cfg(windows) 解耦，正式恢复 macOS 控制端发布。
+    needs: [agent-windows, controller-windows, controller-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

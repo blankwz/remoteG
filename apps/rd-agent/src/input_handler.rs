@@ -23,70 +23,11 @@ use rd_proto::v0::{ContinuousScroll, KeyEvent, MouseButton, MouseWheel, TextInpu
 
 use crate::session::SessionCtx;
 
-/// 键鼠注入器:Windows 下为 rd-input-win 实现(记录按下状态,断开时全抬);
-/// 其他平台为空桩,保持整个 crate 可跨平台 check。
+/// 键鼠注入器:Windows 下为 rd-input-win 实现；macOS 下为 rd-mac CoreGraphics CGEvent 实现。
 #[cfg(windows)]
 pub use rd_input_win::Injector;
-
-/// 非 Windows 平台注入桩:仅满足类型签名,全部为空操作。
 #[cfg(not(windows))]
-#[derive(Debug, Default)]
-pub struct Injector;
-
-#[cfg(not(windows))]
-impl Injector {
-    /// 与 Windows 版签名对齐的空构造。
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn mouse_move(&mut self, _hwnd: isize, _x: i32, _y: i32) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn mouse_button(
-        &mut self,
-        _hwnd: isize,
-        _x: i32,
-        _y: i32,
-        _button: u32,
-        _down: bool,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn wheel(
-        &mut self,
-        _hwnd: isize,
-        _x: i32,
-        _y: i32,
-        _dx: i32,
-        _dy: i32,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn scroll_pixel(
-        &mut self,
-        _hwnd: isize,
-        _x: i32,
-        _y: i32,
-        _pixels_x: i32,
-        _pixels_y: i32,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn key(&mut self, _scancode: u32, _extended: bool, _down: bool) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn text(&mut self, _s: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub fn release_all(&mut self) {}
-}
+pub use rd_mac::input::Injector;
 
 /// 控制流承载的输入消息(点击/按键需可靠送达,05_api 摘要)。
 #[derive(Debug)]
@@ -525,7 +466,10 @@ fn foreground_hwnd() -> Option<u64> {
 
 #[cfg(not(windows))]
 fn foreground_hwnd() -> Option<u64> {
-    None
+    // macOS：取当前可见窗口列表首位作为前台窗口（CGWindowList 按 Z 序从前到后）
+    rd_mac::window::list_windows()
+        .ok()
+        .and_then(|list| list.first().map(|w| w.hwnd as u64))
 }
 
 /// 前台窗口是否属于本会话已打开的窗口(键盘/文本注入的准入条件)。
@@ -545,8 +489,8 @@ fn ensure_fg(window_id: u64) -> bool {
 }
 
 #[cfg(not(windows))]
-fn ensure_fg(_window_id: u64) -> bool {
-    false
+fn ensure_fg(window_id: u64) -> bool {
+    rd_mac::input::ensure_foreground(window_id as isize).is_ok()
 }
 
 // ---------------------------------------------------------------------------

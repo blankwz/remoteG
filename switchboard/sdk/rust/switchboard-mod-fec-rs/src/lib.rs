@@ -71,6 +71,17 @@ struct Counters {
     frames_rx: Arc<AtomicU32>,
     frames_recovered: Arc<AtomicU32>,
     frames_lost: Arc<AtomicU32>,
+    overhead_pct: Arc<AtomicU32>,
+}
+
+/// FEC 运行期实时统计快照（供方案实验室展示真实救回帧数与丢帧数）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FecRsStats {
+    pub frames_tx: u32,
+    pub frames_rx: u32,
+    pub frames_recovered: u32,
+    pub frames_lost: u32,
+    pub overhead_pct: u32,
 }
 
 /// Moonlight 级 RS FEC 适配器。
@@ -81,6 +92,7 @@ pub struct FecRs {
 
 impl FecRs {
     pub fn new(cfg: FecRsConfig) -> Self {
+        let pct = (cfg.overhead_ratio * 100.0).round() as u32;
         Self {
             cfg,
             counters: Arc::new(Counters {
@@ -88,7 +100,26 @@ impl FecRs {
                 frames_rx: Arc::new(AtomicU32::new(0)),
                 frames_recovered: Arc::new(AtomicU32::new(0)),
                 frames_lost: Arc::new(AtomicU32::new(0)),
+                overhead_pct: Arc::new(AtomicU32::new(pct.clamp(1, 200))),
             }),
+        }
+    }
+
+    /// 动态调整冗余比例（5% ~ 100%，方案实验室在线热调）。
+    pub fn set_overhead_pct(&self, pct: u32) {
+        self.counters
+            .overhead_pct
+            .store(pct.clamp(1, 200), Ordering::Relaxed);
+    }
+
+    /// 读取实时 FEC 统计（累计发送/接收/RS重塑救回/彻底丢失帧数）。
+    pub fn stats_snapshot(&self) -> FecRsStats {
+        FecRsStats {
+            frames_tx: self.counters.frames_tx.load(Ordering::Relaxed),
+            frames_rx: self.counters.frames_rx.load(Ordering::Relaxed),
+            frames_recovered: self.counters.frames_recovered.load(Ordering::Relaxed),
+            frames_lost: self.counters.frames_lost.load(Ordering::Relaxed),
+            overhead_pct: self.counters.overhead_pct.load(Ordering::Relaxed),
         }
     }
 }
@@ -131,6 +162,7 @@ impl MediaAdapt for FecRs {
             bus: Arc::clone(&bus),
             frames: Arc::clone(&self.counters.frames_tx),
             lost: Arc::clone(&self.counters.frames_lost),
+            overhead_pct: Arc::clone(&self.counters.overhead_pct),
         };
         let rx = FecRsRx {
             ch: rx_side,
@@ -152,6 +184,7 @@ struct FecRsTx {
     bus: Arc<EventBus>,
     frames: Arc<AtomicU32>,
     lost: Arc<AtomicU32>,
+    overhead_pct: Arc<AtomicU32>,
 }
 
 impl FecRsTx {
@@ -207,7 +240,10 @@ impl FrameSink for FecRsTx {
 
         // 切块（每块 ≤ MAX_BLOCK_DATA 数据片），逐块 RS 编码
         let block_data = total.min(MAX_BLOCK_DATA);
-        let m = parity_count(self.cfg, block_data);
+        let mut active_cfg = self.cfg;
+        active_cfg.overhead_ratio =
+            (self.overhead_pct.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.01, 2.0);
+        let m = parity_count(active_cfg, block_data);
         let rs: ReedSolomon = ReedSolomon::new(block_data, m).map_err(|_| MediaError::Closed)?;
 
         let mut block = vec![vec![0u8; s]; block_data];
@@ -215,7 +251,7 @@ impl FrameSink for FecRsTx {
             let bend = (bstart + block_data).min(total);
             let k_here = bend - bstart;
             let m_here = if k_here == 1 && bi == 0 && total == 1 {
-                parity_count(self.cfg, 1)
+                parity_count(active_cfg, 1)
             } else {
                 m
             };

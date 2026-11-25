@@ -75,11 +75,13 @@ pub type TermTx = Arc<tokio::sync::Mutex<DataTx>>;
 // 解码能力（前端探测后经 set_decode_caps 上报，连接时填 Hello）
 // ---------------------------------------------------------------------------
 
-/// 本机解码能力（默认 H.264 4:2:0，保证可用）。
+/// 本机解码能力（默认 H.264 4:2:0，保证可用；4K@144Hz 协商支持 HEVC / AV1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeCaps {
     pub h264_420: bool,
     pub h264_444: bool,
+    pub hevc: bool,
+    pub av1: bool,
 }
 
 impl Default for DecodeCaps {
@@ -87,6 +89,8 @@ impl Default for DecodeCaps {
         Self {
             h264_420: true,
             h264_444: false,
+            hevc: false,
+            av1: false,
         }
     }
 }
@@ -100,6 +104,12 @@ impl DecodeCaps {
         }
         if self.h264_444 {
             caps.push(Codec::H264444 as i32);
+        }
+        if self.hevc {
+            caps.push(Codec::Hevc444 as i32);
+        }
+        if self.av1 {
+            caps.push(Codec::Av1 as i32);
         }
         (caps, self.h264_444)
     }
@@ -528,6 +538,11 @@ struct Inner {
     /// FileXferChunk/Ack/Cancel 按 id 投递，命令层阻塞消费）。
     xfers: Mutex<HashMap<u64, tokio::sync::mpsc::Sender<Envelope>>>,
     closed_tx: watch::Sender<bool>,
+    /// 方案实验室（v0.4）：当前生效路径标签与 FEC 接收端统计
+    route_tag: Mutex<String>,
+    fec_recovered: std::sync::atomic::AtomicU32,
+    fec_lost: std::sync::atomic::AtomicU32,
+    last_telemetry: Mutex<Option<rd_proto::v0::LabTelemetry>>,
 }
 
 /// 通用设备连接（T-020 ~ T-023 共用）：带 req_id 的控制流 RPC + 广播事件 +
@@ -582,51 +597,123 @@ impl DeviceConn {
         let sock = resolve_addr(addr, DEFAULT_AGENT_PORT)
             .await
             .context("地址解析失败")?;
-        let conn = match connect(sock, identity, expected).await {
-            Ok(c) => Arc::new(c),
-            // 直连失败 → 原生中继回退（T-032）：DIAL 按指纹寻人，
-            // E2E 加密/配对校验与直连完全一致，中继只见密文。
-            // 回退内含打洞竞速（T-034）：中继路径与打洞直连谁先握手完成用谁，
-            // RD_PUNCH=0 关闭打洞只走中继
-            Err(direct_err) => {
-                // EasyTier 转发候选（T-043，no_tun 组网）：本机回环入口
-                // （127.0.0.1:转发端口 → mesh → 对端虚拟 IP:rd 端口）。回环
-                // 连接失败立即返回，逐个快试代价低；任一命中即用。
-                let mut extra_err = None;
-                let mut conn_opt: Option<Arc<Conn>> = None;
-                for extra in &extra_addrs {
-                    match connect(*extra, identity, expected).await {
-                        Ok(c) => {
-                            tracing::info!(%extra, "EasyTier 转发地址连接成功");
-                            conn_opt = Some(Arc::new(c));
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::debug!(addr = %extra, err = %e, "转发地址连接失败");
-                            extra_err = Some(e);
-                        }
-                    }
-                }
-                if let Some(conn) = conn_opt {
-                    conn
-                } else {
-                    let direct_err = extra_err.unwrap_or(direct_err);
-                    let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
-                        return Err(direct_err);
-                    };
+        let force_route = rd_transport::netem::get_force_route();
+        let mut active_route = "direct-lan".to_string();
+        let conn = if force_route == "relay" {
+            let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty()) else {
+                anyhow::bail!("强制中继模式失败：尚未在设置中配置 rd-relay 中继地址");
+            };
+            let Some(target_fp) = expected else {
+                anyhow::bail!("强制中继模式失败：未配对设备无指纹");
+            };
+            let relay_addr = rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+            let (_, c) =
+                rd_transport::connect_via_relay_punch(relay_addr, target_fp, identity, expected)
+                    .await
+                    .context("强制中继连接失败")?;
+            active_route = format!("rd-relay ({relay_addr})");
+            Arc::new(c)
+        } else if force_route == "punch" {
+            match relay.as_deref().filter(|s| !s.trim().is_empty()) {
+                Some(relay_raw) => {
                     let Some(target_fp) = expected else {
-                        // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
-                        return Err(direct_err);
+                        anyhow::bail!("打洞模式失败：未配对设备无指纹");
                     };
                     let relay_addr =
                         rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
-                    tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
-                    let (_, conn) = rd_transport::connect_via_relay_punch(
+                    let (path, c) = rd_transport::connect_via_relay_punch(
                         relay_addr, target_fp, identity, expected,
                     )
                     .await
-                    .context("经中继连接失败（被控端不在线或中继不可达）")?;
-                    Arc::new(conn)
+                    .context("打洞竞速连接失败")?;
+                    active_route = format!("{path:?} ({sock})");
+                    Arc::new(c)
+                }
+                None => {
+                    let c = connect(sock, identity, expected)
+                        .await
+                        .context("STUN/直连打洞失败")?;
+                    active_route = format!("stun-punch ({sock})");
+                    Arc::new(c)
+                }
+            }
+        } else if force_route == "easytier" {
+            let mut conn_opt: Option<Arc<Conn>> = None;
+            for extra in &extra_addrs {
+                if let Ok(c) = connect(*extra, identity, expected).await {
+                    active_route = format!("easytier-mesh ({extra})");
+                    conn_opt = Some(Arc::new(c));
+                    break;
+                }
+            }
+            if let Some(c) = conn_opt {
+                c
+            } else {
+                let c = connect(sock, identity, expected)
+                    .await
+                    .context("EasyTier 路径连接失败")?;
+                active_route = format!("easytier-ip ({sock})");
+                Arc::new(c)
+            }
+        } else {
+            match connect(sock, identity, expected).await {
+                Ok(c) => {
+                    active_route = if sock.ip().is_loopback() {
+                        format!("loopback ({sock})")
+                    } else if sock.ip().to_string().starts_with("100.") {
+                        format!("tailscale ({sock})")
+                    } else {
+                        format!("direct ({sock})")
+                    };
+                    Arc::new(c)
+                }
+                // 直连失败 → 原生中继回退（T-032）：DIAL 按指纹寻人，
+                // E2E 加密/配对校验与直连完全一致，中继只见密文。
+                // 回退内含打洞竞速（T-034）：中继路径与打洞直连谁先握手完成用谁，
+                // RD_PUNCH=0 关闭打洞只走中继
+                Err(direct_err) => {
+                    // EasyTier 转发候选（T-043，no_tun 组网）：本机回环入口
+                    // （127.0.0.1:转发端口 → mesh → 对端虚拟 IP:rd 端口）。回环
+                    // 连接失败立即返回，逐个快试代价低；任一命中即用。
+                    let mut extra_err = None;
+                    let mut conn_opt: Option<Arc<Conn>> = None;
+                    for extra in &extra_addrs {
+                        match connect(*extra, identity, expected).await {
+                            Ok(c) => {
+                                tracing::info!(%extra, "EasyTier 转发地址连接成功");
+                                active_route = format!("easytier-mesh ({extra})");
+                                conn_opt = Some(Arc::new(c));
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::debug!(addr = %extra, err = %e, "转发地址连接失败");
+                                extra_err = Some(e);
+                            }
+                        }
+                    }
+                    if let Some(conn) = conn_opt {
+                        conn
+                    } else {
+                        let direct_err = extra_err.unwrap_or(direct_err);
+                        let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty())
+                        else {
+                            return Err(direct_err);
+                        };
+                        let Some(target_fp) = expected else {
+                            // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
+                            return Err(direct_err);
+                        };
+                        let relay_addr =
+                            rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+                        tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
+                        let (path, conn) = rd_transport::connect_via_relay_punch(
+                            relay_addr, target_fp, identity, expected,
+                        )
+                        .await
+                        .context("经中继连接失败（被控端不在线或中继不可达）")?;
+                        active_route = format!("{path:?} ({relay_addr})");
+                        Arc::new(conn)
+                    }
                 }
             }
         };
@@ -647,6 +734,7 @@ impl DeviceConn {
             peer_fp,
             media_fec,
         );
+        *device.inner.route_tag.lock().expect("route_tag") = active_route;
         // T-027：已请求 fec-shards → 拉起视频泵（握手后远端才开始发分片）
         if device.inner.media_fec.load(Ordering::SeqCst) {
             tauri::async_runtime::spawn(fec_video_pump(
@@ -680,6 +768,10 @@ impl DeviceConn {
             terms: Mutex::new(TermRoutes::default()),
             xfers: Mutex::new(HashMap::new()),
             closed_tx,
+            route_tag: Mutex::new("direct".to_string()),
+            fec_recovered: std::sync::atomic::AtomicU32::new(0),
+            fec_lost: std::sync::atomic::AtomicU32::new(0),
+            last_telemetry: Mutex::new(None),
         });
         // 读循环 + 数据流 accept 循环；连接断开时整体退出并置 closed
         tauri::async_runtime::spawn(read_loop(inner.clone(), ctrl_rx));
@@ -843,6 +935,38 @@ impl DeviceConn {
     pub fn closed(&self) -> watch::Receiver<bool> {
         self.inner.closed_tx.subscribe()
     }
+
+    pub fn route_tag(&self) -> String {
+        self.inner.route_tag.lock().expect("route_tag").clone()
+    }
+
+    pub fn media_fec(&self) -> bool {
+        self.inner.media_fec.load(Ordering::Relaxed)
+    }
+
+    pub fn fec_stats(&self) -> (u32, u32) {
+        (
+            self.inner.fec_recovered.load(Ordering::Relaxed),
+            self.inner.fec_lost.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn last_telemetry(&self) -> Option<rd_proto::v0::LabTelemetry> {
+        self.inner
+            .last_telemetry
+            .lock()
+            .expect("last_telemetry")
+            .clone()
+    }
+
+    pub fn conn_rtt_ms(&self) -> u32 {
+        self.conn.rtt().as_millis() as u32
+    }
+
+    pub fn conn_stats(&self) -> (u64, u64, u64) {
+        let p = self.conn.stats().path;
+        (p.cwnd, p.sent_packets, p.lost_packets)
+    }
 }
 
 /// 控制流读循环：req_id 响应投递等待者，其余广播；退出时置 closed。
@@ -888,6 +1012,9 @@ async fn read_loop(inner: Arc<Inner>, mut rx: ControlRx) {
                     // （前端会话订阅方对 File* 信封无消费者，L2）
                     tracing::debug!(device = %inner.device_id, xfer = xfer_id, "丢弃无路由的文件传输消息");
                     continue;
+                }
+                if let Some(envelope::Msg::LabTelemetry(ref t)) = env.msg {
+                    *inner.last_telemetry.lock().expect("last_telemetry") = Some(t.clone());
                 }
                 let _ = inner.events_tx.send(env);
             }
@@ -988,6 +1115,11 @@ async fn fec_video_pump(conn: Arc<Conn>, inner: Arc<Inner>) {
     loop {
         match src.next().await {
             Some(switchboard_core::stages::FrameIn::Complete { frame_id: _, data }) => {
+                let snap = fec.stats_snapshot();
+                inner
+                    .fec_recovered
+                    .store(snap.frames_recovered, Ordering::Relaxed);
+                inner.fec_lost.store(snap.frames_lost, Ordering::Relaxed);
                 match rd_transport::framing::decode_video_header(&data) {
                     Ok((h, len)) => {
                         let end = (VIDEO_HEADER_LEN + len as usize).min(data.len());
@@ -1000,7 +1132,13 @@ async fn fec_video_pump(conn: Arc<Conn>, inner: Arc<Inner>) {
                     }
                 }
             }
-            Some(switchboard_core::stages::FrameIn::Lost { .. }) => {}
+            Some(switchboard_core::stages::FrameIn::Lost { .. }) => {
+                let snap = fec.stats_snapshot();
+                inner
+                    .fec_recovered
+                    .store(snap.frames_recovered, Ordering::Relaxed);
+                inner.fec_lost.store(snap.frames_lost, Ordering::Relaxed);
+            }
             None => {
                 tracing::info!(device = %inner.device_id, "fec 视频泵结束");
                 break;
@@ -1181,6 +1319,16 @@ impl ConnManager {
             .expect("device conns")
             .get(device_id)
             .cloned()
+    }
+
+    /// 列出所有当前活跃连接的设备 ID 及连接句柄（供方案实验室自动附着活跃设备）。
+    pub fn list_active_devices(&self) -> Vec<(String, Arc<DeviceConn>)> {
+        self.device_conns
+            .lock()
+            .expect("device conns")
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect()
     }
 
     /// 移除设备连接（断线清理 / 主动断开），不负责 close。
@@ -1647,9 +1795,19 @@ mod tests {
         let both = DecodeCaps {
             h264_420: true,
             h264_444: true,
+            hevc: true,
+            av1: true,
         };
         let (caps, s444) = both.to_codecs();
-        assert_eq!(caps, vec![Codec::H264420 as i32, Codec::H264444 as i32]);
+        assert_eq!(
+            caps,
+            vec![
+                Codec::H264420 as i32,
+                Codec::H264444 as i32,
+                Codec::Hevc444 as i32,
+                Codec::Av1 as i32,
+            ]
+        );
         assert!(s444);
     }
 

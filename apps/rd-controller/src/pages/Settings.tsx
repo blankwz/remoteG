@@ -33,7 +33,18 @@ import {
   type UiScale,
 } from "../ui/uiScale";
 import { Switch } from "../ui/Switch";
-import { getRelayAddr, setRelayAddr, getEasytier, setEasytier, type EasyTierSettings } from "../api/devices";
+import { loadAdvancedMode, saveAdvancedMode } from "../ui/advancedMode";
+import { deployRelaySsh, type SshDeployResult } from "../api/relayDeploy";
+import {
+  activateLicense,
+  getEasytier,
+  getLicenseStatus,
+  getRelayAddr,
+  setEasytier,
+  setRelayAddr,
+  type EasyTierSettings,
+  type LicenseStatusDto,
+} from "../api/devices";
 import { useUpdater } from "../ui/useUpdater";
 import {
   crashClear,
@@ -139,6 +150,12 @@ export function Settings() {
   const updater = useUpdater();
   /** 崩溃报告（T-040）：本地 dump 列表；null=读取中/读取失败（按钮禁用）。 */
   const [crashes, setCrashes] = useState<CrashEntry[] | null>(null);
+  /** 授权状态与激活输入（告别手建 AppData\...\license.key）。 */
+  const [license, setLicense] = useState<LicenseStatusDto | null>(null);
+  const [licenseInput, setLicenseInput] = useState("");
+  const [licenseMsg, setLicenseMsg] = useState<string | null>(null);
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+  const [licenseBusy, setLicenseBusy] = useState(false);
 
   void call<boolean>("get_media_fec")
     .then(setFec)
@@ -190,6 +207,38 @@ export function Settings() {
       .then((v) => setEt(normalizeEasytier(v)))
       .catch(() => setEt(null));
   }, []);
+
+  // 授权状态（挂载一次）
+  useEffect(() => {
+    void getLicenseStatus()
+      .then((v) => {
+        if (v !== null && typeof v === "object" && "plan" in v) {
+          setLicense(v);
+        }
+      })
+      .catch(() => setLicense(null));
+  }, []);
+
+  const onActivateLicense = useCallback(async () => {
+    const trimmed = licenseInput.trim();
+    if (trimmed.length === 0) {
+      setLicenseError("请先粘贴授权码");
+      return;
+    }
+    setLicenseError(null);
+    setLicenseMsg(null);
+    setLicenseBusy(true);
+    try {
+      const next = await activateLicense(trimmed);
+      setLicense(next);
+      setLicenseInput("");
+      setLicenseMsg("已激活专业版：重启 rd-controller 后生效");
+    } catch (e) {
+      setLicenseError(errText(e));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [licenseInput]);
 
   /** 保存 EasyTier：启用时网络名/二进制路径必填；转发规则逐行格式校验。 */
   const onSaveEasytier = useCallback(async () => {
@@ -254,6 +303,66 @@ export function Settings() {
     }
   }, [relayAddr]);
 
+  /** 交互模式（宪法 #2）：false=简洁模式（小白默认）；true=高级模式（极客调优）。 */
+  const [advancedMode, setAdvancedMode] = useState<boolean>(loadAdvancedMode);
+  /** SSH 一键部署自建中转服务器（宪法 #3）。 */
+  const [sshHost, setSshHost] = useState("");
+  const [sshPort, setSshPort] = useState("22");
+  const [sshUser, setSshUser] = useState("root");
+  const [sshKeyPath, setSshKeyPath] = useState("");
+  const [sshMode, setSshMode] = useState<"udp" | "docker">("udp");
+  const [sshDomain, setSshDomain] = useState("");
+  const [sshBusy, setSshBusy] = useState(false);
+  const [sshResult, setSshResult] = useState<SshDeployResult | null>(null);
+  const [sshError, setSshError] = useState<string | null>(null);
+
+  const onToggleAdvancedMode = useCallback((v: boolean) => {
+    setAdvancedMode(v);
+    saveAdvancedMode(v);
+  }, []);
+
+  const onDeployRelaySsh = useCallback(async () => {
+    setSshError(null);
+    setSshResult(null);
+    if (sshHost.trim().length === 0) {
+      setSshError("请先填写服务器 IP 或域名");
+      return;
+    }
+    if (sshMode === "docker" && sshDomain.trim().length === 0) {
+      setSshError("Docker HTTPS 模式需要填写解析到该服务器的域名");
+      return;
+    }
+    setSshBusy(true);
+    try {
+      const res = await deployRelaySsh({
+        host: sshHost.trim(),
+        port: Number(sshPort) || 22,
+        user: sshUser.trim() || "root",
+        keyPath: sshKeyPath.trim(),
+        relayPort: 21118,
+        mode: sshMode,
+        domain: sshDomain.trim(),
+      });
+      setSshResult(res);
+      if (res.ok && res.relayAddr) {
+        setRelayAddrState(res.relayAddr);
+        setRelayDirty(false);
+        setRelayError(null);
+        try {
+          await setRelayAddr(res.relayAddr);
+          setRelayMsg("已自动回填并保存（重启 rd-controller 后生效）");
+        } catch (e) {
+          setRelayDirty(true);
+          setRelayMsg(`已回填，请手动点击保存（自动保存失败：${errText(e)}）`);
+        }
+      }
+    } catch (e) {
+      setSshError(errText(e));
+    } finally {
+      setSshBusy(false);
+    }
+  }, [sshDomain, sshHost, sshKeyPath, sshMode, sshPort, sshUser]);
+
   /** 全局 UI 缩放（P1-4）：改档即时生效 + 持久化。 */
   const onUiScale = useCallback((s: UiScale) => {
     setUiScale(s);
@@ -303,6 +412,22 @@ export function Settings() {
     <main className={styles.page}>
       <h1 className={styles.title}>设置</h1>
       <ul className={styles.list}>
+        <li className={styles.section}>使用模式</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>高级模式（极客调优）</b>
+            <span className={styles.hint}>
+              {advancedMode
+                ? "当前为高级模式：已解锁自建中继 SSH 一键部署、EasyTier 组网、FEC 纠错与方案实验室（144Hz/200Mbps 调优）。"
+                : "当前为简洁模式（默认）：只保留日常高频设置，隐藏底层网络与实验室参数；高手可随时开启高级模式。"}
+            </span>
+          </span>
+          <Switch
+            checked={advancedMode}
+            onChange={onToggleAdvancedMode}
+            label="高级模式（极客调优）"
+          />
+        </li>
         <li className={styles.section}>外观</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -363,6 +488,8 @@ export function Settings() {
             />
           </li>
         )}
+        {advancedMode && (
+          <>
         <li className={styles.section}>网络</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -421,6 +548,104 @@ export function Settings() {
               onClick={() => void onSaveRelay()}
             >
               保存
+            </button>
+          </span>
+        </li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>SSH 一键部署自建中转服务器</b>
+            <span className={styles.hint}>
+              填入 Linux 服务器 SSH 信息（建议提前配好免密密钥或指定私钥文件），点击一键上传并部署
+              systemd 守护 + 防火墙放行，成功后自动回填上方中继地址。
+            </span>
+            {sshError !== null && (
+              <span className={styles.hintError} role="alert">
+                {sshError}
+              </span>
+            )}
+            {sshResult !== null && (
+              <span className={sshResult.ok ? styles.hint : styles.hintError}>
+                {sshResult.summary}
+              </span>
+            )}
+            {sshResult !== null && sshResult.log.trim().length > 0 && (
+              <pre
+                style={{
+                  margin: "6px 0 0",
+                  padding: "8px",
+                  maxHeight: "140px",
+                  overflow: "auto",
+                  fontSize: "11px",
+                  background: "rgba(0,0,0,0.25)",
+                  borderRadius: "6px",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {sshResult.log}
+              </pre>
+            )}
+          </span>
+          <span className={styles.relayEdit} style={{ flexWrap: "wrap", gap: "6px" }}>
+            <input
+              className={styles.relayInput}
+              value={sshHost}
+              placeholder="服务器 IP（如 1.2.3.4）"
+              spellCheck={false}
+              aria-label="SSH 服务器地址"
+              onChange={(e) => setSshHost(e.currentTarget.value)}
+            />
+            <input
+              className={styles.relayInput}
+              style={{ width: "72px" }}
+              value={sshPort}
+              placeholder="22"
+              spellCheck={false}
+              aria-label="SSH 端口"
+              onChange={(e) => setSshPort(e.currentTarget.value)}
+            />
+            <input
+              className={styles.relayInput}
+              style={{ width: "84px" }}
+              value={sshUser}
+              placeholder="root"
+              spellCheck={false}
+              aria-label="SSH 用户名"
+              onChange={(e) => setSshUser(e.currentTarget.value)}
+            />
+            <input
+              className={styles.relayInput}
+              value={sshKeyPath}
+              placeholder="私钥路径（可选，留空用默认 ~/.ssh）"
+              spellCheck={false}
+              aria-label="SSH 私钥路径"
+              onChange={(e) => setSshKeyPath(e.currentTarget.value)}
+            />
+            <select
+              className={styles.select}
+              value={sshMode}
+              aria-label="中继部署模式"
+              onChange={(e) => setSshMode(e.currentTarget.value as "udp" | "docker")}
+            >
+              <option value="udp">原生 UDP（延迟最低）</option>
+              <option value="docker">Docker + 自动 HTTPS</option>
+            </select>
+            {sshMode === "docker" && (
+              <input
+                className={styles.relayInput}
+                value={sshDomain}
+                placeholder="域名（如 relay.example.com）"
+                spellCheck={false}
+                aria-label="中继域名"
+                onChange={(e) => setSshDomain(e.currentTarget.value)}
+              />
+            )}
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={sshBusy || sshHost.trim().length === 0}
+              onClick={() => void onDeployRelaySsh()}
+            >
+              {sshBusy ? "部署中…" : "一键上传并部署"}
             </button>
           </span>
         </li>
@@ -621,6 +846,52 @@ export function Settings() {
             </li>
           </>
         )}
+          </>
+        )}
+        <li className={styles.section}>版本与授权</li>
+        <li className={styles.row}>
+          <span className={styles.label}>
+            <b>
+              {license?.plan === "pro"
+                ? `专业版（Pro）${license.name ? ` · ${license.name}` : ""}`
+                : "免费版（Free）"}
+            </b>
+            <span className={styles.hint}>
+              {license?.plan === "pro"
+                ? `已解锁全部专业能力，支持最多 ${license.devicesMax} 台受信任设备。`
+                : `永久免费使用全部核心功能（限 ${license?.devicesMax ?? 2} 台受信任设备、1 路并发连接）。粘贴授权码即可一键升级专业版，无需手动找配置目录。`}
+              {licenseMsg !== null && ` · ${licenseMsg}`}
+            </span>
+            {licenseError !== null && (
+              <span className={styles.hintError} role="alert">
+                {licenseError}
+              </span>
+            )}
+          </span>
+          <span className={styles.relayEdit}>
+            <input
+              className={styles.relayInput}
+              value={licenseInput}
+              placeholder="粘贴 RD1. 开头的授权码"
+              spellCheck={false}
+              aria-label="授权码"
+              aria-invalid={licenseError !== null}
+              onChange={(e) => {
+                setLicenseInput(e.currentTarget.value);
+                setLicenseError(null);
+                setLicenseMsg(null);
+              }}
+            />
+            <button
+              type="button"
+              className={styles.stepBtn}
+              disabled={licenseBusy || licenseInput.trim().length === 0}
+              onClick={() => void onActivateLicense()}
+            >
+              {licenseBusy ? "激活中…" : "激活"}
+            </button>
+          </span>
+        </li>
         <li className={styles.section}>应用更新</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -669,6 +940,8 @@ export function Settings() {
             </button>
           </span>
         </li>
+        {advancedMode && (
+          <>
         <li className={styles.section}>崩溃报告</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -701,6 +974,8 @@ export function Settings() {
             </button>
           </span>
         </li>
+          </>
+        )}
         <li className={styles.section}>终端与常用语</li>
         <li className={styles.row}>
           <span className={styles.label}>
@@ -777,6 +1052,22 @@ export function Settings() {
             </span>
           </span>
         </li>
+        {advancedMode && (
+          <>
+            <li className={styles.section}>高级与调试</li>
+            <li className={styles.row}>
+              <span className={styles.label}>
+                <b>方案实验室（开发者工具）</b>
+                <span className={styles.hint}>
+                  链路选路、拥塞控制、弱网模拟、144Hz 高刷压测与 1:1 像素微距检视台
+                </span>
+              </span>
+              <a className={styles.stepBtn} href="#/lab">
+                打开实验室
+              </a>
+            </li>
+          </>
+        )}
       </ul>
     </main>
   );

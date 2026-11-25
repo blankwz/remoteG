@@ -7,9 +7,11 @@
 //! - `devices.json`：设备地址/名称等自有信息（`[{id, name, addr, fingerprint_hex, added_at}]`）。
 
 use std::path::Path;
+#[cfg(any(windows, target_os = "macos"))]
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(any(windows, target_os = "macos"))]
 use rd_agent::session::AgentState;
 use rd_proto::v0::{Codec, PairRequest, PairResult, envelope};
 use rd_security::TrustStore;
@@ -194,6 +196,10 @@ pub struct HelloAckDto {
 pub struct DecodeCapsDto {
     pub h264_baseline_420: bool,
     pub h264_high_444: bool,
+    #[serde(default)]
+    pub hevc: bool,
+    #[serde(default)]
+    pub av1: bool,
 }
 
 impl From<DecodeCapsDto> for DecodeCaps {
@@ -201,6 +207,8 @@ impl From<DecodeCapsDto> for DecodeCaps {
         Self {
             h264_420: dto.h264_baseline_420,
             h264_444: dto.h264_high_444,
+            hevc: dto.hevc,
+            av1: dto.av1,
         }
     }
 }
@@ -850,11 +858,12 @@ pub struct PeerBriefDto {
     pub since_secs: u64,
 }
 
-/// 被控端状态快照（融合版：agent core 与控制端同进程）。
+/// 被控端状态快照（融合版：Windows/macOS 下 agent core 与控制端同进程；移动端返回纯控制端提示）。
+#[cfg(any(windows, target_os = "macos"))]
 #[tauri::command]
-pub fn host_status(state: tauri::State<'_, Arc<AgentState>>) -> HostStatusDto {
+pub fn host_status(state: tauri::State<'_, Arc<AgentState>>) -> Result<HostStatusDto, String> {
     use std::sync::atomic::Ordering;
-    HostStatusDto {
+    Ok(HostStatusDto {
         listen_addrs: state
             .listen_addrs
             .lock()
@@ -877,10 +886,17 @@ pub fn host_status(state: tauri::State<'_, Arc<AgentState>>) -> HostStatusDto {
             })
             .collect(),
         paused: state.paused.load(Ordering::SeqCst),
-    }
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[tauri::command]
+pub fn host_status() -> Result<HostStatusDto, String> {
+    Err("当前平台仅作为控制端运行（本机被控服务支持 Windows / macOS）".into())
 }
 
 /// 暂停/恢复本机被控共享（UX 安全出口：设备页「切断」按钮；与托盘 ID_PAUSE 同语义）。
+#[cfg(any(windows, target_os = "macos"))]
 #[tauri::command]
 pub fn set_host_paused(
     paused: bool,
@@ -901,16 +917,23 @@ pub fn set_host_paused(
     Ok(())
 }
 
-/// 生成 6 位配对码并返回建议地址（UI 弹卡展示；5 分钟内有效、一次性）。
+#[cfg(not(any(windows, target_os = "macos")))]
 #[tauri::command]
-pub fn generate_pair_code(state: tauri::State<'_, Arc<AgentState>>) -> PairCodeDto {
+pub fn set_host_paused(_paused: bool) -> Result<(), String> {
+    Err("当前平台仅作为控制端运行".into())
+}
+
+/// 生成 6 位配对码并返回建议地址（UI 弹卡展示；5 分钟内有效、一次性）。
+#[cfg(any(windows, target_os = "macos"))]
+#[tauri::command]
+pub fn generate_pair_code(state: tauri::State<'_, Arc<AgentState>>) -> Result<PairCodeDto, String> {
     use std::sync::atomic::Ordering;
     let code = {
         let mut pairing = state.pairing.lock().expect("pairing 锁中毒");
         pairing.new_code()
     };
     tracing::info!("UI 生成新配对码(5 分钟内有效)");
-    PairCodeDto {
+    Ok(PairCodeDto {
         code,
         addrs: state
             .listen_addrs
@@ -921,7 +944,13 @@ pub fn generate_pair_code(state: tauri::State<'_, Arc<AgentState>>) -> PairCodeD
             .map(|a| a.to_string())
             .collect(),
         paused: state.paused.load(Ordering::SeqCst),
-    }
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[tauri::command]
+pub fn generate_pair_code() -> Result<PairCodeDto, String> {
+    Err("当前平台仅作为控制端运行，无本机配对码".into())
 }
 
 /// 配对码 + 建议地址。
@@ -982,6 +1011,58 @@ pub fn tailscale_ping(ip: String) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(text.trim_end().to_string())
+}
+
+/// 授权状态快照（设置页「版本与授权」展示用）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseStatusDto {
+    /// "pro" | "free"
+    pub plan: String,
+    pub name: String,
+    pub devices_max: u32,
+}
+
+fn license_dto_from(lic: Option<rd_security::License>) -> LicenseStatusDto {
+    match lic {
+        Some(l) if l.plan == rd_security::Plan::Pro => LicenseStatusDto {
+            plan: "pro".into(),
+            name: l.name,
+            devices_max: l.devices_max,
+        },
+        _ => LicenseStatusDto {
+            plan: "free".into(),
+            name: String::new(),
+            devices_max: rd_security::FREE_DEVICE_MAX,
+        },
+    }
+}
+
+/// 读取当前授权状态（`<app_config_dir>/license.key`）。
+#[tauri::command]
+pub fn get_license_status() -> LicenseStatusDto {
+    let dir = crate::platform::app_config_dir();
+    license_dto_from(rd_security::load_license(&dir))
+}
+
+/// 粘贴授权码激活专业版：先离线 Ed25519 验签，通过后再落盘 license.key。
+#[tauri::command]
+pub fn activate_license(code: String) -> Result<LicenseStatusDto, String> {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return Err("请先粘贴授权码".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let lic = rd_security::verify_license(trimmed, now).map_err(|e| e.to_string())?;
+    let dir = crate::platform::app_config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败：{e}"))?;
+    let path = dir.join("license.key");
+    std::fs::write(&path, format!("{trimmed}\n")).map_err(|e| format!("保存授权文件失败：{e}"))?;
+    tracing::info!(plan = ?lic.plan, devices_max = lic.devices_max, "已通过设置页激活授权码");
+    Ok(license_dto_from(Some(lic)))
 }
 
 #[cfg(test)]
@@ -1051,26 +1132,40 @@ mod wol_tests {
 /// 读控制端本机剪贴板文本（剪贴板互传「复制到远端」的第一步）。
 #[tauri::command]
 pub async fn local_clipboard_read() -> Result<String, String> {
-    // arboard 非线程安全句柄：每次新建（剪贴板操作低频，开销可忽略）
-    tokio::task::spawn_blocking(|| {
-        arboard::Clipboard::new()
-            .and_then(|mut c| c.get_text())
-            .map_err(|e| format!("读取本机剪贴板失败:{e}"))
-    })
-    .await
-    .map_err(|e| format!("剪贴板任务失败:{e}"))?
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // arboard 非线程安全句柄：每次新建（剪贴板操作低频，开销可忽略）
+        tokio::task::spawn_blocking(|| {
+            arboard::Clipboard::new()
+                .and_then(|mut c| c.get_text())
+                .map_err(|e| format!("读取本机剪贴板失败:{e}"))
+        })
+        .await
+        .map_err(|e| format!("剪贴板任务失败:{e}"))?
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Err("移动端请直接使用系统输入法粘贴".into())
+    }
 }
 
 /// 写控制端本机剪贴板文本（「从远端复制」的最后一步）。
 #[tauri::command]
-pub async fn local_clipboard_write(text: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        arboard::Clipboard::new()
-            .and_then(|mut c| c.set_text(text))
-            .map_err(|e| format!("写入本机剪贴板失败:{e}"))
-    })
-    .await
-    .map_err(|e| format!("剪贴板任务失败:{e}"))?
+pub async fn local_clipboard_write(_text: String) -> Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        tokio::task::spawn_blocking(move || {
+            arboard::Clipboard::new()
+                .and_then(|mut c| c.set_text(_text))
+                .map_err(|e| format!("写入本机剪贴板失败:{e}"))
+        })
+        .await
+        .map_err(|e| format!("剪贴板任务失败:{e}"))?
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Err("移动端请直接使用系统剪贴板".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,23 +1173,28 @@ pub async fn local_clipboard_write(text: String) -> Result<(), String> {
 // Studio（方案测试/跑分对比），不再单独开浏览器/daemon。
 // ---------------------------------------------------------------------------
 
-/// 打开（或聚焦已打开的）方案实验室窗口。
+/// 打开（或聚焦已打开的）原生方案实验室窗口（v0.4 极客台：直接加载 Tauri App `#/lab`）。
 #[tauri::command]
-pub async fn open_studio(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{Manager, WebviewUrl};
-    if let Some(win) = app.get_webview_window("studio") {
-        let _ = win.set_focus();
-        return Ok(());
+pub async fn open_studio(_app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri::{Manager, WebviewUrl};
+        if let Some(win) = _app.get_webview_window("studio") {
+            let _ = win.set_focus();
+            return Ok(());
+        }
+        tauri::WebviewWindowBuilder::new(&_app, "studio", WebviewUrl::App("index.html#/lab".into()))
+            .title("RD Geek Lab · 方案实验室")
+            .inner_size(1280.0, 860.0)
+            .min_inner_size(960.0, 640.0)
+            .build()
+            .map(|_| ())
+            .map_err(|e| format!("打开实验室窗口失败:{e}"))
     }
-    let url: tauri::Url = "http://127.0.0.1:7500"
-        .parse()
-        .map_err(|e| format!("实验室地址解析失败:{e}"))?;
-    tauri::WebviewWindowBuilder::new(&app, "studio", WebviewUrl::External(url))
-        .title("方案实验室 · Switchboard Studio")
-        .inner_size(1150.0, 820.0)
-        .build()
-        .map(|_| ())
-        .map_err(|e| format!("打开实验室窗口失败:{e}"))
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Ok(())
+    }
 }
 
 /// fec 高清链路开关（Studio「方案」落到远程控制的落地开关）：写
@@ -1124,9 +1224,15 @@ pub async fn get_media_fec(state: State<'_, ConnManager>) -> Result<bool, String
 // ---------------------------------------------------------------------------
 
 fn agent_config_file() -> std::path::PathBuf {
-    rd_agent::default_config_dir()
-        .join("app")
-        .join("agent.toml")
+    crate::platform::app_config_dir().join("agent.toml")
+}
+
+/// 跨平台轻量 agent.toml 视图（仅解析控制端关心的 relay_addr 与 [easytier]，不依赖 Windows-only `rd-agent`）。
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct AgentConfigSubset {
+    relay_addr: Option<String>,
+    easytier: EasyTierSettingsDto,
 }
 
 /// 读当前原生中继地址（未配置 = None）。
@@ -1137,7 +1243,7 @@ pub fn get_relay_addr() -> Result<Option<String>, String> {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 agent.toml 失败：{e}"))?;
-    let cfg: rd_agent::Config =
+    let cfg: AgentConfigSubset =
         toml::from_str(&raw).map_err(|e| format!("解析 agent.toml 失败：{e}"))?;
     Ok(cfg.relay_addr)
 }
@@ -1181,6 +1287,7 @@ pub fn set_relay_addr(relay: String) -> Result<(), String> {
 
 /// EasyTier 设置 DTO（前端往返；secret 原文回传，本机文件本就含它）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EasyTierSettingsDto {
     pub enabled: bool,
     pub binary_path: String,
@@ -1245,7 +1352,7 @@ pub fn set_easytier(settings: EasyTierSettingsDto) -> Result<(), String> {
             return Err("启用 EasyTier 必须填 easytier-core 路径".into());
         }
         for f in &settings.forwards {
-            if rd_agent::easytier::parse_forward_rule(f).is_none() {
+            if crate::platform::parse_forward_rule(f).is_none() {
                 return Err(format!(
                     "转发规则格式错误：{f}（应为 \"对端虚拟IP:端口@本地端口\"，如 10.126.126.3:21118@21130）"
                 ));
@@ -1313,11 +1420,11 @@ pub fn easytier_forward_addrs() -> Vec<std::net::SocketAddr> {
     if !cfg.easytier.enabled {
         return Vec::new();
     }
-    rd_agent::easytier::forward_bind_addrs(&cfg.easytier)
+    crate::platform::forward_bind_addrs(&cfg.easytier.forwards)
 }
 
 /// 读 agent.toml（缺文件 = None；解析失败 = None，降级）。
-fn read_agent_config() -> Option<rd_agent::Config> {
+fn read_agent_config() -> Option<AgentConfigSubset> {
     let path = agent_config_file();
     let raw = std::fs::read_to_string(path).ok()?;
     toml::from_str(&raw).ok()

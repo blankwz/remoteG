@@ -627,6 +627,11 @@ async fn dispatch_loop(ctx: &Arc<SessionCtx>, rx: &mut ControlRx) -> anyhow::Res
                 &ctx.peer_name,
                 crate::vdisplay::set_width(ctx, env.req_id, m).await,
             ),
+            // 方案实验室在线毫秒级热调（v0.4）：请求-应答（echo）
+            envelope::Msg::LabTuning(m) => handle_soft(
+                &ctx.peer_name,
+                window_session::apply_lab_tuning(ctx, env.req_id, m).await,
+            ),
             // 隐私屏（T-028 F9，Pro）：机器级黑罩；断开自动解除
             envelope::Msg::SetPrivacy(m) => {
                 handle_soft(&ctx.peer_name, handle_privacy(ctx, env.req_id, m).await)

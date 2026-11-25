@@ -6,8 +6,10 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  AV1_CODEC,
   H264_CODEC_420,
   H264_CODEC_444,
+  HEVC_CODEC,
   VIDEO_HEADER_LEN,
   H264Decoder,
   codecStringFor,
@@ -109,9 +111,13 @@ describe("codecStringFor", () => {
     expect(codecStringFor("H264_420")).toBe("avc1.42E033");
   });
 
+  it("maps HEVC_444 and AV1 to 4K@144Hz WebCodecs codec strings", () => {
+    expect(codecStringFor("HEVC_444")).toBe(HEVC_CODEC);
+    expect(codecStringFor("AV1")).toBe(AV1_CODEC);
+  });
+
   it("falls back to 420 for unknown / unsupported / empty ack codecs", () => {
-    // ack_to_dto 的其他可能取值与未来扩展均回退默认解码路径
-    for (const codec of ["HEVC_444", "AV1", "unknown(99)", "", "h264_444"]) {
+    for (const codec of ["unknown(99)", "", "h264_444"]) {
       expect(codecStringFor(codec)).toBe(H264_CODEC_420);
     }
   });
