@@ -105,6 +105,13 @@ pub fn start(
 ) -> anyhow::Result<AgentRuntime> {
     #[cfg(target_os = "macos")]
     rd_mac::permissions::log_permission_status();
+    // 后台预热硬件编码能力探测（OnceLock 缓存），避免首个控制端握手 Hello 时同步阻塞数秒
+    let _ = std::thread::Builder::new()
+        .name("rd-encode-probe".into())
+        .spawn(|| {
+            let _ = rd_encode::caps::probe_encode_caps();
+        });
+
     let config = config::Config::load(config_dir)?;
     // 本机优先检测（D-013 包5）：幂等（线程已起则空转）
     host_activity::init();

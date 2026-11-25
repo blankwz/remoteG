@@ -90,10 +90,6 @@ const VIEWPORT_DEBOUNCE_MS = 150;
 const RECONNECT_BACKOFF_MS = 800;
 /** 重连退避上限（D-013 包2：睡眠唤醒/Agent 重启场景持续重试直到恢复）。 */
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
-/** 后台标签恢复后的等帧窗口（P0-3）：超时未见新帧则重开会话兜底。FEC 模式
- * Agent 每 120 帧（≈2s）出兜底 IDR，窗口内必然恢复；Stream 模式编码器无周期
- * IDR，静态画面可能长期不来 keyframe——重开（open 首帧强制 IDR）保证恢复。 */
-const RESUME_FRAME_TIMEOUT_MS = 4000;
 
 /** 隐藏的键盘捕获 textarea（任务卡步骤 5）：1px 透明，不参与指针命中。 */
 const CAPTURE_STYLE: CSSProperties = {
@@ -472,20 +468,14 @@ export function WindowGroupView({
     return () => window.clearTimeout(t);
   }, [rootStats, active, deviceName]);
 
-  /** active 的同步镜像：register 必须保持引用稳定（WindowSurface 注册
-   * effect 依赖它，变化会重建解码器），新注册的处理面据此继承暂停态。 */
-  const activeRef = useRef(active);
-  useEffect(() => {
-    activeRef.current = active;
-  });
-
   /** 处理面注册表（子组件挂载注册、卸载注销）；条目只能经 registerSurface 增删。
-   * 注册时按当前 active 标注暂停态（P0-3：隐藏标签注册即降流）。 */
+   * 保持解码器常热（不暂停丢帧）：Stream 模式编码器无周期 IDR，若切签暂停丢帧会
+   * 破坏参考链导致切回后必须等待超时并整路重连；保持解码器常热可实现 0ms 秒切。 */
   const register = useCallback((id: string, handle: SurfaceHandle | null) => {
     registerSurface(
       surfacesRef.current,
       id,
-      handle === null ? null : { ...handle, paused: !activeRef.current },
+      handle === null ? null : { ...handle, paused: false },
     );
   }, []);
 
@@ -498,60 +488,6 @@ export function WindowGroupView({
     [windowId],
   );
 
-  // ---- 后台标签降流（P0-3）----
-  // 非激活标签的组内全部处理面入口丢帧（视频不解码、瓦片不绘制）——曾 N 标签
-  // = N 路全速率收流解码。Agent 侧仍按连接推流（协议无 per-window 暂停指令，
-  // 带宽不变），省的是控制端逐标签解码/绘制的 CPU/GPU。协议跟进项：增加
-  // per-window pause/IDR 请求消息后把降流推到 Agent 侧，带宽同步节省。
-  useEffect(() => {
-    const pausedNext = !active;
-    const prev = surfacesRef.current;
-    let dirty = false;
-    const next = new Map<string, SurfaceHandle>();
-    for (const [id, handle] of prev) {
-      if (handle.paused === pausedNext) {
-        next.set(id, handle);
-        continue;
-      }
-      dirty = true;
-      if (!pausedNext) {
-        // 恢复：跳帧期间参考链已断，重置为等下个 keyframe 续播
-        handle.decoder?.resetForKeyframe();
-      }
-      next.set(id, { ...handle, paused: pausedNext });
-    }
-    if (dirty) {
-      surfacesRef.current = next;
-    }
-  }, [active]);
-
-  // 恢复兜底：切回标签后解码器等 keyframe，RESUME_FRAME_TIMEOUT_MS 内未见
-  // 新帧（rootStats 引用变化 = 有解码输出）说明编码器没有出新 IDR（Stream
-  // 模式静态画面），重开会话——open 首帧强制 IDR，画面必然恢复。
-  const resumeAwaitingRef = useRef(false);
-  const prevActiveRef = useRef(active);
-  useEffect(() => {
-    const resumed = active && !prevActiveRef.current;
-    prevActiveRef.current = active;
-    if (!resumed) {
-      return undefined;
-    }
-    resumeAwaitingRef.current = true;
-    const timer = window.setTimeout(() => {
-      if (resumeAwaitingRef.current) {
-        setEpoch((n) => n + 1);
-      }
-    }, RESUME_FRAME_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
-  }, [active]);
-  const statsSeenRef = useRef<DecodeStats | null>(null);
-  useEffect(() => {
-    if (rootStats !== statsSeenRef.current) {
-      statsSeenRef.current = rootStats;
-      resumeAwaitingRef.current = false;
-    }
-  }, [rootStats]);
-
   // ---- 输入映射（T-022 挂载）----
 
   const groupRef = useRef<HTMLDivElement>(null);
@@ -563,9 +499,11 @@ export function WindowGroupView({
   useEffect(() => {
     deviceIdRef.current = deviceId;
   }, [deviceId]);
-  /** 根窗口视频物理尺寸（坐标映射基准；无帧时不发送）。 */
+  /** 根窗口视频物理尺寸（坐标映射基准；未出首帧 stats 时回退 open_window ack 尺寸）。 */
   const rootStatsRef = useRef(rootStats);
   rootStatsRef.current = rootStats;
+  const ackRef = useRef(snapshot.ack);
+  ackRef.current = snapshot.ack;
 
   /** 吞掉发送错误：输入丢失不弹错，断连由会话层遮罩与重连兜底。 */
   const sendInput = useCallback((p: Promise<void>) => {
@@ -661,7 +599,7 @@ export function WindowGroupView({
     [flushTouch],
   );
 
-  /** 组容器 CSS 坐标 → 根窗口物理像素（无容器/无帧返回 null：不发送）。 */
+  /** 组容器 CSS 坐标 → 根窗口物理像素（无容器或尺寸未知返回 null）。 */
   const toPhys = useCallback((clientX: number, clientY: number) => {
     const el = groupRef.current;
     if (el === null) {
@@ -669,13 +607,10 @@ export function WindowGroupView({
     }
     const rect = el.getBoundingClientRect();
     const rs = rootStatsRef.current;
-    if (
-      rect.width <= 0 ||
-      rect.height <= 0 ||
-      rs === null ||
-      rs.width <= 0 ||
-      rs.height <= 0
-    ) {
+    const ack = ackRef.current;
+    const physW = rs !== null && rs.width > 0 ? rs.width : (ack?.w ?? 0);
+    const physH = rs !== null && rs.height > 0 ? rs.height : (ack?.h ?? 0);
+    if (rect.width <= 0 || rect.height <= 0 || physW <= 0 || physH <= 0) {
       return null;
     }
     return mapGroupPoint(
@@ -683,8 +618,8 @@ export function WindowGroupView({
       clientY - rect.top,
       rect.width,
       rect.height,
-      rs.width,
-      rs.height,
+      physW,
+      physH,
     );
   }, []);
 
@@ -692,10 +627,13 @@ export function WindowGroupView({
   const hitAt = useCallback(
     (p: { x: number; y: number }) => {
       const rs = rootStatsRef.current;
-      if (rs === null) {
+      const ack = ackRef.current;
+      const physW = rs !== null && rs.width > 0 ? rs.width : (ack?.w ?? 0);
+      const physH = rs !== null && rs.height > 0 ? rs.height : (ack?.h ?? 0);
+      if (physW <= 0 || physH <= 0) {
         return null;
       }
-      return hitWindow(p.x, p.y, windowId, rs.width, rs.height, snapshot.children);
+      return hitWindow(p.x, p.y, windowId, physW, physH, snapshot.children);
     },
     [windowId, snapshot.children],
   );
@@ -754,7 +692,14 @@ export function WindowGroupView({
     if (phase !== "open" || viewOnly) {
       return;
     }
+    // macOS WKWebView 下先 preventDefault 再 focus 隐藏 textarea，避免默认点击行为吞掉焦点
+    e.preventDefault();
     textareaRef.current?.focus({ preventScroll: true });
+    queueMicrotask(() => {
+      if (document.activeElement !== textareaRef.current) {
+        textareaRef.current?.focus({ preventScroll: true });
+      }
+    });
     const p = toPhys(e.clientX, e.clientY);
     if (p !== null) {
       // 触控手势路径（改造项 C）：钉住命中窗口，原始事件交控制端翻译；

@@ -65,8 +65,8 @@ fn probe_once() -> Vec<Codec> {
     #[cfg(all(windows, feature = "ffmpeg"))]
     let (has_444, has_hevc, has_av1) = (
         probe_444_any_hw(),
-        probe_nv12_any_hw(crate::h264_ffmpeg::HEVC_HW_CANDIDATES),
-        probe_nv12_any_hw(crate::h264_ffmpeg::AV1_HW_CANDIDATES),
+        probe_nv12_codec(Codec::Hevc444),
+        probe_nv12_codec(Codec::Av1),
     );
     #[cfg(not(all(windows, feature = "ffmpeg")))]
     let (has_444, has_hevc, has_av1) = (false, false, false);
@@ -85,9 +85,10 @@ fn probe_once() -> Vec<Codec> {
     caps
 }
 
-/// 探测指定硬编候选列表（HEVC / AV1）能否以 NV12 正常编码 1 帧。
+/// 探测指定硬编族（HEVC / AV1）能否以 NV12 正常打开（`create_for_codec` 内部已按序遍历候选，
+/// 仅需调用一次，避免外层再循环导致 O(N²) 重复初始化拖慢首连）。
 #[cfg(all(windows, feature = "ffmpeg"))]
-fn probe_nv12_any_hw(candidates: &[&str]) -> bool {
+fn probe_nv12_codec(codec: Codec) -> bool {
     let probe_cfg = crate::EncoderConfig {
         width: PROBE_W,
         height: PROBE_H,
@@ -96,16 +97,9 @@ fn probe_nv12_any_hw(candidates: &[&str]) -> bool {
         prefer_hw: true,
         pixel_format: crate::PixelFormat::Yuv420,
     };
-    for &name in candidates {
-        let codec = if name.starts_with("av1") {
-            Codec::Av1
-        } else {
-            Codec::Hevc444
-        };
-        if crate::h264_ffmpeg::FfmpegEncoder::create_for_codec(&probe_cfg, codec).is_ok() {
-            tracing::info!("硬编 {codec:?} 可用（候选 {name}）");
-            return true;
-        }
+    if crate::h264_ffmpeg::FfmpegEncoder::create_for_codec(&probe_cfg, codec).is_ok() {
+        tracing::info!("硬编 {codec:?} 可用");
+        return true;
     }
     false
 }

@@ -1232,7 +1232,7 @@ function WindowTabButton({
       title={title}
       closeLabel={`关闭 ${title}`}
       active={active}
-      pausedHint={!active}
+      pausedHint={false}
       onSelect={onSelect}
       onClose={onClose}
     />

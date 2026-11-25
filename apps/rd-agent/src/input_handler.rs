@@ -201,7 +201,8 @@ unsafe fn integrity_rid(token: windows::Win32::Foundation::HANDLE) -> Option<u32
     }
 }
 
-/// 鼠标点击:仅限已打开窗口;按下前置前(见模块注释);只看不控窗口丢弃。
+/// 鼠标点击:仅限已打开窗口;按下前置前(若系统前台锁拒绝仍直接注入点击,
+/// 由 Windows 原生点击激活目标窗口,避免静默吞点击导致彻底失控);只看不控窗口丢弃。
 fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
     if !ctx.windows.is_open(m.window_id) {
         tracing::warn!(
@@ -219,14 +220,15 @@ fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    // 只在按下时置前;抬起不要求(否则窗口中途失焦会吞掉抬起,造成卡键)
-    if m.down && !ensure_fg(m.window_id) {
-        tracing::warn!(
-            name = %ctx.peer_name,
-            window_id = m.window_id,
-            "丢弃鼠标按下:置前失败"
-        );
-        return Ok(());
+    if m.down {
+        record_active_window(ctx, m.window_id);
+        if !ensure_fg(m.window_id) {
+            tracing::warn!(
+                name = %ctx.peer_name,
+                window_id = m.window_id,
+                "置前未确认成功，仍直接注入鼠标按下以激活目标窗口"
+            );
+        }
     }
     ctx.state
         .injector
@@ -297,12 +299,15 @@ fn continuous_scroll(ctx: &SessionCtx, m: &ContinuousScroll) -> anyhow::Result<(
 }
 
 /// 键盘:无 window_id,以前台窗口为准,且前台必须属于本会话已打开窗口
-/// (只看不控窗口丢弃)。修饰键由控制端作为独立 KeyEvent 扫描码事件下发,
-/// `modifiers` 位图仅作信息参考,不在此换算。
+/// (只看不控窗口丢弃)。若当前前台暂未切到目标窗口,尝试将最近点击的已打开窗口
+/// 置前一次,减少跨平台操控时“点了但打不了字”的挫败感。
 fn key_event(ctx: &SessionCtx, m: &KeyEvent) -> anyhow::Result<()> {
     if foreground_view_only(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口为只看不控");
         return Ok(());
+    }
+    if !foreground_open(ctx) {
+        try_focus_last_active(ctx);
     }
     if !foreground_open(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃按键:前台窗口不属于本会话");
@@ -321,6 +326,9 @@ fn text_input(ctx: &SessionCtx, m: &TextInput) -> anyhow::Result<()> {
     if foreground_view_only(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口为只看不控");
         return Ok(());
+    }
+    if !foreground_open(ctx) {
+        try_focus_last_active(ctx);
     }
     if !foreground_open(ctx) {
         tracing::debug!(name = %ctx.peer_name, "丢弃文本:前台窗口不属于本会话");
@@ -438,6 +446,31 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!("注入鼠标移动失败: {err:#}"))
 }
 
+/// 每连接最近交互（点击）的窗口 id：键盘/文本到达时若前台尚未切回，
+/// 可尝试置前该窗口，避免 Windows 前台锁导致打字无响应。
+static LAST_ACTIVE_WIN: LazyLock<Mutex<HashMap<usize, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn record_active_window(ctx: &SessionCtx, window_id: u64) {
+    let conn_key = Arc::as_ptr(&ctx.conn) as usize;
+    if let Ok(mut map) = LAST_ACTIVE_WIN.lock() {
+        map.insert(conn_key, window_id);
+    }
+}
+
+fn try_focus_last_active(ctx: &SessionCtx) {
+    let conn_key = Arc::as_ptr(&ctx.conn) as usize;
+    let last = LAST_ACTIVE_WIN
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&conn_key).copied());
+    if let Some(wid) = last {
+        if ctx.windows.is_open(wid) && !ctx.windows.is_view_only(wid) {
+            let _ = ensure_fg(wid);
+        }
+    }
+}
+
 /// 会话断开:抬起全部已按下键/鼠标键,防目标窗口卡键(DoD),并清除本连接
 /// 的 datagram seq 记录(重连后控制端 seq 重新计数,旧记录会导致全丢弃)。
 pub fn on_disconnect(ctx: &SessionCtx) {
@@ -446,10 +479,11 @@ pub fn on_disconnect(ctx: &SessionCtx) {
         .lock()
         .expect("injector 锁中毒")
         .release_all();
-    LAST_SEQ
-        .lock()
-        .expect("LAST_SEQ 锁中毒")
-        .remove(&(Arc::as_ptr(&ctx.conn) as usize));
+    let conn_key = Arc::as_ptr(&ctx.conn) as usize;
+    LAST_SEQ.lock().expect("LAST_SEQ 锁中毒").remove(&conn_key);
+    if let Ok(mut map) = LAST_ACTIVE_WIN.lock() {
+        map.remove(&conn_key);
+    }
     tracing::debug!(name = %ctx.peer_name, "输入断开清理:已抬起全部按下状态");
 }
 

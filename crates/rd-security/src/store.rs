@@ -17,16 +17,28 @@ use rd_transport::Identity;
 /// 身份文件名（Agent 用 `%LOCALAPPDATA%\rd\`，控制端由调用方传入 app data dir）。
 const IDENTITY_FILE: &str = "identity.bin";
 
-/// 加载已持久化的身份；不存在则生成新身份并加密落盘。
+/// 加载已持久化的身份；不存在（或旧版 macOS 钥匙串条目因未签名 ACL 无法读取）
+/// 则自动生成新身份并落盘，避免应用启动崩溃。
 pub fn load_or_create_identity(dir: &Path, name: &str) -> anyhow::Result<Identity> {
     fs::create_dir_all(dir).with_context(|| format!("创建身份目录失败：{}", dir.display()))?;
     let path = dir.join(IDENTITY_FILE);
 
     if path.exists() {
-        let blob =
-            fs::read(&path).with_context(|| format!("读取身份文件失败：{}", path.display()))?;
-        let plain = platform::unseal(&blob, dir).context("解密身份文件失败")?;
-        return parse_identity(&plain).context("identity.bin 内容无效");
+        match fs::read(&path)
+            .with_context(|| format!("读取身份文件失败：{}", path.display()))
+            .and_then(|blob| platform::unseal(&blob, dir).context("解密身份文件失败"))
+            .and_then(|plain| parse_identity(&plain).context("identity.bin 内容无效"))
+        {
+            Ok(identity) => return Ok(identity),
+            Err(err) => {
+                // 常见于 macOS 未签名版本升级/二次打开时钥匙串 ACL 拒绝，或旧文件损坏；
+                // 重新生成并覆盖写入，保证应用可正常启动，不 panic 闪退。
+                tracing::warn!(
+                    path = %path.display(),
+                    "现有身份文件无法加载（将自动重新生成）: {err:#}"
+                );
+            }
+        }
     }
 
     let identity = Identity::generate(name).context("生成身份失败")?;
@@ -142,35 +154,33 @@ mod platform {
     }
 }
 
-/// macOS：钥匙串（keyring crate），`identity.bin` 只存无敏感信息的标记。
+/// macOS：直接落盘到 `identity.bin`（权限收紧为 0600，仅当前用户可读写，
+/// 与 `~/.ssh/id_ed25519` 一致）。
+///
+/// 不再强依赖 macOS Keychain：未公证/ad-hoc 签名的 `.app` 在第二次打开或升级后
+/// Keychain 会因代码签名 ACL 不一致返回 `errSecAuthFailed`，导致二次启动直接闪退。
+/// 若检测到旧版 `rd-keyring-v1` 标记文件，则兼容尝试从钥匙串迁移读取。
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
 
     const KEYRING_SERVICE: &str = "rd.identity";
-    const MARKER: &[u8] = b"rd-keyring-v1";
+    const LEGACY_MARKER: &[u8] = b"rd-keyring-v1";
 
-    fn keyring_entry(dir: &Path) -> anyhow::Result<keyring::Entry> {
-        keyring::Entry::new(KEYRING_SERVICE, &dir.to_string_lossy())
-            .context("打开 macOS 钥匙串条目失败")
+    pub fn seal(plain: &[u8], _dir: &Path) -> anyhow::Result<Vec<u8>> {
+        Ok(plain.to_vec())
     }
 
-    pub fn seal(plain: &[u8], dir: &Path) -> anyhow::Result<Vec<u8>> {
-        keyring_entry(dir)?
-            .set_password(&hex_encode(plain))
-            .context("写入 macOS 钥匙串失败")?;
-        Ok(MARKER.to_vec())
-    }
-
-    pub fn unseal(_blob: &[u8], dir: &Path) -> anyhow::Result<Vec<u8>> {
-        let hex = keyring_entry(dir)?
-            .get_password()
-            .context("读取 macOS 钥匙串失败")?;
-        hex_decode(&hex)
-    }
-
-    fn hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    pub fn unseal(blob: &[u8], dir: &Path) -> anyhow::Result<Vec<u8>> {
+        if blob == LEGACY_MARKER {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &dir.to_string_lossy())
+                .context("打开旧版 macOS 钥匙串条目失败")?;
+            let hex = entry
+                .get_password()
+                .context("读取旧版 macOS 钥匙串失败（将自动重建身份）")?;
+            return hex_decode(&hex);
+        }
+        Ok(blob.to_vec())
     }
 
     fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
