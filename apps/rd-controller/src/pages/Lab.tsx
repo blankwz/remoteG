@@ -37,6 +37,8 @@ import {
 } from "../api/lab";
 import { isTauriRuntime } from "../api/bridge";
 import {
+  connectDevice,
+  editDevice,
   getRelayAddr,
   listDevices,
   probeDevice,
@@ -468,7 +470,21 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [newPlanMode, setNewPlanMode] = useState<RealTestPlanDto["mode"]>("direct");
   const [newPlanAddr, setNewPlanAddr] = useState("");
   const [newPlanRelay, setNewPlanRelay] = useState("");
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
   const [showAddPlan, setShowAddPlan] = useState(false);
+
+  // 每个目标「已确定生效」的默认方案 ID（持久化）
+  const [confirmedPlanByTarget, setConfirmedPlanByTarget] = useState<Record<string, string>>(() => {
+    try {
+      const raw = window.localStorage.getItem("rd.labConfirmedPlans");
+      if (raw) return JSON.parse(raw) as Record<string, string>;
+    } catch {
+      // ignore
+    }
+    return {};
+  });
+  const [applyingPlanId, setApplyingPlanId] = useState<string | null>(null);
+  const [connectingTarget, setConnectingTarget] = useState(false);
 
   // 真实自动化测速结果（零造假：仅存后端真实探测回包）
   const [realResults, setRealResults] = useState<Record<string, RealPlanProbeResultDto>>({});
@@ -658,23 +674,32 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       }
     }
     const plan: RealTestPlanDto = {
-      planId: `plan-${Date.now().toString(36)}`,
+      planId: editingPlanId ?? `plan-${Date.now().toString(36)}`,
       planName: name,
       mode: newPlanMode,
       targetAddr: addr,
       relayAddr: relay,
       rounds: 3,
     };
-    savePlansForTarget([...activePlans, plan]);
+    if (editingPlanId) {
+      savePlansForTarget(
+        activePlans.map((p) => (p.planId === editingPlanId ? plan : p)),
+      );
+      pushLog("ok", `已修改方案「${plan.planName}」（${plan.mode.toUpperCase()}）`);
+    } else {
+      savePlansForTarget([...activePlans, plan]);
+      pushLog("ok", `已为目标「${effectiveTargetLabel}」新增方案：${plan.planName}（${plan.mode.toUpperCase()}）`);
+    }
     setNewPlanName("");
     setNewPlanAddr("");
     setNewPlanRelay("");
+    setEditingPlanId(null);
     setShowAddPlan(false);
-    pushLog("ok", `已为目标「${effectiveTargetLabel}」绑定新方案：${plan.planName}（${plan.mode.toUpperCase()}）`);
   }, [
     activePlans,
     baseTargetIp,
     defaultRelayAddr,
+    editingPlanId,
     effectiveTargetLabel,
     newPlanAddr,
     newPlanMode,
@@ -682,7 +707,89 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     newPlanRelay,
     pushLog,
     savePlansForTarget,
+    saveServerPool,
+    serverPool,
   ]);
+
+  const handleStartEditPlan = useCallback((plan: RealTestPlanDto) => {
+    setEditingPlanId(plan.planId);
+    setNewPlanName(plan.planName);
+    setNewPlanMode(plan.mode);
+    setNewPlanAddr(plan.targetAddr);
+    setNewPlanRelay(plan.relayAddr);
+    setShowAddPlan(true);
+  }, []);
+
+  const confirmedPlanId = confirmedPlanByTarget[targetKey] ?? null;
+
+  // 确定方案：设为当前目标的生效默认方案，并同步写入设备地址/中转与底层选路策略
+  const handleConfirmPlan = useCallback(
+    async (plan: RealTestPlanDto) => {
+      setApplyingPlanId(plan.planId);
+      const nextConfirmed = { ...confirmedPlanByTarget, [targetKey]: plan.planId };
+      setConfirmedPlanByTarget(nextConfirmed);
+      try {
+        window.localStorage.setItem("rd.labConfirmedPlans", JSON.stringify(nextConfirmed));
+      } catch {
+        // ignore
+      }
+      try {
+        const routeMode =
+          plan.mode === "relay"
+            ? "relay"
+            : plan.mode === "punch"
+              ? "punch"
+              : plan.mode === "easytier"
+                ? "easytier"
+                : "direct";
+        if (selectedDevice) {
+          const nextAddr = plan.targetAddr.trim() || selectedDevice.addr;
+          const nextRelay =
+            plan.mode === "relay" || plan.mode === "punch"
+              ? plan.relayAddr.trim() || ""
+              : selectedDevice.relay || "";
+          await editDevice(selectedDevice.id, selectedDevice.name, nextAddr, nextRelay);
+        }
+        await labApplyTransport(selectedDevice?.id ?? null, {
+          ...transport,
+          routeMode,
+        });
+        showToast(`✅ 已确定方案「${plan.planName}」并同步生效`);
+        pushLog(
+          "ok",
+          `✅ 已确定「${plan.planName}」为「${effectiveTargetLabel}」的默认连接方案（模式=${plan.mode.toUpperCase()}）`,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        showToast(`已标记生效，同步提示：${msg}`);
+        pushLog("warn", `确定方案「${plan.planName}」同步底层时提示：${msg}`);
+      } finally {
+        setApplyingPlanId(null);
+      }
+    },
+    [confirmedPlanByTarget, effectiveTargetLabel, pushLog, selectedDevice, showToast, targetKey, transport],
+  );
+
+  // 用当前确定的方案一键直连目标桌面
+  const handleConnectWithConfirmed = useCallback(async () => {
+    if (!selectedDevice) {
+      showToast("请先在左侧选择一台已配对设备，或去设备页添加该 IP 后连接");
+      return;
+    }
+    setConnectingTarget(true);
+    try {
+      if (!selectedDevice.online) {
+        await connectDevice(selectedDevice.id);
+      }
+      window.location.hash = `#/session/${selectedDevice.id}?open=18446462598732840960`;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(`连接失败：${msg}`);
+      pushLog("warn", `连接 ${selectedDevice.name} 失败：${msg}`);
+    } finally {
+      setConnectingTarget(false);
+    }
+  }, [pushLog, selectedDevice, showToast]);
 
   const handleDeleteTargetPlan = useCallback(
     (planId: string) => {
@@ -1086,51 +1193,29 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
       className={drawer ? styles.labDrawer : styles.labPage}
       aria-label="方案实验室极客操控台"
     >
-      {/* ── 顶部操控栏：目标指示 + Profile 固化 + Panic Reset ── */}
+      {/* ── 顶部操控栏：简洁清晰的 4 步指引（旧编码预设下拉框已移入底部高级区，避免与连接方案冲突） ── */}
       <header className={styles.topBar}>
         <div className={styles.titleGroup}>
-          <span className={styles.labBadge}>RD GEEK LAB v0.4</span>
+          <span className={styles.labBadge}>RD LAB</span>
           <h1 className={styles.labTitle}>方案实验室 · 真栈操控台</h1>
           <span className={styles.targetPill}>
-            <span className={isOnline ? styles.dotOnline : styles.dotSandbox} />
-            {isOnline
-              ? `在线接管: ${live?.activeDeviceId} (${live?.activeAddr ?? ""})`
-              : "本机真栈沙盒 (1:1 标尺 → 真 H.264/QOI → 真 QUIC/FEC)"}
+            <span className={isOnline || selectedDevice?.online ? styles.dotOnline : styles.dotSandbox} />
+            1. 选目标 → 2. 新增/修改方案 → 3. 自动实测 → 4. 确定使用
           </span>
         </div>
 
         <div className={styles.actionGroup}>
-          <select
-            className={styles.select}
-            aria-label="加载预设方案 Profile"
-            value={selectedProfileId}
-            onChange={(e) => void handleSelectProfile(e.target.value)}
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-
-          <button
-            type="button"
-            className={`${styles.btn} ${styles.btnPrimary}`}
-            onClick={() => void handleLockProfile()}
-            title="将当前四组旋钮参数保存并锁定为当前设备默认连接方案"
-          >
-            ⚡ 锁定为默认方案
-          </button>
-
-          <button
-            type="button"
-            className={`${styles.btn} ${styles.btnPanic}`}
-            onClick={() => void handlePanicReset()}
-            title="一键清空弱网注入并恢复出厂自适应码控与自动选路"
-          >
-            ↺ Panic Reset
-          </button>
-
+          {selectedDevice && (
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnPrimary}`}
+              disabled={connectingTarget}
+              onClick={() => void handleConnectWithConfirmed()}
+              title="用当前已确定的连接方案直接打开该设备完整桌面"
+            >
+              {connectingTarget ? "连接中…" : `🖥️ 连接 ${selectedDevice.name}`}
+            </button>
+          )}
           {drawer && onClose && (
             <button type="button" className={styles.btn} onClick={onClose}>
               收起抽屉 (Esc)
@@ -1317,7 +1402,17 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
               className={`${styles.btn} ${styles.btnPrimary}`}
               onClick={handleAddTargetPlan}
             >
-              保存绑定
+              {editingPlanId ? "保存修改" : "保存绑定"}
+            </button>
+            <button
+              type="button"
+              className={styles.btn}
+              onClick={() => {
+                setShowAddPlan(false);
+                setEditingPlanId(null);
+              }}
+            >
+              取消
             </button>
           </div>
         )}
@@ -1519,7 +1614,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           >
             <div style={{ fontSize: "12px", fontWeight: 600 }}>💻 控制端（本机）</div>
             <div style={{ fontSize: "11px", opacity: 0.78, marginTop: "2px" }}>
-              发起真实多轮探测（3 轮 / 方案）
+              真实多轮探测（3 轮）
             </div>
           </div>
 
@@ -1582,6 +1677,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           {activePlans.map((plan) => {
             const res = realResults[plan.planId];
             const isBest = bestRealPlanId === plan.planId;
+            const isConfirmed = confirmedPlanId === plan.planId;
             const isRunning = testingPlanId === plan.planId;
             return (
               <div
@@ -1589,14 +1685,18 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                 style={{
                   padding: "12px",
                   borderRadius: "10px",
-                  border: isBest
-                    ? "1px solid rgba(63, 185, 80, 0.65)"
-                    : isRunning
-                      ? "1px solid rgba(88, 166, 255, 0.7)"
-                      : "1px solid rgba(255, 255, 255, 0.1)",
-                  background: isBest
-                    ? "rgba(63, 185, 80, 0.07)"
-                    : "rgba(0, 0, 0, 0.22)",
+                  border: isConfirmed
+                    ? "1px solid rgba(88, 166, 255, 0.75)"
+                    : isBest
+                      ? "1px solid rgba(63, 185, 80, 0.65)"
+                      : isRunning
+                        ? "1px solid rgba(88, 166, 255, 0.7)"
+                        : "1px solid rgba(255, 255, 255, 0.1)",
+                  background: isConfirmed
+                    ? "rgba(88, 166, 255, 0.08)"
+                    : isBest
+                      ? "rgba(63, 185, 80, 0.07)"
+                      : "rgba(0, 0, 0, 0.22)",
                   display: "flex",
                   flexDirection: "column",
                   gap: "6px",
@@ -1607,16 +1707,32 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                     {isBest ? "🏆 " : ""}
                     {plan.planName}
                   </strong>
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "rgba(255, 255, 255, 0.08)",
-                    }}
-                  >
-                    {plan.mode.toUpperCase()}
-                  </span>
+                  <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+                    {isConfirmed && (
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          padding: "2px 6px",
+                          borderRadius: "999px",
+                          background: "rgba(63, 185, 80, 0.2)",
+                          color: "#3fb950",
+                          fontWeight: 600,
+                        }}
+                      >
+                        ★ 当前生效
+                      </span>
+                    )}
+                    <span
+                      style={{
+                        fontSize: "11px",
+                        padding: "2px 6px",
+                        borderRadius: "999px",
+                        background: "rgba(255, 255, 255, 0.08)",
+                      }}
+                    >
+                      {plan.mode.toUpperCase()}
+                    </span>
+                  </div>
                 </div>
                 <div style={{ fontSize: "12px", opacity: 0.78, fontFamily: "monospace" }}>
                   {plan.mode === "relay" || plan.mode === "punch"
@@ -1643,15 +1759,36 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                     <span style={{ opacity: 0.55 }}>尚未实测（点击下方「单测」或顶部一键实测）</span>
                   )}
                 </div>
-                <div style={{ display: "flex", gap: "6px", marginTop: "auto" }}>
+                <div style={{ display: "flex", gap: "6px", marginTop: "auto", flexWrap: "wrap" }}>
                   <button
                     type="button"
                     className={styles.btn}
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
                     disabled={runningRealBatch || testingPlanId !== null}
                     onClick={() => void runSinglePlanReal(plan)}
                   >
-                    {isRunning ? "实测中…" : "单测此方案"}
+                    {isRunning ? "实测中…" : "单测"}
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.btn} ${isConfirmed ? "" : styles.btnPrimary}`}
+                    style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                    disabled={applyingPlanId === plan.planId}
+                    onClick={() => void handleConfirmPlan(plan)}
+                  >
+                    {applyingPlanId === plan.planId
+                      ? "应用中…"
+                      : isConfirmed
+                        ? "✓ 已生效"
+                        : "确定使用"}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    disabled={runningRealBatch || testingPlanId !== null}
+                    onClick={() => handleStartEditPlan(plan)}
+                  >
+                    编辑
                   </button>
                   {activePlans.length > 1 && (
                     <button
@@ -1746,6 +1883,54 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
 
       {advancedOpen && (
         <>
+      {/* ── 高级编码/FEC 预设条（仅极客底层调优使用，与上方连接方案独立） ── */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "8px",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 12px",
+          marginBottom: "10px",
+          borderRadius: "8px",
+          background: "rgba(255, 255, 255, 0.03)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+        }}
+      >
+        <span style={{ fontSize: "12px", opacity: 0.85 }}>
+          🎛️ 底层编码/FEC 预设模板（仅控制码率/帧率/FEC 旋钮）：
+        </span>
+        <div className={styles.actionGroup}>
+          <select
+            className={styles.select}
+            aria-label="加载底层编码预设模板"
+            value={selectedProfileId}
+            onChange={(e) => void handleSelectProfile(e.target.value)}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={styles.btn}
+            onClick={() => void handleLockProfile()}
+          >
+            保存为编码模板
+          </button>
+          <button
+            type="button"
+            className={`${styles.btn} ${styles.btnPanic}`}
+            onClick={() => void handlePanicReset()}
+          >
+            ↺ Panic Reset
+          </button>
+        </div>
+      </div>
+
       {/* ── 实时链路解剖拓扑条 (Live Pipeline Anatomy) ── */}
       <div className={styles.anatomyBar} role="status" aria-label="实时链路拓扑解剖">
         <div className={styles.stageBox}>
