@@ -450,10 +450,10 @@ export function Settings() {
           {[
             { id: "sec-general", label: "⚙️ 常规与外观" },
             { id: "sec-security", label: "🛡️ 安全与密码" },
-            { id: "sec-network", label: "🌐 网络与中转" },
             { id: "sec-display", label: "🖥️ 显示与画质" },
-            { id: "sec-control", label: "⌨️ 键鼠与终端" },
+            { id: "sec-network", label: "🌐 网络与中转" },
             { id: "sec-about", label: "ℹ️ 授权与关于" },
+            { id: "sec-control", label: "⌨️ 键鼠与终端" },
           ].map((item) => (
             <button
               key={item.id}
