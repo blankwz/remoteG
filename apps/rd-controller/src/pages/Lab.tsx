@@ -540,6 +540,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
   const [batchNodeKind, setBatchNodeKind] = useState<"auto" | "stun" | "easytier" | "relay">("auto");
   const [batchNodeText, setBatchNodeText] = useState("");
   const [probingPool, setProbingPool] = useState(false);
+  const [probingNodeId, setProbingNodeId] = useState<string | null>(null);
   const [smartDiscovering, setSmartDiscovering] = useState(false);
   const [smartHint, setSmartHint] = useState<{
     level: "ok" | "suggest" | "warn";
@@ -1043,6 +1044,45 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
     setProbingPool(false);
   }, [poolFilter, pushLog, saveServerPool, serverPool]);
 
+  // 点击单个节点右上角延迟：立刻单独测速并刷新最新延迟与公网映射
+  const handleProbeSingleNode = useCallback(
+    async (node: RelayNodeItem) => {
+      if (probingNodeId || probingPool) return;
+      const kind = inferNodeKind(node);
+      setProbingNodeId(node.id);
+      try {
+        const res = await labProbeNode(kind, node.addr);
+        const updated = serverPool.map((n) =>
+          n.id === node.id
+            ? {
+                ...n,
+                kind,
+                lastRttMs: res.rttMs,
+                mappedAddr: res.mappedAddr,
+                status: res.ok ? ("ok" as const) : ("fail" as const),
+              }
+            : n,
+        );
+        saveServerPool(sortServerPool(updated));
+        pushLog(
+          res.ok ? "ok" : "warn",
+          `[${kind.toUpperCase()} · ${node.name}] ${res.ok ? `✓ ${res.detail}` : `✗ ${res.detail}`}`,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        saveServerPool(
+          serverPool.map((n) =>
+            n.id === node.id ? { ...n, kind, lastRttMs: null, status: "fail" as const } : n,
+          ),
+        );
+        pushLog("warn", `[${node.name}] 单点测速异常：${msg}`);
+      } finally {
+        setProbingNodeId(null);
+      }
+    },
+    [probingNodeId, probingPool, pushLog, saveServerPool, serverPool],
+  );
+
   const handleBatchAddNodes = useCallback(() => {
     const lines = batchNodeText
       .split(/\r?\n/)
@@ -1532,7 +1572,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
           <h1 className={styles.labTitle}>方案实验室 · 真栈操控台</h1>
           <span className={styles.targetPill}>
             <span className={isOnline || selectedDevice?.online ? styles.dotOnline : styles.dotSandbox} />
-            1. 选目标 → 2. 新增/修改方案 → 3. 自动实测 → 4. 确定使用
+            1. 选目标 → 2. 新增/修改方案 → 3. 自动实测 → 4. 切换使用
           </span>
         </div>
 
@@ -1675,7 +1715,7 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                   className={`${styles.btn} ${styles.btnPrimary}`}
                   onClick={() => void handleConfirmPlan(smartHint.boundPlan!)}
                 >
-                  确定使用该方案
+                  切换使用
                 </button>
               )}
               <button
@@ -2068,22 +2108,38 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                           <span style={{ fontSize: "10px", padding: "1px 5px", borderRadius: "4px", background: "rgba(255,255,255,0.08)" }}>
                             {kindLabel}
                           </span>
-                          <strong
+                          <button
+                            type="button"
+                            title="点击单独测速并刷新延迟"
+                            aria-label={`测速刷新 ${node.name} 延迟`}
+                            disabled={probingPool || probingNodeId === node.id}
+                            onClick={() => void handleProbeSingleNode(node)}
                             style={{
+                              cursor: probingPool || probingNodeId === node.id ? "wait" : "pointer",
+                              background: "rgba(255, 255, 255, 0.06)",
+                              border: "1px solid rgba(255, 255, 255, 0.14)",
+                              borderRadius: "4px",
+                              padding: "1px 6px",
+                              fontWeight: 700,
+                              fontSize: "11.5px",
                               color:
-                                node.status === "ok"
-                                  ? "#3fb950"
-                                  : node.status === "fail"
-                                    ? "#f85149"
-                                    : "inherit",
+                                probingNodeId === node.id
+                                  ? "#58a6ff"
+                                  : node.status === "ok"
+                                    ? "#3fb950"
+                                    : node.status === "fail"
+                                      ? "#f85149"
+                                      : "inherit",
                             }}
                           >
-                            {node.lastRttMs !== null
-                              ? `${node.lastRttMs}ms`
-                              : node.status === "fail"
-                                ? "超时"
-                                : "未测"}
-                          </strong>
+                            {probingNodeId === node.id
+                              ? "⏳…"
+                              : node.lastRttMs !== null
+                                ? `${node.lastRttMs}ms`
+                                : node.status === "fail"
+                                  ? "超时"
+                                  : "测速"}
+                          </button>
                         </div>
                       </div>
                       <code style={{ opacity: 0.78, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2406,10 +2462,10 @@ export function Lab({ deviceId, drawer = false, onClose }: LabProps) {
                     onClick={() => void handleConfirmPlan(plan)}
                   >
                     {applyingPlanId === plan.planId
-                      ? "应用中…"
+                      ? "切换中…"
                       : isConfirmed
-                        ? "✓ 已生效"
-                        : "确定使用"}
+                        ? "✓ 使用中"
+                        : "切换使用"}
                   </button>
                   <button
                     type="button"
