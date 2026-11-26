@@ -50,6 +50,8 @@ const HANDSHAKE_RETRY: Duration = Duration::from_millis(500);
 const PUNCH_WINDOW: Duration = Duration::from_secs(10);
 /// 探测发包间隔（控制端侧，兼作 recv 轮询周期）。
 const PROBE_INTERVAL: Duration = Duration::from_millis(300);
+/// 被控端中继保活周期（< 家宽/运营商 NAT 30s UDP 超时，且远小于中继 60s 会话回收阈值）。
+const AGENT_REG_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// 打洞窗口（测试缩短到 800ms，免得回退路径用例等 10s）。
 #[cfg(test)]
@@ -86,6 +88,152 @@ enum Role {
     Controller,
 }
 
+fn is_public_unicast_v4(v4: std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    let is_rfc1918 =
+        o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168);
+    let is_cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+    let is_benchmark_tun = o[0] == 198 && (o[1] == 18 || o[1] == 19);
+    !v4.is_loopback()
+        && !v4.is_private()
+        && !is_rfc1918
+        && !is_cgnat
+        && !is_benchmark_tun
+        && !v4.is_link_local()
+        && !v4.is_broadcast()
+        && !v4.is_multicast()
+        && !v4.is_unspecified()
+}
+
+/// 若本机开启了 Clash / Mihomo 等虚拟 TUN 网卡（`198.18.0.0/15` 或 `tun`/`meta`/`ninja`），
+/// 且目标为公网 IPv4（如海外自建中继），返回本机物理网卡 IPv4 列表用于直连绕行——
+/// 避免 `0.0.0.0:0` UDP 被代理节点劫持导致 `REG_ACK` 丢包、RTT 翻倍及 P2P 映射地址变成机场出口 IP。
+fn preferred_physical_ipv4s_when_tun_active(remote: SocketAddr) -> Vec<std::net::Ipv4Addr> {
+    let SocketAddr::V4(dst) = remote else {
+        return Vec::new();
+    };
+    if !is_public_unicast_v4(*dst.ip()) {
+        return Vec::new();
+    }
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+
+    let has_proxy_tun = ifaces.iter().any(|iface| {
+        if iface.is_loopback() {
+            return false;
+        }
+        if let std::net::IpAddr::V4(v4) = iface.ip() {
+            let o = v4.octets();
+            if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+                return true;
+            }
+        }
+        let n = iface.name.to_ascii_lowercase();
+        ["ninja", "meta", "clash", "mihomo", "sing-box", "tun"]
+            .iter()
+            .any(|kw| n.contains(kw))
+    });
+    if !has_proxy_tun {
+        return Vec::new();
+    }
+
+    let mut primary = Vec::new();
+    let mut secondary = Vec::new();
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        let std::net::IpAddr::V4(ip) = iface.ip() else {
+            continue;
+        };
+        let o = ip.octets();
+        if (o[0] == 169 && o[1] == 254)
+            || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+            || (o[0] == 100 && (64..=127).contains(&o[1]))
+        {
+            continue;
+        }
+        let n = iface.name.to_ascii_lowercase();
+        let is_virtual = [
+            "tun",
+            "tap",
+            "meta",
+            "ninja",
+            "clash",
+            "mihomo",
+            "tailscale",
+            "wsl",
+            "vethernet",
+            "hyper-v",
+            "vmware",
+            "vbox",
+            "virtual",
+            "docker",
+            "loopback",
+        ]
+        .iter()
+        .any(|kw| n.contains(kw));
+        if is_virtual {
+            continue;
+        }
+        if (o[0] == 192 && o[1] == 168) || o[0] == 10 {
+            if !primary.contains(&ip) {
+                primary.push(ip);
+            }
+        } else if !secondary.contains(&ip) {
+            secondary.push(ip);
+        }
+    }
+    primary.extend(secondary);
+    primary
+}
+
+/// 绑定面向公网目标（中继或打洞对端）的 UDP socket：若本机存在代理虚拟 TUN 则优先绑定物理网卡 IPv4。
+pub async fn bind_udp_bypassing_tun(remote: SocketAddr) -> std::io::Result<UdpSocket> {
+    for ip in preferred_physical_ipv4s_when_tun_active(remote) {
+        if let Ok(sock) = UdpSocket::bind(SocketAddr::from((ip, 0))).await {
+            return Ok(sock);
+        }
+    }
+    let fallback: SocketAddr = if remote.is_ipv6() {
+        "[::]:0".parse().expect("ipv6 unspecified")
+    } else {
+        "0.0.0.0:0".parse().expect("ipv4 unspecified")
+    };
+    UdpSocket::bind(fallback).await
+}
+
+fn build_handshake_msgs(
+    fp: &Fingerprint,
+    id: &Identity,
+    role: Role,
+    candidates: &[SocketAddr],
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    match role {
+        Role::Agent => {
+            use ed25519_dalek::pkcs8::DecodePrivateKey;
+            use ed25519_dalek::Signer;
+            let signing = ed25519_dalek::SigningKey::from_pkcs8_der(&id.key_der)
+                .map_err(|e| anyhow::anyhow!("解析本机身份私钥失败: {e}"))?;
+            let sig = signing
+                .sign(&rd_relay::signed_message(rd_relay::TYPE_REG2, &fp.0))
+                .to_bytes();
+            Ok(vec![
+                encode_reg(&fp.0, candidates),
+                rd_relay::encode_signed_control(
+                    rd_relay::TYPE_REG2,
+                    &fp.0,
+                    &id.cert_der,
+                    &sig,
+                    candidates,
+                ),
+            ])
+        }
+        Role::Controller => Ok(vec![encode_control(rd_relay::TYPE_DIAL, &fp.0)]),
+    }
+}
+
 /// 在 `sock` 上完成 REG/DIAL 握手，返回 (会话 tag, 地址列表)。
 /// 列表仅 Controller 角色且中继支持打洞协调时非空：`[中继处映射地址,
 /// 直连候选...]`。`candidates` 仅 Agent 角色生效（随 REG 上报直连候选）。
@@ -95,6 +243,7 @@ enum Role {
 /// legacy（签名报文被当未知类型静默丢弃）、新中继认签名（legacy 在已建立
 /// 签名会话后被忽略）——应答格式一致，握手侧无需区分被哪种受理。DIAL 只发
 /// legacy（签名 DIAL 语义不成立，见 rd-relay 模块注释「残余风险」）。
+#[cfg(test)]
 async fn relay_handshake(
     sock: &UdpSocket,
     relay: SocketAddr,
@@ -104,28 +253,18 @@ async fn relay_handshake(
     candidates: &[SocketAddr],
     timeout: Duration,
 ) -> anyhow::Result<(u64, Vec<SocketAddr>)> {
-    let msgs = match role {
-        Role::Agent => {
-            use ed25519_dalek::pkcs8::DecodePrivateKey;
-            use ed25519_dalek::Signer;
-            let signing = ed25519_dalek::SigningKey::from_pkcs8_der(&id.key_der)
-                .map_err(|e| anyhow::anyhow!("解析本机身份私钥失败: {e}"))?;
-            let sig = signing
-                .sign(&rd_relay::signed_message(rd_relay::TYPE_REG2, &fp.0))
-                .to_bytes();
-            vec![
-                encode_reg(&fp.0, candidates),
-                rd_relay::encode_signed_control(
-                    rd_relay::TYPE_REG2,
-                    &fp.0,
-                    &id.cert_der,
-                    &sig,
-                    candidates,
-                ),
-            ]
-        }
-        Role::Controller => vec![encode_control(rd_relay::TYPE_DIAL, &fp.0)],
-    };
+    let msgs = build_handshake_msgs(fp, id, role, candidates)?;
+    relay_handshake_with_msgs(sock, relay, fp, role, &msgs, timeout).await
+}
+
+async fn relay_handshake_with_msgs(
+    sock: &UdpSocket,
+    relay: SocketAddr,
+    fp: &Fingerprint,
+    role: Role,
+    msgs: &[Vec<u8>],
+    timeout: Duration,
+) -> anyhow::Result<(u64, Vec<SocketAddr>)> {
     let ack_kind = match role {
         Role::Agent => rd_relay::TYPE_REG_ACK,
         Role::Controller => rd_relay::TYPE_DIAL_ACK,
@@ -143,7 +282,7 @@ async fn relay_handshake(
                 ),
             });
         }
-        for msg in &msgs {
+        for msg in msgs {
             sock.send_to(msg, relay)
                 .await
                 .map_err(|e| anyhow::anyhow!("发送握手包失败: {e}"))?;
@@ -195,6 +334,48 @@ async fn relay_handshake(
     }
 }
 
+/// 绑定 UDP 并完成中继握手：若检测到本机虚拟 TUN 网卡，优先绑定物理网卡 IPv4 直连，失败再自动回退 `0.0.0.0:0`。
+async fn bind_and_relay_handshake(
+    relay: SocketAddr,
+    fp: &Fingerprint,
+    id: &Identity,
+    role: Role,
+    candidates: &[SocketAddr],
+    timeout: Duration,
+) -> anyhow::Result<(UdpSocket, u64, Vec<SocketAddr>, Vec<Vec<u8>>)> {
+    let msgs = build_handshake_msgs(fp, id, role, candidates)?;
+    let started = Instant::now();
+    for ip in preferred_physical_ipv4s_when_tun_active(relay) {
+        if let Ok(sock) = UdpSocket::bind(SocketAddr::from((ip, 0))).await {
+            let fast_try = Duration::from_millis(3200).min(timeout);
+            match relay_handshake_with_msgs(&sock, relay, fp, role, &msgs, fast_try).await {
+                Ok((tag, addrs)) => {
+                    tracing::info!(
+                        local_ip = %ip,
+                        %relay,
+                        "检测到虚拟 TUN 网卡，中继 UDP 已自动绑定物理网卡直连"
+                    );
+                    return Ok((sock, tag, addrs, msgs));
+                }
+                Err(e) => {
+                    tracing::debug!(local_ip = %ip, %relay, err = %e, "物理网卡中继握手未通，回退系统默认路由");
+                }
+            }
+        }
+    }
+    let fallback_bind: SocketAddr = if relay.is_ipv6() {
+        "[::]:0".parse().expect("ipv6 unspecified")
+    } else {
+        "0.0.0.0:0".parse().expect("ipv4 unspecified")
+    };
+    let sock = UdpSocket::bind(fallback_bind).await?;
+    let remain = timeout
+        .saturating_sub(started.elapsed())
+        .max(Duration::from_secs(8));
+    let (tag, addrs) = relay_handshake_with_msgs(&sock, relay, fp, role, &msgs, remain).await?;
+    Ok((sock, tag, addrs, msgs))
+}
+
 /// quinn 的 UDP socket 包装：中继打标链路（原理见模块注释）。
 ///
 /// 收包经内部**泵任务**路由（T-034）：控制报（tag=0，来自中继）→ 打洞事件
@@ -207,18 +388,41 @@ struct RelayUdpSocket {
     relay: SocketAddr,
     /// 泵路由出的本会话数据报（含 8 字节 tag 头，poll_recv 就地剥头）。
     data_rx: Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    /// 持有保活停止信号：socket 随 Server/Conn 释放时自动停止后台 15s REG 保活任务。
+    _keepalive_stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl RelayUdpSocket {
-    /// 组装 socket 并启动收包泵。`punch_tx` 为 Some 时（agent 侧），来自中继
-    /// 的 PUNCH_NOTIFY 携带的控制端地址被路由到该通道。
+    /// 组装 socket 并启动收包泵（及可选的被控端周期 REG 保活）。
+    /// `punch_tx` 为 Some 时（agent 侧），来自中继的 PUNCH_NOTIFY 携带的控制端地址被路由到该通道。
     fn new(
         inner: Arc<tokio::net::UdpSocket>,
         tag: u64,
         relay: SocketAddr,
         punch_tx: Option<mpsc::UnboundedSender<SocketAddr>>,
+        keepalive_msgs: Option<Vec<Vec<u8>>>,
     ) -> Self {
         let (data_tx, data_rx) = mpsc::unbounded_channel();
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+
+        if let Some(msgs) = keepalive_msgs {
+            let weak_sock = Arc::downgrade(&inner);
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(AGENT_REG_KEEPALIVE) => {}
+                        _ = stop_rx.changed() => break,
+                    }
+                    let Some(sock) = weak_sock.upgrade() else {
+                        break;
+                    };
+                    for msg in &msgs {
+                        let _ = sock.send_to(msg, relay).await;
+                    }
+                }
+            });
+        }
+
         {
             let inner = Arc::clone(&inner);
             let events = punch_tx;
@@ -227,6 +431,9 @@ impl RelayUdpSocket {
                 loop {
                     let (n, from) = match inner.recv_from(&mut buf).await {
                         Ok(x) => x,
+                        // Windows Winsock UDP 默认开启 SIO_UDP_CONNRESET：收到瞬时 ICMP 不可达会报 10054，
+                        // 必须忽略继续收包，否则会导致被控端中继收包泵永久退出失联。
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
                         Err(_) => break, // socket 关闭 → 泵退出
                     };
                     if n < 8 {
@@ -268,6 +475,7 @@ impl RelayUdpSocket {
             tag,
             relay,
             data_rx: Mutex::new(data_rx),
+            _keepalive_stop: stop_tx,
         }
     }
 
@@ -390,9 +598,7 @@ pub async fn connect_via_relay_punch(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<(ConnPath, Conn)> {
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let (tag, agent_addrs) = relay_handshake(
-        &sock,
+    let (sock, tag, agent_addrs, _) = bind_and_relay_handshake(
         relay,
         &target_fp,
         id,
@@ -401,17 +607,22 @@ pub async fn connect_via_relay_punch(
         HANDSHAKE_TIMEOUT,
     )
     .await?;
+    let direct_addrs = if punch_enabled() {
+        agent_addrs
+    } else {
+        Vec::new()
+    };
     tracing::info!(
         %relay,
         tag,
-        candidates = agent_addrs.len(),
+        candidates = direct_addrs.len(),
         "中继握手完成（DIAL），开始多路竞速"
     );
 
     // 路 A：中继打标转发（sock 已完成握手，直接交给虚拟 socket）
     let relay_fut = connect_relay_session(sock, tag, relay, id, expected);
-    // 路 B：全部直连路竞速（反射打洞 + 候选直连；空列表 = 旧中继 → 立即失败）
-    let direct_fut = connect_direct_racing(relay, agent_addrs, id, expected);
+    // 路 B：全部直连路竞速（反射打洞 + 候选直连；空列表或 RD_PUNCH=0 → 立即走纯中继）
+    let direct_fut = connect_direct_racing(relay, direct_addrs, id, expected);
 
     tokio::pin!(relay_fut, direct_fut);
     let mut relay_err = None;
@@ -455,7 +666,7 @@ async fn connect_relay_session(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<Conn> {
-    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, None);
+    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, None, None);
     conn::connect_over(socket, relay, id, expected).await
 }
 
@@ -514,7 +725,12 @@ async fn connect_candidate(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<Conn> {
-    let sock = crate::direct::bind_udp_socket("0.0.0.0:0".parse().unwrap()).await?;
+    let bind_any: SocketAddr = if cand.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let sock = crate::direct::bind_udp_socket(bind_any).await?;
     let fut = conn::connect_over(DirectUdpSocket::new(sock), cand, id, expected);
     tokio::time::timeout(punch_window(), fut)
         .await
@@ -530,7 +746,7 @@ async fn punch_direct_connect(
     id: &Identity,
     expected: Option<Fingerprint>,
 ) -> anyhow::Result<Conn> {
-    let sock = crate::direct::bind_udp_socket("0.0.0.0:0".parse().unwrap()).await?;
+    let sock = Arc::new(bind_udp_bypassing_tun(agent_relay_addr).await?);
     // 持续向被控端「在中继处的地址」发探测：目的只是让本侧 NAT 对被控端 IP
     // 开洞（地址受限型 NAT 只看对端 IP），使被控端发来的探测包能进来。
     // 被控端不回也无所谓——洞已开，它发的包照进。
@@ -572,9 +788,7 @@ pub async fn bind_via_relay_ex(
     candidates: Vec<SocketAddr>,
 ) -> anyhow::Result<RelayServer> {
     let local_fp = id.fingerprint();
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let (tag, _) = relay_handshake(
-        &sock,
+    let (sock, tag, _, reg_msgs) = bind_and_relay_handshake(
         relay,
         &local_fp,
         id,
@@ -587,10 +801,10 @@ pub async fn bind_via_relay_ex(
         %relay,
         tag,
         candidates = candidates.len(),
-        "中继握手完成（REG），QUIC 监听改走中继"
+        "中继握手完成（REG），QUIC 监听改走中继（已启动 15s 周期保活）"
     );
     let (punch_tx, punch_req) = mpsc::unbounded_channel();
-    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, Some(punch_tx));
+    let socket = RelayUdpSocket::new(Arc::new(sock), tag, relay, Some(punch_tx), Some(reg_msgs));
     let server = crate::conn::Server::bind_over(socket, id)?;
     Ok(RelayServer { server, punch_req })
 }
@@ -865,6 +1079,66 @@ mod tests {
         assert_eq!(conn.peer_fingerprint(), server_fp, "E2E 指纹必须钉扎成功");
         accepter.await??;
         conn.close(0, "fallback e2e done");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn env_live_relay_quic_e2e() -> anyhow::Result<()> {
+        let raw = std::env::var("RD_TEST_LIVE_RELAY").expect("set RD_TEST_LIVE_RELAY");
+        let relay_addr: SocketAddr = raw.parse()?;
+        let server_id = Identity::generate("live-relay-server")?;
+        let client_id = Identity::generate("live-relay-client")?;
+        let server_fp = server_id.fingerprint();
+        let client_fp = client_id.fingerprint();
+
+        let relay_srv = bind_via_relay_ex(relay_addr, &server_id, Vec::new()).await?;
+        let accepter = tokio::spawn(async move {
+            let conn = relay_srv.server.accept().await?;
+            assert_eq!(conn.peer_fingerprint(), client_fp);
+            let (mut tx, mut rx) = conn.accept_control().await?;
+            let Some(env) = rx.recv().await? else {
+                anyhow::bail!("control closed");
+            };
+            let Some(envelope::Msg::Hello(h)) = env.msg else {
+                anyhow::bail!("expected Hello");
+            };
+            tx.send(&rd_proto::v0::Envelope {
+                req_id: env.req_id,
+                msg: Some(envelope::Msg::HelloAck(rd_proto::v0::HelloAck {
+                    proto_ver: 0,
+                    host_name: format!("live-ok-{}", h.device_name),
+                    ..Default::default()
+                })),
+            })
+            .await?;
+            while let Ok(Some(_)) = rx.recv().await {}
+            anyhow::Ok(())
+        });
+
+        let (path, conn) =
+            connect_via_relay_punch(relay_addr, server_fp, &client_id, Some(server_fp)).await?;
+        println!("LIVE RELAY CONNECTED! path={path:?}, rtt={:?}", conn.rtt());
+        let (mut tx, mut rx) = conn.open_control().await?;
+        tx.send(&rd_proto::v0::Envelope {
+            req_id: 42,
+            msg: Some(envelope::Msg::Hello(Hello {
+                proto_ver: 0,
+                device_name: "cloud-test".into(),
+                ..Default::default()
+            })),
+        })
+        .await?;
+        let Some(reply) = rx.recv().await? else {
+            anyhow::bail!("no HelloAck");
+        };
+        let Some(envelope::Msg::HelloAck(ack)) = reply.msg else {
+            anyhow::bail!("unexpected reply");
+        };
+        assert_eq!(ack.host_name, "live-ok-cloud-test");
+        println!("LIVE RELAY HELLO_ACK OK: {}", ack.host_name);
+        conn.close(0, "live e2e ok");
+        accepter.await??;
         Ok(())
     }
 }

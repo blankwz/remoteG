@@ -74,6 +74,12 @@ impl AsyncUdpSocket for DirectUdpSocket {
             let mut rb = tokio::io::ReadBuf::new(&mut bufs[got]);
             let from = match self.inner.poll_recv_from(cx, &mut rb) {
                 Poll::Ready(Ok(addr)) => addr,
+                // Windows Winsock UDP 默认开启 SIO_UDP_CONNRESET：打洞阶段向尚未就绪的对端端口
+                // send_to 收到 ICMP Port Unreachable 后，下一次 recv_from 会报 ConnectionReset(10054)；
+                // 必须忽略并继续读取（直至 Pending 注册 waker），否则 quinn Endpoint 驱动循环会异常中断。
+                Poll::Ready(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    continue;
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => break,
             };

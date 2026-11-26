@@ -117,9 +117,23 @@ pub fn local_ip_addrs() -> Vec<std::net::IpAddr> {
         while !cur.is_null() {
             let a = unsafe { &*cur };
             let up = a.OperStatus == IfOperStatusUp;
-            // 与 mac_addrs 同口径：真实物理网卡（6=以太网 / 71=Wi-Fi）
+            // 与 mac_addrs 同口径：真实物理网卡（6=以太网 / 71=Wi-Fi），并排除 WSL / Hyper-V / VMware 等虚拟交换机
             let physical_kind = matches!(a.IfType, 6 | 71);
-            if !(up && physical_kind) {
+            let friendly_lc = wide_ptr_lowercase(a.FriendlyName.0);
+            let desc_lc = wide_ptr_lowercase(a.Description.0);
+            let is_virtual_switch = [
+                "vethernet",
+                "wsl",
+                "hyper-v",
+                "vmware",
+                "virtualbox",
+                "vbox",
+                "docker",
+                "npcap",
+            ]
+            .iter()
+            .any(|kw| friendly_lc.contains(kw) || desc_lc.contains(kw));
+            if !(up && physical_kind && !is_virtual_switch) {
                 cur = a.Next;
                 continue;
             }
@@ -176,6 +190,23 @@ pub fn local_ip_addrs() -> Vec<std::net::IpAddr> {
     }
     tracing::warn!("GetAdaptersAddresses 缓冲重试耗尽");
     Vec::new()
+}
+
+#[cfg(windows)]
+fn wide_ptr_lowercase(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while len < 256 {
+        let ch = unsafe { *ptr.add(len) };
+        if ch == 0 {
+            break;
+        }
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    String::from_utf16_lossy(slice).to_ascii_lowercase()
 }
 
 #[cfg(not(windows))]

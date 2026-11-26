@@ -288,3 +288,90 @@ export interface NatDiagnosisDto {
 export function labDiagnoseNat(stunAddrs: string[]): Promise<NatDiagnosisDto> {
   return call("lab_diagnose_nat", { stunAddrs });
 }
+
+export interface P2pHostOpenDto {
+  ok: boolean;
+  token: string;
+  mappedAddr: string;
+  natType: string;
+  natLabel: string;
+  pairCode: string;
+  stunUsed: string;
+  candidates: string[];
+  advice: string;
+}
+
+export interface P2pConnectDeviceSummary {
+  id: string;
+  name: string;
+  addr: string;
+  fingerprintHex: string;
+  addedAt: number;
+  online: boolean;
+  macAddrs: string[];
+  relay: string | null;
+}
+
+export interface P2pConnectResultDto {
+  ok: boolean;
+  needReversePunch: boolean;
+  needPairCode: boolean;
+  reverseCode: string;
+  device: P2pConnectDeviceSummary | null;
+  routeTag: string;
+  detail: string;
+  ctrlNatType?: string;
+  hostNatType?: string;
+  txPulses?: number;
+  rxPulses?: number;
+  attemptCount?: number;
+}
+
+export interface P2pPunchStatusDto {
+  active: boolean;
+  reverseCode: string;
+  ctrlNatType: string;
+  txPulses: number;
+  rxPulses: number;
+  punchedPeer: string | null;
+}
+
+export interface MeshPeerItemDto {
+  source: string;
+  name: string;
+  addr: string;
+  latencyMs: number | null;
+  cost: string;
+}
+
+export function labP2pHostOpen(stunAddr?: string): Promise<P2pHostOpenDto> {
+  return call("lab_p2p_host_open", { stunAddr: stunAddr?.trim() || null });
+}
+
+export function labP2pHostPunchPeer(peerReceipt: string): Promise<string> {
+  return call("lab_p2p_host_punch_peer", { peerReceipt: peerReceipt.trim() });
+}
+
+export function labP2pConnectToken(
+  tokenOrAddr: string,
+  code?: string,
+  stunAddr?: string,
+): Promise<P2pConnectResultDto> {
+  return call("lab_p2p_connect_token", {
+    tokenOrAddr: tokenOrAddr.trim(),
+    code: code?.trim() || null,
+    stunAddr: stunAddr?.trim() || null,
+  });
+}
+
+export function labP2pCheckStatus(): Promise<P2pPunchStatusDto> {
+  return call("lab_p2p_check_status", {});
+}
+
+export function labExportDiagnosticLog(): Promise<string> {
+  return call("lab_export_diagnostic_log", {});
+}
+
+export function labScanMeshPeers(): Promise<MeshPeerItemDto[]> {
+  return call("lab_scan_mesh_peers", {});
+}

@@ -209,14 +209,22 @@ pub fn run() {
             commands::lab::lab_fetch_public_nodes,
             commands::lab::lab_probe_node,
             commands::lab::lab_diagnose_nat,
-            // 方案 B：EasyTier 一键组网口令 & 在线成员探测
+            commands::lab::lab_p2p_host_open,
+            commands::lab::lab_p2p_host_punch_peer,
+            commands::lab::lab_p2p_connect_token,
+            commands::lab::lab_p2p_check_status,
+            commands::lab::lab_export_diagnostic_log,
+            commands::lab::lab_scan_mesh_peers,
+            // 方案 B：EasyTier 一键组网口令 & 在线成员探测 & 任意方案一键配对直连
             commands::devices::easytier_detect_status,
             commands::devices::easytier_generate_invite,
             commands::devices::easytier_join_invite,
             commands::devices::easytier_auto_install,
-            // 方案 A：自建中转 9 位 ID 码状态与在线探测
+            commands::devices::lab_connect_direct_or_mesh,
+            // 方案 A：自建中转 9 位 ID 码状态、在线探测与一键直连
             commands::devices::relay_id_status,
             commands::devices::relay_resolve_id,
+            commands::devices::connect_by_relay_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

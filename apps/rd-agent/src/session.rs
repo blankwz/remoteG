@@ -898,10 +898,12 @@ mod tests {
             caps.contains(&(rd_proto::v0::Codec::H264420 as i32)),
             "H264420(软编兜底)必须始终上报,实际 {caps:?}"
         );
-        // 444 有无不依赖测试环境:只断言内容合法(仅两个已知 codec、无重复)。
+        // 444 / HEVC / AV1 有无依本机硬编探测结果：只断言内容均为已探测协议枚举值且无未知值。
         let known = [
             rd_proto::v0::Codec::H264420 as i32,
             rd_proto::v0::Codec::H264444 as i32,
+            rd_proto::v0::Codec::Hevc444 as i32,
+            rd_proto::v0::Codec::Av1 as i32,
         ];
         assert!(
             caps.iter().all(|c| known.contains(c)),

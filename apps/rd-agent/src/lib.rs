@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -157,6 +157,7 @@ pub fn start(
         Err(e) => {
             tracing::warn!(err = %e, "EasyTier 托管启动失败（降级：仅直连/中继路径）");
             easytier::EasyTierHost {
+                enabled: false,
                 virtual_ip: Arc::new(Mutex::new(None)),
             }
         }
@@ -191,66 +192,24 @@ pub fn start(
             server::serve_all(state, servers).await;
         });
     }
+    if cli_listen.is_none() {
+        server::spawn_dynamic_interface_watcher(Arc::clone(&state));
+    }
     {
         // UDP 局域网发现应答（21119）：失败仅降级（不影响 QUIC 服务）
         let state = Arc::clone(&state);
         tokio::spawn(async move { discover::serve(state).await });
     }
     {
-        // 原生中继（T-032）：配置了 relay_addr / RD_RELAY 才启用。异步注册
-        // （agent.toml relay_addr = "1.2.3.4:21118"）；失败仅降级——直连
-        // 路径完全不受影响，中继是打洞失败场景的兜底入口
+        // 原生中继（T-032）：注册直连 socket 供启动期与后续 UI 免重启热切换中继时共用打洞响应器
+        register_agent_direct_socks(state.local_fp, direct_socks);
         let relay_raw = std::env::var("RD_RELAY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| state.config.relay_addr.clone());
-        if let Some(raw) = relay_raw {
-            // 打洞响应（T-034）：RD_PUNCH=0 关闭。收到 PUNCH_NOTIFY 后从直连
-            // socket（与 QUIC accept 同端口）向控制端发探测包，帮它开洞直连。
-            let punch_on = rd_transport::relay::punch_enabled();
-            let punch_socks = punch_on.then(|| direct_socks.clone());
-            // 直连候选（T-035）：本机网卡地址 + EasyTier 虚拟 IP + UPnP 外部
-            // 映射，随 REG 上报；EasyTier 未就绪最多等 20s（mesh 收敛慢于
-            // relay 注册，但 relay 本就是兜底路径，不抢直连时效）
-            let listen_port = bound.first().map(|a| a.port()).unwrap_or(21118);
-            let state = Arc::clone(&state);
-            tokio::spawn(async move {
-                let candidates = if punch_on {
-                    let et_ip = easytier_host.wait_ready(Duration::from_secs(20)).await;
-                    if let Some(ip) = et_ip {
-                        tracing::info!(%ip, "EasyTier 虚拟 IP 纳入直连候选");
-                    }
-                    punch_candidates::collect(listen_port, et_ip).await
-                } else {
-                    Vec::new()
-                };
-                match rd_transport::relay::parse_relay_addr(&raw) {
-                    Ok(addr) => {
-                        match rd_transport::relay::bind_via_relay_ex(
-                            addr,
-                            &state.identity,
-                            candidates,
-                        )
-                        .await
-                        {
-                            Ok(relay_server) => {
-                                tracing::info!(%addr, "原生中继监听就绪（跨网兜底入口）");
-                                if let Some(socks) = punch_socks {
-                                    tokio::spawn(rd_transport::relay::punch_respond(
-                                        relay_server.punch_req,
-                                        socks,
-                                    ));
-                                }
-                                server::serve_all(state, vec![relay_server.server]).await;
-                            }
-                            Err(err) => {
-                                tracing::warn!(%addr, "中继注册失败（直连不受影响）: {err:#}")
-                            }
-                        }
-                    }
-                    Err(err) => tracing::warn!("中继地址解析失败（直连不受影响）: {err:#}"),
-                }
-            });
+            .or_else(|| state.config.relay_addr.clone())
+            .filter(|s| !s.trim().is_empty());
+        if relay_raw.is_some() {
+            spawn_relay_with_easytier(Arc::clone(&state), relay_raw, Some(easytier_host));
         }
     }
     {
@@ -272,6 +231,188 @@ pub fn default_config_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "rd")
         .map(|dirs| dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| std::env::temp_dir().join("rd"))
+}
+
+struct AgentRelaySlot {
+    direct_socks: Vec<Arc<tokio::net::UdpSocket>>,
+    cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+fn relay_slots() -> &'static Mutex<HashMap<rd_transport::Fingerprint, AgentRelaySlot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<rd_transport::Fingerprint, AgentRelaySlot>>> =
+        OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_agent_direct_socks(
+    fp: rd_transport::Fingerprint,
+    direct_socks: Vec<Arc<tokio::net::UdpSocket>>,
+) {
+    let mut map = relay_slots().lock().expect("relay_slots 锁中毒");
+    let entry = map.entry(fp).or_insert_with(|| AgentRelaySlot {
+        direct_socks: Vec::new(),
+        cancel_tx: None,
+    });
+    entry.direct_socks = direct_socks;
+}
+
+/// 免重启热切换（或清除）当前被控核心的自建中继监听：
+/// 1. 立即取消旧的中继监听与保活任务；
+/// 2. 若 `raw_relay` 非空，启动带自动重连、15s 周期 REG 保活、虚拟 TUN 自动绕行及 P2P 打洞响应器的守护循环。
+pub fn set_active_relay(state: Arc<AgentState>, raw_relay: Option<String>) {
+    spawn_relay_with_easytier(state, raw_relay, None);
+}
+
+fn spawn_relay_with_easytier(
+    state: Arc<AgentState>,
+    raw_relay: Option<String>,
+    easytier_host: Option<easytier::EasyTierHost>,
+) {
+    let cleaned = raw_relay
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let (direct_socks, cancel_rx) = {
+        let mut map = relay_slots().lock().expect("relay_slots 锁中毒");
+        let slot = map.entry(state.local_fp).or_insert_with(|| AgentRelaySlot {
+            direct_socks: Vec::new(),
+            cancel_tx: None,
+        });
+        if let Some(old_tx) = slot.cancel_tx.take() {
+            let _ = old_tx.send(true);
+        }
+        let Some(_) = &cleaned else {
+            tracing::info!("已清除自建中继配置，停止旧中继监听任务");
+            return;
+        };
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        slot.cancel_tx = Some(tx);
+        (slot.direct_socks.clone(), rx)
+    };
+
+    let raw = cleaned.expect("checked Some");
+    tokio::spawn(async move {
+        let mut cancel_rx = cancel_rx;
+        let mut et_opt = easytier_host;
+        loop {
+            if *cancel_rx.borrow() {
+                break;
+            }
+            let punch_on = rd_transport::relay::punch_enabled();
+            let listen_port = state
+                .listen_addrs
+                .lock()
+                .expect("listen_addrs 锁中毒")
+                .first()
+                .map(|a| a.port())
+                .unwrap_or(21118);
+
+            let candidates = if punch_on {
+                let et_ip = if let Some(et) = et_opt.take() {
+                    et.wait_ready(Duration::from_secs(20)).await
+                } else {
+                    None
+                };
+                if let Some(ip) = et_ip {
+                    tracing::info!(%ip, "EasyTier 虚拟 IP 纳入直连候选");
+                }
+                punch_candidates::collect(listen_port, et_ip).await
+            } else {
+                Vec::new()
+            };
+
+            let stripped = raw
+                .strip_prefix("udp://")
+                .or_else(|| raw.strip_prefix("UDP://"))
+                .unwrap_or(&raw);
+            let is_ws = stripped.starts_with("http://")
+                || stripped.starts_with("https://")
+                || stripped.starts_with("ws://")
+                || stripped.starts_with("wss://");
+
+            if is_ws {
+                match rd_transport::parse_relay_endpoint(stripped) {
+                    Ok(ep) => match rd_transport::bind_via_relay_ep(&ep, &state.identity).await {
+                        Ok(srv) => {
+                            tracing::info!(relay = %raw, "WS/HTTPS 自建中继监听就绪");
+                            let st = Arc::clone(&state);
+                            tokio::select! {
+                                _ = server::serve_all(st, vec![srv]) => {}
+                                _ = cancel_rx.changed() => break,
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(relay = %raw, "WS 中继注册失败，8s 后自动重试: {err:#}");
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(relay = %raw, "中继地址格式无效，停止重试: {err:#}");
+                        break;
+                    }
+                }
+            } else {
+                let resolved_sock = match rd_transport::relay::parse_relay_addr(stripped) {
+                    Ok(s) => Ok(s),
+                    Err(_) => {
+                        let with_port = if stripped.contains(':') {
+                            stripped.to_string()
+                        } else {
+                            format!("{stripped}:21118")
+                        };
+                        tokio::net::lookup_host(&with_port)
+                            .await
+                            .ok()
+                            .and_then(|mut it| it.next())
+                            .ok_or_else(|| anyhow::anyhow!("无法解析中继地址 {with_port}"))
+                    }
+                };
+
+                match resolved_sock {
+                    Ok(addr) => {
+                        match rd_transport::relay::bind_via_relay_ex(
+                            addr,
+                            &state.identity,
+                            candidates,
+                        )
+                        .await
+                        {
+                            Ok(relay_server) => {
+                                tracing::info!(
+                                    %addr,
+                                    "原生中继监听就绪（已启用 15s 保活 + P2P 打洞响应器）"
+                                );
+                                if punch_on && !direct_socks.is_empty() {
+                                    tokio::spawn(rd_transport::relay::punch_respond(
+                                        relay_server.punch_req,
+                                        direct_socks.clone(),
+                                    ));
+                                }
+                                let st = Arc::clone(&state);
+                                tokio::select! {
+                                    _ = server::serve_all(st, vec![relay_server.server]) => {}
+                                    _ = cancel_rx.changed() => break,
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    %addr,
+                                    "中继注册失败（直连不受影响），8s 后自动重试: {err:#}"
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(relay = %raw, "中继域名解析失败，8s 后重试: {err:#}");
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(8)) => {}
+                _ = cancel_rx.changed() => break,
+            }
+        }
+    });
 }
 
 /// (仅 debug 构建)把 AgentPairing 的配对码"摇"成指定值，供端到端测试。

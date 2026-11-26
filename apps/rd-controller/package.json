@@ -4,11 +4,14 @@
   "version": "0.4.6",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:fast-exe": "tauri build --debug --no-bundle",
     "test": "vitest run",
+    "test:watch": "vitest",
+    "test:lab": "vitest run src/pages/Lab.test.tsx",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

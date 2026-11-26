@@ -68,14 +68,73 @@ fn parse_discover_reply(buf: &[u8], peer: std::net::SocketAddr) -> Option<Discov
     })
 }
 
+/// 判定发现条目是否指向本机自身（按来源 IP、本机全网卡地址及内嵌被控核心指纹多重比对，避免在局域网/组网发现列表中出现本机卡片）。
+pub(crate) fn is_self_discovered(
+    dev: &DiscoveredDeviceDto,
+    peer_ip: std::net::IpAddr,
+    local_ips: &std::collections::HashSet<std::net::IpAddr>,
+    local_fp_short: Option<&str>,
+) -> bool {
+    if peer_ip.is_loopback() || local_ips.contains(&peer_ip) {
+        return true;
+    }
+    if let Ok(sock) = dev.addr.parse::<std::net::SocketAddr>()
+        && (sock.ip().is_loopback() || local_ips.contains(&sock.ip()))
+    {
+        return true;
+    }
+    if let Some(fp) = local_fp_short.filter(|s| !s.is_empty())
+        && dev.fingerprint_short_hex.eq_ignore_ascii_case(fp)
+    {
+        return true;
+    }
+    false
+}
+
+/// 收集本机所有网卡 IP 及内嵌 `AgentState` 的监听地址与短指纹。
+pub(crate) fn collect_local_self_identity(
+    app: &AppHandle,
+) -> (std::collections::HashSet<std::net::IpAddr>, Option<String>) {
+    let mut local_ips = std::collections::HashSet::new();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            local_ips.insert(iface.ip());
+        }
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    let local_fp_short = {
+        use tauri::Manager as _;
+        if let Some(st) = app.try_state::<Arc<AgentState>>() {
+            if let Ok(addrs) = st.listen_addrs.lock() {
+                for a in addrs.iter() {
+                    if !a.ip().is_unspecified() {
+                        local_ips.insert(a.ip());
+                    }
+                }
+            }
+            Some(st.local_fp.short_hex().to_string())
+        } else {
+            None
+        }
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let local_fp_short: Option<String> = {
+        let _ = app;
+        None
+    };
+    (local_ips, local_fp_short)
+}
+
 /// 广播发现局域网内的 rd-agent：向受限广播 + 各私网接口定向广播发送探测，
-/// 收集 1.5s 内的应答（发现 ≠ 信任，配对仍需被控端 6 位码）。
+/// 收集 1.5s 内的应答（发现 ≠ 信任，配对仍需被控端 6 位码；自动过滤本机卡片）。
 #[tauri::command]
-pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
+pub async fn discover_devices(app: AppHandle) -> Result<Vec<DiscoveredDeviceDto>, String> {
     use std::collections::{BTreeSet, HashMap};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::net::UdpSocket;
     use tokio::time::{Instant, timeout};
+
+    let (local_ips, local_fp_short) = collect_local_self_identity(&app);
 
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
@@ -107,28 +166,37 @@ pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
     // Tailscale 网段（D-013 包5 用户需求：扫描也要覆盖 tailnet）——广播在
     // 点对点接口无效，改为对本 tailnet 已知节点逐个单播探测（tailscale
     // status --json 的 Peer 列表；未装/未登录时静默跳过）。
-    let ts_out = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok();
-    let peers: Vec<serde_json::Value> = match ts_out {
-        Some(out) => serde_json::from_slice::<serde_json::Value>(&out.stdout)
-            .ok()
-            .and_then(|js| {
-                js.get("Peer")
-                    .and_then(|v| v.as_object())
-                    .map(|o| o.values().cloned().collect())
-            })
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    for peer in &peers {
-        let Some(ips) = peer.get("TailscaleIPs").and_then(|v| v.as_array()) else {
-            continue;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let mut ts_cmd = std::process::Command::new("tailscale");
+        ts_cmd.args(["status", "--json"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            ts_cmd.creation_flags(0x0800_0000);
+        }
+        let ts_out = ts_cmd.output().ok();
+        let peers: Vec<serde_json::Value> = match ts_out {
+            Some(out) => serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                .ok()
+                .and_then(|js| {
+                    js.get("Peer")
+                        .and_then(|v| v.as_object())
+                        .map(|o| o.values().cloned().collect())
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
         };
-        for ip in ips {
-            if let Some(ip) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
-                targets.insert(SocketAddr::new(ip, DISCOVER_PORT));
+        for peer in &peers {
+            let Some(ips) = peer.get("TailscaleIPs").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for ip in ips {
+                if let Some(ip) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok())
+                    && !local_ips.contains(&ip)
+                {
+                    targets.insert(SocketAddr::new(ip, DISCOVER_PORT));
+                }
             }
         }
     }
@@ -147,6 +215,9 @@ pub async fn discover_devices() -> Result<Vec<DiscoveredDeviceDto>, String> {
         match timeout(remain, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, peer))) => {
                 if let Some(dev) = parse_discover_reply(&buf[..n], peer) {
+                    if is_self_discovered(&dev, peer.ip(), &local_ips, local_fp_short.as_deref()) {
+                        continue;
+                    }
                     found.entry(dev.addr.clone()).or_insert(dev);
                 }
             }
@@ -408,27 +479,33 @@ fn describe_handshake_error(e: HandshakeError) -> String {
 }
 
 /// 保存（或更新）设备：devices.json + trusted.json。
-fn save_device(
+pub(crate) fn save_device_with_relay(
     state: &ConnManager,
     fp: Fingerprint,
     addr: &str,
     name: &str,
+    relay: Option<String>,
 ) -> Result<DeviceEntry, String> {
     let fp_hex = fp.hex();
     let mut store = open_store(state)?;
-    let id = store
+    let existing = store
         .list()
-        .iter()
-        .find(|d| d.fingerprint_hex == fp_hex)
+        .into_iter()
+        .find(|d| d.fingerprint_hex == fp_hex);
+    let id = existing
+        .as_ref()
         .map(|d| d.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let final_relay = relay
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| existing.and_then(|d| d.relay));
     let entry = DeviceEntry {
         id,
         name: name.to_string(),
         addr: addr.to_string(),
         fingerprint_hex: fp_hex,
         mac_addrs: Vec::new(),
-        relay: None,
+        relay: final_relay,
         added_at: unix_now(),
     };
     store.upsert(entry.clone()).map_err(|e| format!("{e:#}"))?;
@@ -437,6 +514,15 @@ fn save_device(
         .add(fp, name)
         .map_err(|e| format!("写入信任列表失败：{e:#}"))?;
     Ok(entry)
+}
+
+fn save_device(
+    state: &ConnManager,
+    fp: Fingerprint,
+    addr: &str,
+    name: &str,
+) -> Result<DeviceEntry, String> {
+    save_device_with_relay(state, fp, addr, name, None)
 }
 
 /// 发送一条 PairRequest 并解析 PairResult 回复。
@@ -482,6 +568,112 @@ async fn run_pairing(
         PairAction::Done => save_device(state, conn.peer_fingerprint(), addr, name),
         PairAction::Send(_) => Err("对端要求继续配对（协议错误）".into()),
         PairAction::Fail(msg) => Err(msg),
+    }
+}
+
+/// 在已建立的 `DeviceConn` 上自动完成 Hello 鉴权或 6 位码 SPAKE2 配对，成功后写入设备表并登记为在线连接。
+/// 返回 `Ok((Some(DeviceDto), need_pair_code=false))` 表示可直接进入远程桌面；
+/// 返回 `Ok((None, need_pair_code=true))` 表示已连通对端但需要用户输入 6 位配对码。
+pub(crate) async fn auth_or_pair_established(
+    conn: std::sync::Arc<DeviceConn>,
+    code: &str,
+    addr_for_store: &str,
+    name_hint: &str,
+    relay_for_store: Option<String>,
+    app: &AppHandle,
+    state: &ConnManager,
+) -> Result<(Option<DeviceDto>, bool), String> {
+    let trimmed_code = code.trim();
+    let display_name = if name_hint.trim().is_empty() {
+        addr_for_store
+            .split(':')
+            .next()
+            .unwrap_or("远程设备")
+            .to_string()
+    } else {
+        name_hint.trim().to_string()
+    };
+
+    match conn.handshake(state.decode_caps()).await {
+        Ok(ack) => {
+            let final_name = if name_hint.trim().is_empty() && !ack.host_name.trim().is_empty() {
+                ack.host_name.trim().to_string()
+            } else {
+                display_name
+            };
+            let entry = save_device_with_relay(
+                state,
+                conn.peer_fingerprint(),
+                addr_for_store,
+                &final_name,
+                relay_for_store,
+            )?;
+            let macs = split_macs(&ack.mac_addrs);
+            if !macs.is_empty()
+                && let Ok(mut store) = open_store(state)
+            {
+                let _ = store.set_mac_addrs(&entry.fingerprint_hex, macs);
+            }
+            state.put_device(entry.id.clone(), conn, app.clone());
+            return Ok((Some(to_dto(&entry, true)), false));
+        }
+        Err(HandshakeError::Unauthenticated { .. }) => {
+            if trimmed_code.is_empty() {
+                conn.close(0, "need pair code");
+                return Ok((None, true));
+            }
+            if trimmed_code.len() != CODE_LEN || !trimmed_code.bytes().all(|b| b.is_ascii_digit()) {
+                conn.close(0, "invalid code");
+                return Err("配对码必须是被控端显示的 6 位数字".into());
+            }
+        }
+        Err(e) => {
+            conn.close(0, "handshake error");
+            return Err(describe_handshake_error(e));
+        }
+    }
+
+    // 同一连接内直接跑完两步 SPAKE2 配对（session.rs 在配对成功后已直接转入 dispatch_loop！）
+    let my_fp = state.identity().fingerprint();
+    let (mut flow, msg1) = PairingFlow::start(trimmed_code, my_fp, conn.peer_fingerprint());
+    let reply1 = pair_step(&conn, msg1).await.inspect_err(|_| {
+        conn.close(0, "pair step1 failed");
+    })?;
+    let mac_c = match flow.on_pair_result(reply1.ok, &reply1.spake2_msg, &reply1.reason) {
+        PairAction::Send(mac) => mac,
+        PairAction::Done => {
+            conn.close(0, "pair proto err");
+            return Err("对端提前完成配对（协议错误）".into());
+        }
+        PairAction::Fail(msg) => {
+            conn.close(0, "pair rejected");
+            return Err(msg);
+        }
+    };
+    let reply2 = pair_step(&conn, mac_c).await.inspect_err(|_| {
+        conn.close(0, "pair step2 failed");
+    })?;
+    match flow.on_pair_result(reply2.ok, &reply2.spake2_msg, &reply2.reason) {
+        PairAction::Done => {
+            let entry = save_device_with_relay(
+                state,
+                conn.peer_fingerprint(),
+                addr_for_store,
+                &display_name,
+                relay_for_store,
+            )?;
+            // Agent 在配对通过时已直接进入 Authenticated 分发循环，此连接可直接复用为在线会话！
+            state.put_device(entry.id.clone(), conn, app.clone());
+            Ok((Some(to_dto(&entry, true)), false))
+        }
+        PairAction::Send(_) => {
+            conn.close(0, "pair extra step");
+            Err("对端要求继续配对（协议错误）".into())
+        }
+        PairAction::Fail(msg) => {
+            conn.close(0, "pair mac failed");
+            Err(msg)
+        }
     }
 }
 
@@ -594,6 +786,21 @@ pub async fn connect_device(
             .ok_or_else(|| "设备不存在".to_string())?
     };
     let fp = fingerprint_of_hex(&entry.fingerprint_hex);
+    // 按目标指纹串行化拨号，彻底防止自动重连与手动 9 位 ID 拨号并发抢占 rd-relay 单 ctrl 槽位！
+    let dial_lock = state.connect_lock(&entry.fingerprint_hex);
+    let _dial_guard = dial_lock.lock().await;
+    if let Some(existing) = state.get_device(&id)
+        && !*existing.closed().borrow()
+    {
+        tracing::info!(device = %id, "设备已有活跃连接，直接复用（跳过重复中继 DIAL）");
+        return Ok(HelloAckDto {
+            proto_ver: crate::conn::PROTO_VER,
+            host_name: entry.name.clone(),
+            encode_caps: vec!["H264_420".into()],
+            host_version: env!("CARGO_PKG_VERSION").into(),
+            mac_addrs: entry.mac_addrs.clone(),
+        });
+    }
     // EasyTier 转发入口（T-043，no_tun 组网）：本机节点配置了转发规则时，
     // 直连失败快试 127.0.0.1:转发端口 → mesh → 对端 rd
     let extra_addrs = easytier_forward_addrs();
@@ -985,7 +1192,16 @@ pub fn edit_device(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     if let Some(raw) = &relay {
-        rd_transport::parse_relay_addr(raw).map_err(|e| format!("{e:#}"))?;
+        let lower = raw.to_ascii_lowercase();
+        if lower.starts_with("stun:")
+            || lower.starts_with("stun://")
+            || lower.contains("stun.")
+            || lower.ends_with(":3478")
+            || lower.ends_with(":19302")
+        {
+            return Err("公共 STUN 节点仅用于打洞查公网地址，不能填作设备中继服务器；请使用「P2P 打洞向导」生成打洞连接码".into());
+        }
+        rd_transport::parse_relay_endpoint(raw).map_err(|e| format!("{e:#}"))?;
     }
     let mut store = open_store(&state)?;
     let mut entry = store
@@ -1253,9 +1469,9 @@ pub fn get_relay_addr() -> Result<Option<String>, String> {
     Ok(cfg.relay_addr)
 }
 
-/// 写原生中继地址（空串 = 清除）；保留 agent.toml 其他字段，原子写。
+/// 写原生中继地址（空串 = 清除）；保留 agent.toml 其他字段，原子写，并立即为本机被控核心热注册中继（免重启上线 9 位 ID）。
 #[tauri::command]
-pub fn set_relay_addr(relay: String) -> Result<(), String> {
+pub async fn set_relay_addr(relay: String, app: AppHandle) -> Result<(), String> {
     let trimmed = relay.trim().to_string();
     if !trimmed.is_empty() {
         rd_transport::parse_relay_endpoint(&trimmed).map_err(|e| format!("{e:#}"))?;
@@ -1275,13 +1491,31 @@ pub fn set_relay_addr(relay: String) -> Result<(), String> {
         if trimmed.is_empty() {
             table.remove("relay_addr");
         } else {
-            table.insert("relay_addr".into(), toml::Value::String(trimmed));
+            table.insert("relay_addr".into(), toml::Value::String(trimmed.clone()));
         }
     }
     let body = toml::to_string_pretty(&value).map_err(|e| format!("序列化配置失败：{e}"))?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, body).map_err(|e| format!("写入配置失败：{e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置失败：{e}"))?;
+
+    // Windows / macOS 融合版：若本机被控核心在跑，立即切换（或清除）后台中继守护（含 15s 保活 + P2P 打洞响应器）
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        use tauri::Manager as _;
+        if let Some(agent_st) = app.try_state::<Arc<AgentState>>() {
+            let st = Arc::clone(&*agent_st);
+            let next_relay = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+            rd_agent::set_active_relay(st, next_relay);
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = app;
+
     Ok(())
 }
 
@@ -1657,6 +1891,8 @@ pub struct EasyTierStatusDto {
     pub installed: bool,
     pub binary_path: String,
     pub enabled: bool,
+    pub running: bool,
+    pub no_tun: bool,
     pub network_name: String,
     pub virtual_ip: String,
     pub peer_urls: Vec<String>,
@@ -1668,12 +1904,165 @@ pub struct EasyTierStatusDto {
 #[serde(rename_all = "camelCase")]
 pub struct EasyTierInviteResultDto {
     pub ok: bool,
+    pub launched: bool,
+    pub no_tun: bool,
     pub invite_code: String,
     pub network_name: String,
     pub peer_urls: Vec<String>,
     pub binary_found: bool,
     pub binary_path: String,
     pub hint: String,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+enum HotEtCmd {
+    Launch {
+        binary_path: String,
+        network_name: String,
+        network_secret: String,
+        peer_urls: Vec<String>,
+        forwards: Vec<switchboard_mod_easytier::ForwardRule>,
+        reply: std::sync::mpsc::Sender<Result<(bool, String), String>>,
+    },
+    QueryStatus {
+        reply: std::sync::mpsc::Sender<(bool, bool)>,
+    },
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hot_et_tx() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<HotEtCmd>> {
+    static TX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<HotEtCmd>>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<HotEtCmd>();
+        let _ = std::thread::Builder::new()
+            .name("rd-hot-easytier".into())
+            .spawn(move || {
+                let mut current_node: Option<switchboard_mod_easytier::EasyTierNode> = None;
+                let mut current_no_tun = false;
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        HotEtCmd::QueryStatus { reply } => {
+                            let running = current_node.as_mut().is_some_and(|n| n.is_running());
+                            let _ = reply.send((running, current_no_tun));
+                        }
+                        HotEtCmd::Launch {
+                            binary_path,
+                            network_name,
+                            network_secret,
+                            peer_urls,
+                            forwards,
+                            reply,
+                        } => {
+                            if let Some(mut old) = current_node.take() {
+                                old.stop();
+                            }
+                            let bin = std::path::Path::new(binary_path.trim());
+                            if !bin.is_file() {
+                                let _ = reply.send(Err("未找到 easytier-core 可执行文件".into()));
+                                continue;
+                            }
+                            let work_dir =
+                                crate::platform::app_config_dir().join("easytier-hot");
+                            let portal: std::net::SocketAddr =
+                                "127.0.0.1:15898".parse().expect("valid portal");
+                            let base_cfg = switchboard_mod_easytier::EasyTierNetConfig {
+                                network_name,
+                                network_secret: (!network_secret.is_empty())
+                                    .then_some(network_secret),
+                                peer_urls,
+                                listeners: Vec::new(),
+                                virtual_ip: None,
+                                no_tun: false,
+                                rpc_portal: portal,
+                                forwards,
+                            };
+                            match switchboard_mod_easytier::EasyTierNode::launch(
+                                bin, &base_cfg, &work_dir,
+                            ) {
+                                Ok(node) => {
+                                    current_node = Some(node);
+                                    current_no_tun = false;
+                                    let _ = reply.send(Ok((
+                                        false,
+                                        "EasyTier 已免重启后台启动（TUN 虚拟网卡模式，自动分配 10.126.x.x）".into(),
+                                    )));
+                                }
+                                Err(tun_err) => {
+                                    tracing::info!(
+                                        err = %tun_err,
+                                        "TUN 模式启动未成，自动切换免管理员 no_tun 模式"
+                                    );
+                                    let mut fallback_cfg = base_cfg;
+                                    fallback_cfg.no_tun = true;
+                                    match switchboard_mod_easytier::EasyTierNode::launch(
+                                        bin,
+                                        &fallback_cfg,
+                                        &work_dir,
+                                    ) {
+                                        Ok(node) => {
+                                            current_node = Some(node);
+                                            current_no_tun = true;
+                                            let _ = reply.send(Ok((
+                                                true,
+                                                "EasyTier 已免重启后台启动（免管理员 no_tun 端口穿透模式）".into(),
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            let _ = reply
+                                                .send(Err(format!("启动 EasyTier 失败：{e}")));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        std::sync::Mutex::new(tx)
+    })
+}
+
+/// 免重启热启动或热重载本机 EasyTier 节点（单专属宿主线程持有句柄，零跨线程裸指针）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hot_launch_easytier_now(
+    binary_path: &str,
+    network_name: &str,
+    network_secret: &str,
+    peer_urls: &[String],
+    forwards: Vec<switchboard_mod_easytier::ForwardRule>,
+) -> Result<(bool, String), String> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    hot_et_tx()
+        .lock()
+        .expect("hot_et_tx")
+        .send(HotEtCmd::Launch {
+            binary_path: binary_path.to_string(),
+            network_name: network_name.to_string(),
+            network_secret: network_secret.to_string(),
+            peer_urls: peer_urls.to_vec(),
+            forwards,
+            reply: reply_tx,
+        })
+        .map_err(|_| "EasyTier 守护线程不可用".to_string())?;
+    reply_rx
+        .recv_timeout(std::time::Duration::from_secs(18))
+        .map_err(|_| "等待 EasyTier 启动超时".to_string())?
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hot_query_easytier_status() -> (bool, bool) {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if hot_et_tx()
+        .lock()
+        .expect("hot_et_tx")
+        .send(HotEtCmd::QueryStatus { reply: reply_tx })
+        .is_ok()
+        && let Ok(st) = reply_rx.recv_timeout(std::time::Duration::from_millis(500))
+    {
+        return st;
+    }
+    (false, false)
 }
 
 /// 检测本机 EasyTier 安装状态、当前组网配置、当前口令与实时在线对端列表（10.126.x.x）。
@@ -1687,64 +2076,87 @@ pub async fn easytier_detect_status() -> Result<EasyTierStatusDto, String> {
         None
     };
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let (mut running, mut active_no_tun, portals) = {
+        let (r, nt) = hot_query_easytier_status();
+        (
+            r,
+            if r { nt } else { cfg.no_tun },
+            vec!["127.0.0.1:15898", "127.0.0.1:15888"],
+        )
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let (mut running, active_no_tun, portals): (bool, bool, Vec<&str>) =
+        (false, cfg.no_tun, Vec::new());
+
     let mut peers = Vec::new();
     let mut local_vip = cfg.virtual_ip.clone();
     if let Some(cli_bin) = cli {
-        let mut cmd = tokio::process::Command::new(&cli_bin);
-        cmd.args(["-o", "json", "peer"]);
-        #[cfg(windows)]
-        {
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        if let Ok(Ok(out)) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), cmd.output()).await
-            && out.status.success()
-            && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-            && let Some(arr) = val.as_array()
-        {
-            for item in arr {
-                let ipv4 = item
-                    .get("ipv4")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let hostname = item
-                    .get("hostname")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("EasyTier 设备")
-                    .to_string();
-                let cost = item
-                    .get("cost")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let lat = item.get("lat_ms").and_then(|v| {
-                    v.as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .or_else(|| v.as_f64())
-                });
-                if cost.eq_ignore_ascii_case("Local") && !ipv4.is_empty() {
-                    local_vip = ipv4;
-                } else if !ipv4.is_empty() {
-                    peers.push(EasyTierPeerDto {
-                        hostname,
-                        ipv4,
-                        cost: if cost.is_empty() { "P2P".into() } else { cost },
-                        latency_ms: lat,
+        for portal in portals {
+            let mut cmd = tokio::process::Command::new(&cli_bin);
+            cmd.args(["--rpc-portal", portal, "-o", "json", "peer"]);
+            #[cfg(windows)]
+            {
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            if let Ok(Ok(out)) =
+                tokio::time::timeout(std::time::Duration::from_millis(1500), cmd.output()).await
+                && out.status.success()
+                && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                && let Some(arr) = val.as_array()
+            {
+                running = true;
+                for item in arr {
+                    let ipv4 = item
+                        .get("ipv4")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let hostname = item
+                        .get("hostname")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("EasyTier 设备")
+                        .to_string();
+                    let cost = item
+                        .get("cost")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let lat = item.get("lat_ms").and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| v.as_f64())
                     });
+                    if cost.eq_ignore_ascii_case("Local") && !ipv4.is_empty() {
+                        local_vip = ipv4;
+                    } else if !ipv4.is_empty() {
+                        peers.push(EasyTierPeerDto {
+                            hostname,
+                            ipv4,
+                            cost: if cost.is_empty() { "P2P".into() } else { cost },
+                            latency_ms: lat,
+                        });
+                    }
                 }
+                break;
             }
         }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = &mut active_no_tun;
     }
 
     Ok(EasyTierStatusDto {
         installed: core.is_some(),
         binary_path: core.unwrap_or_default(),
         enabled: cfg.enabled,
+        running,
+        no_tun: active_no_tun,
         network_name: cfg.network_name,
         virtual_ip: local_vip,
         peer_urls: cfg.peer_urls,
@@ -1753,9 +2165,11 @@ pub async fn easytier_detect_status() -> Result<EasyTierStatusDto, String> {
     })
 }
 
-/// 一键生成 EasyTier 组网口令（自动创建随机网络名+密钥，绑定最快的公共引导节点并写入本机配置）。
+/// 一键生成 EasyTier 组网口令（自动创建随机网络名+密钥，写入配置并立即免重启热启动组网进程！）。
 #[tauri::command]
-pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInviteResultDto, String> {
+pub async fn easytier_generate_invite(
+    peer_urls: Vec<String>,
+) -> Result<EasyTierInviteResultDto, String> {
     let cleaned_peers: Vec<String> = peer_urls
         .into_iter()
         .map(|s| s.trim().to_string())
@@ -1778,6 +2192,32 @@ pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInvite
     let binary_found = core.is_some();
     let binary_path = core.unwrap_or_default();
     let cli_path = cli.unwrap_or_default();
+
+    let mut launched = false;
+    let mut no_tun = false;
+    let mut launch_note = String::new();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if binary_found {
+        let bp = binary_path.clone();
+        let nn = network_name.clone();
+        let ns = network_secret.clone();
+        let fp = final_peers.clone();
+        match tokio::task::spawn_blocking(move || {
+            hot_launch_easytier_now(&bp, &nn, &ns, &fp, Vec::new())
+        })
+        .await
+        {
+            Ok(Ok((nt, msg))) => {
+                launched = true;
+                no_tun = nt;
+                launch_note = msg;
+            }
+            Ok(Err(e)) => {
+                launch_note = format!("（热启动提示：{e}）");
+            }
+            Err(_) => {}
+        }
+    }
 
     write_agent_config(|table| {
         let mut sec = toml::value::Table::new();
@@ -1804,22 +2244,27 @@ pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInvite
                     .collect(),
             ),
         );
-        // 留空由 EasyTier 内置 DHCP 自动分配唯一 10.126.126.x 虚拟内网 IP（避免双端冲突）
         sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
-        sec.insert("no_tun".into(), toml::Value::Boolean(false));
+        sec.insert("no_tun".into(), toml::Value::Boolean(no_tun));
         sec.insert("forwards".into(), toml::Value::Array(Vec::new()));
         table.insert("easytier".into(), toml::Value::Table(sec));
     })?;
 
     let invite_code = encode_easytier_invite(&network_name, &network_secret, &final_peers)?;
-    let hint = if binary_found {
-        "已写入本机 EasyTier 组网配置。请复制口令发给对方粘贴加入，然后双方重启本软件即可通过 10.126.x.x 直连！".into()
+    let hint = if launched {
+        format!(
+            "{launch_note}！请复制组网口令发给对方粘贴加入，几秒后下方会自动出现对方的 10.126.x.x 设备，点「连接桌面」即可！"
+        )
+    } else if binary_found {
+        format!("组网口令已生成！{launch_note}")
     } else {
-        "口令已生成并保存！本机尚未检测到 easytier-core，请先安装 easytier-core（或放进 rd/tools 目录）后重启生效。".into()
+        "请先点击「一键下载安装 EasyTier」，再点生成组网口令即可免重启直接上线！".into()
     };
 
     Ok(EasyTierInviteResultDto {
         ok: true,
+        launched,
+        no_tun,
         invite_code,
         network_name,
         peer_urls: final_peers,
@@ -1829,15 +2274,41 @@ pub fn easytier_generate_invite(peer_urls: Vec<String>) -> Result<EasyTierInvite
     })
 }
 
-/// 粘贴对方发来的 `rd-et://...` 组网口令，一键加入同一个 EasyTier 网络（自动 DHCP 分配不冲突的 10.126.x.x）。
+/// 粘贴对方发来的 `rd-et://...` 组网口令，一键加入并免重启立即启动 EasyTier 组网进程！
 #[tauri::command]
-pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultDto, String> {
+pub async fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultDto, String> {
     let payload = decode_easytier_invite(&invite_code)?;
     let cur = load_easytier_settings();
     let (core, cli) = detect_easytier_binaries(&cur.binary_path, &cur.cli_path);
     let binary_found = core.is_some();
     let binary_path = core.unwrap_or_default();
     let cli_path = cli.unwrap_or_default();
+
+    let mut launched = false;
+    let mut no_tun = false;
+    let mut launch_note = String::new();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if binary_found {
+        let bp = binary_path.clone();
+        let nn = payload.n.clone();
+        let ns = payload.s.clone();
+        let fp = payload.p.clone();
+        match tokio::task::spawn_blocking(move || {
+            hot_launch_easytier_now(&bp, &nn, &ns, &fp, Vec::new())
+        })
+        .await
+        {
+            Ok(Ok((nt, msg))) => {
+                launched = true;
+                no_tun = nt;
+                launch_note = msg;
+            }
+            Ok(Err(e)) => {
+                launch_note = format!("（热启动提示：{e}）");
+            }
+            Err(_) => {}
+        }
+    }
 
     write_agent_config(|table| {
         let mut sec = toml::value::Table::new();
@@ -1866,25 +2337,29 @@ pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultD
             ),
         );
         sec.insert("virtual_ip".into(), toml::Value::String(String::new()));
-        sec.insert("no_tun".into(), toml::Value::Boolean(false));
+        sec.insert("no_tun".into(), toml::Value::Boolean(no_tun));
         sec.insert("forwards".into(), toml::Value::Array(Vec::new()));
         table.insert("easytier".into(), toml::Value::Table(sec));
     })?;
 
-    let hint = if binary_found {
+    let hint = if launched {
         format!(
-            "已加入组网「{}」！重启本软件后将自动分配 10.126.x.x 内网 IP 并与对方打洞直连。",
+            "已加入房间「{}」并免重启上线！{launch_note}。下方刷新出对方设备后直接点「连接桌面」即可！",
             payload.n
         )
+    } else if binary_found {
+        format!("已保存组网「{}」。{launch_note}", payload.n)
     } else {
         format!(
-            "已保存组网「{}」，但本机未检测到 easytier-core，安装后重启即可上线。",
+            "已保存组网「{}」，请先点「一键下载安装 EasyTier」再点加入即可立即上线！",
             payload.n
         )
     };
 
     Ok(EasyTierInviteResultDto {
         ok: true,
+        launched,
+        no_tun,
         invite_code: invite_code.trim().to_string(),
         network_name: payload.n,
         peer_urls: payload.p,
@@ -1894,8 +2369,135 @@ pub fn easytier_join_invite(invite_code: String) -> Result<EasyTierInviteResultD
     })
 }
 
+/// 统一的实验室一键连接/配对响应 DTO（适用于任意 IP、EasyTier/Tailscale 虚拟 IP、自建中转 9 位 ID）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectConnectOutcomeDto {
+    pub ok: bool,
+    pub need_pair_code: bool,
+    pub device: Option<DeviceDto>,
+    pub route_tag: String,
+    pub detail: String,
+}
+
+/// 在实验室内直接按目标地址（LAN IP / Tailscale 100.x / ZeroTier / EasyTier 10.126.x.x / frp）连接并自动处理配对！
+/// 若当前 EasyTier 处于免管理员 `no_tun` 模式且目标是 `10.126.x.x`，自动挂载本地 UDP 转发通道免网卡直达！
+#[tauri::command]
+pub async fn lab_connect_direct_or_mesh(
+    target_addr: String,
+    relay_addr: Option<String>,
+    code: Option<String>,
+    name: Option<String>,
+    app: AppHandle,
+    state: State<'_, ConnManager>,
+) -> Result<DirectConnectOutcomeDto, String> {
+    let raw_target = target_addr.trim();
+    if raw_target.is_empty() {
+        return Err("请先输入或选择对方设备 IP 地址".into());
+    }
+    let normalized = normalize_addr(raw_target);
+    let mut dial_addr = normalized.clone();
+
+    // 若目标是 EasyTier 10.126.x.x 且本机热启动在免管理员 no_tun 模式，自动映射 127.0.0.1:21139 -> 10.126.x.x:21118
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let (r, nt) = hot_query_easytier_status();
+        let is_et_no_tun = r && nt;
+        if is_et_no_tun
+            && raw_target.starts_with("10.126.")
+            && let Ok(dst_sock) = normalized.parse::<std::net::SocketAddr>()
+        {
+            let bind_sock: std::net::SocketAddr = "127.0.0.1:21139".parse().unwrap();
+            let cfg = load_easytier_settings();
+            let (core, _) = detect_easytier_binaries(&cfg.binary_path, &cfg.cli_path);
+            if let Some(bp) = core {
+                let nn = cfg.network_name.clone();
+                let ns = cfg.network_secret.clone();
+                let fp = cfg.peer_urls.clone();
+                let rule = switchboard_mod_easytier::ForwardRule {
+                    bind: bind_sock,
+                    dst: dst_sock,
+                    proto: switchboard_mod_easytier::ForwardProto::Udp,
+                };
+                if tokio::task::spawn_blocking(move || {
+                    hot_launch_easytier_now(&bp, &nn, &ns, &fp, vec![rule])
+                })
+                .await
+                .is_ok_and(|r| r.is_ok())
+                {
+                    dial_addr = bind_sock.to_string();
+                }
+            }
+        }
+    }
+
+    let clean_relay = relay_addr
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.to_ascii_lowercase().contains("stun"));
+
+    // 查找是否已是保存过的受信任设备（若是则带上指纹，否则 None 进入首连/配对）
+    let existing = open_store(&state)?.list().into_iter().find(|d| {
+        d.addr.eq_ignore_ascii_case(&normalized)
+            || d.addr.split(':').next() == normalized.split(':').next()
+    });
+    let expected_fp = existing
+        .as_ref()
+        .and_then(|d| parse_fingerprint(&d.fingerprint_hex).ok());
+
+    let conn = DeviceConn::connect(
+        existing
+            .as_ref()
+            .map(|d| d.id.as_str())
+            .unwrap_or("lab-direct"),
+        &dial_addr,
+        state.identity(),
+        expected_fp,
+        media_fec_setting(state.data_dir()),
+        clean_relay.clone(),
+        easytier_forward_addrs(),
+    )
+    .await
+    .map_err(|e| describe_connect_error(&e))?;
+
+    let route_tag = conn.route_tag();
+    let display_name = name
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| existing.map(|d| d.name))
+        .unwrap_or_default();
+    let pair_code = code.unwrap_or_default();
+
+    let (dev_opt, need_code) = auth_or_pair_established(
+        conn,
+        &pair_code,
+        &normalized,
+        &display_name,
+        clean_relay,
+        &app,
+        &state,
+    )
+    .await?;
+
+    if need_code {
+        Ok(DirectConnectOutcomeDto {
+            ok: false,
+            need_pair_code: true,
+            device: None,
+            route_tag,
+            detail: "已连通对方电脑！请在下方输入对方屏幕上显示的 6 位配对码完成首次连接。".into(),
+        })
+    } else {
+        Ok(DirectConnectOutcomeDto {
+            ok: true,
+            need_pair_code: false,
+            device: dev_opt,
+            route_tag: route_tag.clone(),
+            detail: format!("连接成功（{route_tag}），正在进入远程桌面…"),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
-// 方案 A：RustDesk 风格 9 位设备 ID 码（基于本机证书指纹派生 + rd-relay 在线查址）
+// 方案 A：RustDesk 风格 9 位设备 ID 码（基于本机被控身份指纹派生 + rd-relay 查址与一键直连）
 // ---------------------------------------------------------------------------
 
 fn derive_numeric_id_from_fp(fp: &[u8; 32]) -> u32 {
@@ -1932,10 +2534,24 @@ pub struct RelayResolveIdResultDto {
     pub detail: String,
 }
 
-/// 返回本机真实派生的 9 位设备 ID 码与当前配置的中转地址。
+/// 返回本机被控端真实注册在 `rd-relay` 上的 9 位设备 ID 码与当前配置的中转地址。
 #[tauri::command]
-pub fn relay_id_status(state: State<'_, ConnManager>) -> Result<RelayIdStatusDto, String> {
-    let fp = state.identity().fingerprint();
+pub fn relay_id_status(
+    app: AppHandle,
+    state: State<'_, ConnManager>,
+) -> Result<RelayIdStatusDto, String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    let fp = {
+        use tauri::Manager as _;
+        app.try_state::<Arc<AgentState>>()
+            .map(|st| st.local_fp)
+            .unwrap_or_else(|| state.identity().fingerprint())
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let fp = {
+        let _ = app;
+        state.identity().fingerprint()
+    };
     let raw_id = derive_numeric_id_from_fp(&fp.0);
     let relay_addr = read_agent_config().and_then(|c| c.relay_addr);
     Ok(RelayIdStatusDto {
@@ -1946,57 +2562,21 @@ pub fn relay_id_status(state: State<'_, ConnManager>) -> Result<RelayIdStatusDto
     })
 }
 
-/// 向指定自建 `rd-relay` 发起真实 9 位 ID 在线查询（TYPE_LOOKUP_ID = 7），验证对方是否已注册到该中转服务器。
-#[tauri::command]
-pub async fn relay_resolve_id(
-    relay_addr: String,
-    numeric_id: String,
-) -> Result<RelayResolveIdResultDto, String> {
+async fn lookup_relay_id_full(
+    relay_addr: &str,
+    numeric_id: &str,
+) -> Result<(String, std::net::SocketAddr, f64, Option<[u8; 32]>), String> {
     let digits: String = numeric_id.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() != 9 {
-        return Ok(RelayResolveIdResultDto {
-            ok: false,
-            online: false,
-            numeric_id: digits,
-            rtt_ms: None,
-            peer_fingerprint_short: None,
-            detail: "请输入 9 位数字设备 ID（如 482 916 305）".into(),
-        });
+        return Err("请输入 9 位数字设备 ID（如 482 916 305）".into());
     }
     let id_num: u32 = digits.parse().map_err(|_| "设备 ID 格式无效".to_string())?;
     let formatted = format_9digit_id(id_num);
+    let target = crate::conn::resolve_relay_socket(relay_addr)
+        .await
+        .map_err(|e| format!("中转地址解析失败：{e}"))?;
 
-    let trimmed = relay_addr.trim();
-    if trimmed.is_empty() {
-        return Ok(RelayResolveIdResultDto {
-            ok: false,
-            online: false,
-            numeric_id: formatted,
-            rtt_ms: None,
-            peer_fingerprint_short: None,
-            detail: "请先选择或填写自建中转服务器地址（如 45.x.x.x:21118）".into(),
-        });
-    }
-    let host_port = if trimmed.contains(':') {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}:21118")
-    };
-    let target = match crate::conn::resolve_addr(&host_port, 21118).await {
-        Ok(s) => s,
-        Err(e) => {
-            return Ok(RelayResolveIdResultDto {
-                ok: false,
-                online: false,
-                numeric_id: formatted,
-                rtt_ms: None,
-                peer_fingerprint_short: None,
-                detail: format!("中转地址解析失败：{e}"),
-            });
-        }
-    };
-
-    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
+    let sock = rd_transport::bind_udp_bypassing_tun(target)
         .await
         .map_err(|e| format!("绑定本地 UDP 失败：{e}"))?;
 
@@ -2019,54 +2599,163 @@ pub async fn relay_resolve_id(
         Ok(Ok((n, _))) if n >= 10 && buf[8] == 8 => {
             let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
             if buf[9] == 1 && n >= 42 {
-                let fp_hex: String = buf[10..18].iter().map(|b| format!("{b:02x}")).collect();
-                Ok(RelayResolveIdResultDto {
-                    ok: true,
-                    online: true,
-                    numeric_id: formatted,
-                    rtt_ms: Some(rtt),
-                    peer_fingerprint_short: Some(fp_hex.clone()),
-                    detail: format!(
-                        "对方 ID 在线！中转延迟 {rtt:.1}ms · 指纹 {fp_hex}（支持 P2P 打洞 + 中转兜底）"
-                    ),
-                })
+                let mut fp = [0u8; 32];
+                fp.copy_from_slice(&buf[10..42]);
+                Ok((formatted, target, rtt, Some(fp)))
             } else {
-                Ok(RelayResolveIdResultDto {
-                    ok: true,
-                    online: false,
-                    numeric_id: formatted,
-                    rtt_ms: Some(rtt),
-                    peer_fingerprint_short: None,
-                    detail: format!(
-                        "中转可达（{rtt:.1}ms），但该 9 位 ID 当前未上线（请确认对方也填了同一中转地址并已启动）"
-                    ),
-                })
+                Ok((formatted, target, rtt, None))
             }
         }
-        Ok(Ok(_)) => Ok(RelayResolveIdResultDto {
-            ok: false,
+        Ok(Ok(_)) => Err("收到非 rd-relay 应答（请确认服务器运行的是 rd-relay）".into()),
+        Ok(Err(e)) => Err(format!("查询失败：{e}")),
+        Err(_) => Err("查询超时（>2500ms，请检查 VPS UDP 21118 放行与 rd-relay 进程）".into()),
+    }
+}
+
+/// 向指定自建 `rd-relay` 发起真实 9 位 ID 在线查询（TYPE_LOOKUP_ID = 7），验证对方是否已注册到该中转服务器。
+#[tauri::command]
+pub async fn relay_resolve_id(
+    relay_addr: String,
+    numeric_id: String,
+) -> Result<RelayResolveIdResultDto, String> {
+    match lookup_relay_id_full(&relay_addr, &numeric_id).await {
+        Ok((formatted, _target, rtt, Some(fp))) => {
+            let fp_hex: String = fp[..8].iter().map(|b| format!("{b:02x}")).collect();
+            Ok(RelayResolveIdResultDto {
+                ok: true,
+                online: true,
+                numeric_id: formatted,
+                rtt_ms: Some(rtt),
+                peer_fingerprint_short: Some(fp_hex.clone()),
+                detail: format!(
+                    "对方 ID 在线！中转延迟 {rtt:.1}ms · 指纹 {fp_hex}（可直接点下方按钮连接桌面）"
+                ),
+            })
+        }
+        Ok((formatted, _target, rtt, None)) => Ok(RelayResolveIdResultDto {
+            ok: true,
             online: false,
             numeric_id: formatted,
-            rtt_ms: None,
+            rtt_ms: Some(rtt),
             peer_fingerprint_short: None,
-            detail: "收到非 rd-relay 应答（请确认目标运行的是最新版 rd-relay）".into(),
+            detail: format!(
+                "中转服务器连通（{rtt:.1}ms），但该 9 位 ID 当前未上线（请确认对方电脑也填了同一中转地址）"
+            ),
         }),
-        Ok(Err(e)) => Ok(RelayResolveIdResultDto {
+        Err(detail) => Ok(RelayResolveIdResultDto {
             ok: false,
             online: false,
-            numeric_id: formatted,
+            numeric_id,
             rtt_ms: None,
             peer_fingerprint_short: None,
-            detail: format!("查询失败：{e}"),
+            detail,
         }),
-        Err(_) => Ok(RelayResolveIdResultDto {
+    }
+}
+
+/// 通过自建中转 `rd-relay` + 对方 9 位设备 ID 一键跨网连接（自动先竞速 P2P 打洞，打不通零感知走中转兜底）！
+#[tauri::command]
+pub async fn connect_by_relay_id(
+    relay_addr: String,
+    numeric_id: String,
+    code: Option<String>,
+    name: Option<String>,
+    app: AppHandle,
+    state: State<'_, ConnManager>,
+) -> Result<DirectConnectOutcomeDto, String> {
+    let (formatted, relay_sock, _rtt, fp_opt) =
+        lookup_relay_id_full(&relay_addr, &numeric_id).await?;
+    let Some(fp_bytes) = fp_opt else {
+        return Err(format!(
+            "设备 {formatted} 当前未在中转服务器上线，请让对方先在「自建中转」填入同一服务器地址"
+        ));
+    };
+    let target_fp = Fingerprint(fp_bytes);
+    // 防误拨本机自己：本机内嵌被控核心指纹与查询结果一致时直接给出清晰指引
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        use tauri::Manager as _;
+        if let Some(st) = app.try_state::<Arc<AgentState>>()
+            && st.local_fp == target_fp
+        {
+            return Err(format!(
+                "你输入的是本机自己的 9 位设备 ID（{formatted}）！请到另一台电脑输入此 ID 连接本机，或在这里输入对方电脑显示的 9 位 ID。"
+            ));
+        }
+    }
+
+    // 串行化同一目标指纹的所有拨号，杜绝与后台自动重连互相覆盖 rd-relay 的 ctrl 槽位！
+    let dial_lock = state.connect_lock(&target_fp.hex());
+    let _dial_guard = dial_lock.lock().await;
+
+    let (path, raw_conn) = tokio::time::timeout(
+        Duration::from_secs(20),
+        rd_transport::connect_via_relay_punch(
+            relay_sock,
+            target_fp,
+            state.identity(),
+            Some(target_fp),
+        ),
+    )
+    .await
+    .map_err(|_| "经中转/打洞连接对方超时（20s）".to_string())?
+    .map_err(|e| format!("经中转连接失败：{e:#}"))?;
+
+    let route_tag = match path {
+        rd_transport::ConnPath::Direct => format!("P2P 打洞直连命中 (经 {relay_sock} 协调)"),
+        rd_transport::ConnPath::Relay => format!("自建中转转发 ({relay_sock})"),
+    };
+    let dev_conn = DeviceConn::from_established_conn(
+        "relay-id-conn",
+        relay_sock,
+        raw_conn,
+        media_fec_setting(state.data_dir()),
+        route_tag.clone(),
+    )
+    .await
+    .map_err(|e| format!("建立控制流失败：{e:#}"))?;
+
+    // 若设备库里已存有该指纹的非中转直连地址（如 Tailscale/局域网 IP），优先保留原地址不覆写为中转 IP
+    let stored_addr = open_store(&state)
+        .ok()
+        .and_then(|s| {
+            s.list()
+                .into_iter()
+                .find(|d| d.fingerprint_hex == target_fp.hex())
+                .map(|d| d.addr)
+        })
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| relay_sock.to_string());
+    let default_name = name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("远程设备 {}", formatted));
+    let (dev_opt, need_code) = auth_or_pair_established(
+        dev_conn,
+        &code.unwrap_or_default(),
+        &stored_addr,
+        &default_name,
+        Some(relay_addr.trim().to_string()),
+        &app,
+        &state,
+    )
+    .await?;
+
+    if need_code {
+        Ok(DirectConnectOutcomeDto {
             ok: false,
-            online: false,
-            numeric_id: formatted,
-            rtt_ms: None,
-            peer_fingerprint_short: None,
-            detail: "查询超时（>2500ms，请检查 VPS UDP 21118 放行与 rd-relay 进程）".into(),
-        }),
+            need_pair_code: true,
+            device: None,
+            route_tag,
+            detail: format!("已找到并连上设备 {formatted}！请输入对方的 6 位配对码完成绑定。"),
+        })
+    } else {
+        Ok(DirectConnectOutcomeDto {
+            ok: true,
+            need_pair_code: false,
+            device: dev_opt,
+            route_tag: route_tag.clone(),
+            detail: format!("已通过 {route_tag} 连接成功！"),
+        })
     }
 }
 
@@ -2278,5 +2967,48 @@ mod easytier_invite_tests {
         assert_eq!(decoded.n, "rd-mesh-abc123");
         assert_eq!(decoded.s, "secret9876543210");
         assert_eq!(decoded.p, vec!["tcp://public.easytier.top:11010"]);
+    }
+
+    #[test]
+    fn self_discovery_filters_local_ip_and_fingerprint() {
+        let mut local_ips = std::collections::HashSet::new();
+        local_ips.insert("192.168.1.10".parse().unwrap());
+        local_ips.insert("100.78.111.101".parse().unwrap());
+
+        let self_by_ip = DiscoveredDeviceDto {
+            name: "My-PC".into(),
+            addr: "192.168.1.10:21118".into(),
+            fingerprint_short_hex: "1111222233334444".into(),
+        };
+        assert!(is_self_discovered(
+            &self_by_ip,
+            "192.168.1.10".parse().unwrap(),
+            &local_ips,
+            Some("b84070e6dd00aef6"),
+        ));
+
+        let self_by_fp = DiscoveredDeviceDto {
+            name: "My-PC".into(),
+            addr: "192.168.50.88:21118".into(),
+            fingerprint_short_hex: "b84070e6dd00aef6".into(),
+        };
+        assert!(is_self_discovered(
+            &self_by_fp,
+            "192.168.50.88".parse().unwrap(),
+            &local_ips,
+            Some("b84070e6dd00aef6"),
+        ));
+
+        let remote_peer = DiscoveredDeviceDto {
+            name: "Office-PC".into(),
+            addr: "192.168.1.99:21118".into(),
+            fingerprint_short_hex: "aaaa222233334444".into(),
+        };
+        assert!(!is_self_discovered(
+            &remote_peer,
+            "192.168.1.99".parse().unwrap(),
+            &local_ips,
+            Some("b84070e6dd00aef6"),
+        ));
     }
 }

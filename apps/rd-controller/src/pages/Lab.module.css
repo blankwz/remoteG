@@ -773,8 +773,14 @@
 
 .familyGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
+}
+
+@media (max-width: 920px) {
+  .familyGrid {
+    grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+  }
 }
 
 .familyCard {
@@ -1231,4 +1237,252 @@
   gap: 4px;
   font-family: var(--rd-font-mono);
   font-size: var(--rd-fs-micro);
+}
+
+/* ---- 分场景三步闭环实战向导台（解决“怎么建方案/打洞/组网/绑完STUN然后呢”） ---- */
+
+.guideWorkbench {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--rd-radius);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-accent);
+  box-shadow: var(--rd-shadow);
+}
+
+.guideHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.guideTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.guideTitle {
+  margin: 0;
+  font-size: var(--rd-fs-title);
+  font-weight: 600;
+  color: var(--rd-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.guideSubtitle {
+  margin: 0;
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-dim);
+}
+
+.guideExplainer {
+  padding: 8px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-accent-soft);
+  border: 1px solid var(--rd-border-strong);
+  color: var(--rd-accent-text);
+  font-size: var(--rd-fs-dim);
+  line-height: 1.55;
+}
+
+.stepStack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stepCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-card);
+  border: 1px solid var(--rd-border);
+}
+
+.stepCardDone {
+  border-color: rgb(70 209 126 / 45%);
+}
+
+.stepCardHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stepTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--rd-fs-body);
+  font-weight: 600;
+  color: var(--rd-text);
+}
+
+.stepNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--rd-accent);
+  color: #ffffff;
+  font-size: var(--rd-fs-micro);
+  font-weight: 700;
+  font-family: var(--rd-font-mono);
+}
+
+.stepNumDone {
+  background: rgb(70 209 126 / 20%);
+  border: 1px solid rgb(70 209 126 / 55%);
+  color: var(--rd-ok);
+}
+
+.stepHint {
+  margin: 0;
+  font-size: var(--rd-fs-dim);
+  color: var(--rd-text-dim);
+}
+
+.roleSplitGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.roleCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border-strong);
+}
+
+.roleCard > .textInput {
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.roleBadgeHost,
+.roleBadgeCtrl {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--rd-fs-micro);
+  font-weight: 600;
+}
+
+.roleBadgeHost {
+  background: rgb(229 181 103 / 15%);
+  color: var(--rd-warn);
+  border: 1px solid rgb(229 181 103 / 40%);
+}
+
+.roleBadgeCtrl {
+  background: var(--rd-accent-soft);
+  color: var(--rd-accent-text);
+  border: 1px solid var(--rd-accent);
+}
+
+.tokenBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-panel);
+  border: 1px solid rgb(70 209 126 / 45%);
+}
+
+.tokenCode {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-micro);
+  color: var(--rd-ok);
+  word-break: break-all;
+  line-height: 1.45;
+}
+
+.reverseBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--rd-radius-sm);
+  background: rgb(229 181 103 / 10%);
+  border: 1px solid rgb(229 181 103 / 50%);
+  font-size: var(--rd-fs-dim);
+}
+
+.pairPromptCard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--rd-radius);
+  background: rgb(61 126 255 / 12%);
+  border: 1px solid var(--rd-accent);
+  font-size: var(--rd-fs-dim);
+}
+
+.codeInput {
+  width: 130px;
+  padding: 6px 10px;
+  border-radius: var(--rd-radius-sm);
+  border: 1px solid var(--rd-accent);
+  background: var(--rd-bg-deep);
+  color: var(--rd-text);
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-body);
+  letter-spacing: 2px;
+  text-align: center;
+}
+
+.peerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.peerRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-panel);
+  border: 1px solid var(--rd-border);
+}
+
+.bigIdCode {
+  font-family: var(--rd-font-mono);
+  font-size: var(--rd-fs-title);
+  font-weight: 700;
+  color: var(--rd-accent-text);
+  letter-spacing: 1px;
+  padding: 3px 10px;
+  border-radius: var(--rd-radius-sm);
+  background: var(--rd-bg-deep);
+  border: 1px solid var(--rd-border-strong);
 }

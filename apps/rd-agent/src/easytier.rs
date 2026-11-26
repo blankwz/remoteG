@@ -25,6 +25,8 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(10);
 /// EasyTier 托管句柄：虚拟 IP 槽位（候选采集消费）。
 #[derive(Clone)]
 pub struct EasyTierHost {
+    /// 是否实际启用并拉起了 EasyTier 守护线程（未启用时 `wait_ready` 立即返回 `None`，不白等 20s！）。
+    pub enabled: bool,
     /// 本机在 mesh 内的虚拟 IP（None = 未启用/未就绪/已退出）。
     pub virtual_ip: Arc<Mutex<Option<IpAddr>>>,
 }
@@ -35,8 +37,11 @@ impl EasyTierHost {
         *self.virtual_ip.lock().expect("easytier ip 锁中毒")
     }
 
-    /// 等待就绪（宿主启动含 easytier-core 冷启动，上限 `timeout`）。
+    /// 等待就绪（仅在 `enabled=true` 时等待宿主启动，未启用时零延迟返回 `None`）。
     pub async fn wait_ready(&self, timeout: Duration) -> Option<IpAddr> {
+        if !self.enabled {
+            return None;
+        }
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(ip) = self.current_ip() {
@@ -124,6 +129,7 @@ pub fn start(
 ) -> anyhow::Result<EasyTierHost> {
     let Some(net_cfg) = build_net_config(cfg) else {
         return Ok(EasyTierHost {
+            enabled: false,
             virtual_ip: Arc::new(Mutex::new(None)),
         });
     };
@@ -134,6 +140,7 @@ pub fn start(
         .and_then(|s| s.parse::<IpAddr>().ok());
 
     let host = EasyTierHost {
+        enabled: true,
         virtual_ip: Arc::new(Mutex::new(None)),
     };
     let slot = Arc::clone(&host.virtual_ip);

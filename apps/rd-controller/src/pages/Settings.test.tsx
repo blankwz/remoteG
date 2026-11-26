@@ -320,4 +320,40 @@ describe("简洁模式与高级模式 + SSH 一键部署中继（宪法 #2/#3）
     });
     expect(await screen.findByText(/部署成功！中继地址：1\.2\.3\.4:21118/)).toBeTruthy();
   });
+
+  it("主机框填入 IP:端口 且私钥路径带引号时自动归一化拆分", async () => {
+    window.localStorage.setItem("rd.advancedMode", "1");
+    callMock.mockImplementation((cmd: string) => {
+      if (cmd === "deploy_relay_ssh") {
+        return Promise.resolve({
+          ok: true,
+          relayAddr: "43.135.129.15:21118",
+          summary: "部署成功！中继地址：43.135.129.15:21118",
+          log: "RD_RELAY_DEPLOY_OK",
+        });
+      }
+      return Promise.resolve(mockReply(cmd));
+    });
+
+    render(<Settings />);
+    fireEvent.change(await screen.findByLabelText("SSH 服务器地址"), {
+      target: { value: "43.135.129.15:22" },
+    });
+    fireEvent.change(screen.getByLabelText("SSH 私钥路径"), {
+      target: { value: '"G:\\work.pem"' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "一键上传并部署" }));
+
+    await vi.waitFor(() => {
+      expect(
+        callMock.mock.calls.some(
+          ([cmd, args]) =>
+            cmd === "deploy_relay_ssh" &&
+            args?.req?.host === "43.135.129.15" &&
+            args?.req?.port === 22 &&
+            args?.req?.keyPath === "G:\\work.pem",
+        ),
+      ).toBe(true);
+    });
+  });
 });

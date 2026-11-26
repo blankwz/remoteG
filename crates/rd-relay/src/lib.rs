@@ -523,7 +523,7 @@ pub async fn spawn(bind: SocketAddr) -> anyhow::Result<SocketAddr> {
     tracing::info!(%local, "rd-relay 启动");
     let table = Arc::new(Mutex::new(Table::default()));
 
-    // GC：回收空闲会话
+    // GC：回收被控端已超期失联的会话（仅看 agent_seen，避免控制端反复 DIAL 把死会话续命成僵尸在线）
     {
         let table = Arc::clone(&table);
         tokio::spawn(async move {
@@ -531,11 +531,8 @@ pub async fn spawn(bind: SocketAddr) -> anyhow::Result<SocketAddr> {
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 let mut t = table.lock().expect("relay table 锁中毒");
                 let before = t.by_tag.len();
-                t.by_tag.retain(|_, s| {
-                    let agent_live = s.agent_seen.elapsed() < SESSION_IDLE;
-                    let ctrl_live = s.ctrl_seen.elapsed() < SESSION_IDLE;
-                    agent_live || ctrl_live
-                });
+                t.by_tag
+                    .retain(|_, s| s.agent_seen.elapsed() < SESSION_IDLE);
                 if t.by_tag.len() != before {
                     tracing::info!(
                         回收 = before - t.by_tag.len(),
@@ -577,14 +574,18 @@ pub async fn spawn(bind: SocketAddr) -> anyhow::Result<SocketAddr> {
 }
 
 async fn handle_control(sock: &UdpSocket, table: &Arc<Mutex<Table>>, pkt: &[u8], from: SocketAddr) {
-    // 方案 A：9 位数字 ID 查询（13 字节短控制报）
+    // 方案 A：9 位数字 ID 查询（13 字节短控制报；仅返回 SESSION_IDLE 窗口内真正存活的被控端）
     if pkt.len() >= 13 && pkt[8] == TYPE_LOOKUP_ID {
         let target_id = u32::from_le_bytes(pkt[9..13].try_into().expect("4 字节 ID"));
         let found_fp = {
             let t = table.lock().unwrap_or_else(|e| e.into_inner());
             t.by_tag
                 .values()
-                .find(|s| s.agent.is_some() && numeric_id_from_fp(&s.fp) == target_id)
+                .find(|s| {
+                    s.agent.is_some()
+                        && s.agent_seen.elapsed() < SESSION_IDLE
+                        && numeric_id_from_fp(&s.fp) == target_id
+                })
                 .map(|s| s.fp)
         };
         let mut ack = Vec::with_capacity(if found_fp.is_some() { 42 } else { 10 });
@@ -693,7 +694,7 @@ async fn handle_dial(
         let mut t = table.lock().expect("relay table 锁中毒");
         let tag = Table::tag_of(&fp);
         match t.by_tag.get_mut(&tag) {
-            Some(s) if s.fp == fp => {
+            Some(s) if s.fp == fp && s.agent.is_some() && s.agent_seen.elapsed() < SESSION_IDLE => {
                 s.ctrl = Some(from);
                 s.ctrl_seen = Instant::now();
                 tracing::info!(tag, peer = %from, "控制端接入");

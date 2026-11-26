@@ -44,6 +44,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
+rd-relay = { path = "../../crates/rd-relay" }
 reed-solomon-erasure = "6"
 tempfile = "3"
 rd-vdisplay = { path = "../../crates/rd-vdisplay", features = ["test-util"] }

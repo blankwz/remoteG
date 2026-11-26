@@ -95,6 +95,22 @@ pub async fn connect(
     Ok(conn)
 }
 
+/// 控制端拨号：在已绑定的裸 UDP socket 上直接向 `remote` 发起 QUIC 握手（供无中继公共 STUN P2P 打洞复用同一 NAT 映射端口）。
+pub async fn connect_socket(
+    sock: std::sync::Arc<tokio::net::UdpSocket>,
+    remote: SocketAddr,
+    id: &Identity,
+    expected: Option<Fingerprint>,
+) -> anyhow::Result<Conn> {
+    connect_over(
+        crate::direct::DirectUdpSocket::new(sock),
+        remote,
+        id,
+        expected,
+    )
+    .await
+}
+
 /// 经自定义 UDP socket（中继虚拟链路）向 `remote`（虚拟地址即可）发起 QUIC。
 pub(crate) async fn connect_over(
     socket: impl quinn::AsyncUdpSocket,

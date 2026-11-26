@@ -153,6 +153,52 @@ pub async fn serve_all(state: Arc<AgentState>, servers: Vec<Server>) {
     }
 }
 
+/// 动态虚拟网卡热监听巡检：当运行期新增 EasyTier (`10.126.x.x`)、Tailscale (`100.x.x.x`)
+/// 或 ZeroTier (`10.147.x.x` / `192.168.x.x`) 网卡时，免重启自动绑定 `listen_port` 接受远控连接。
+pub fn spawn_dynamic_interface_watcher(state: Arc<AgentState>) {
+    if !state.config.listen_addrs.is_empty() {
+        return;
+    }
+    let allow_lan = state.config.allow_lan;
+    let port = state.config.listen_port;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let Ok(ips) = auto_ips(allow_lan) else {
+                continue;
+            };
+            let existing: std::collections::HashSet<IpAddr> = state
+                .listen_addrs
+                .lock()
+                .expect("listen_addrs 锁中毒")
+                .iter()
+                .map(|a| a.ip())
+                .collect();
+            for ip in ips {
+                if existing.contains(&ip) {
+                    continue;
+                }
+                let target = SocketAddr::new(ip, port);
+                if let Ok(mut bound_pair) = bind_servers(&[target], &state.identity) {
+                    if let Some((srv, _sock)) = bound_pair.pop() {
+                        let actual = srv.local_addr();
+                        tracing::info!(addr = %actual, "检测到新虚拟组网/局域网接口，已免重启自动绑定监听");
+                        state
+                            .listen_addrs
+                            .lock()
+                            .expect("listen_addrs 锁中毒")
+                            .push(actual);
+                        let st = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            accept_loop(st, srv).await;
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn accept_loop(state: Arc<AgentState>, server: Server) {
     loop {
         match server.accept().await {

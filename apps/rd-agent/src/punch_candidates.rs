@@ -85,7 +85,13 @@ async fn upnp_add_mapping(port: u16) -> Option<std::net::Ipv4Addr> {
             IpAddr::V6(_) => None,
         })?;
     let task = tokio::task::spawn_blocking(move || -> Option<std::net::Ipv4Addr> {
-        let gw = igd::search_gateway(Default::default()).ok()?;
+        // 局域网路由器对 SSDP M-SEARCH 通常在 <50ms 内响应；限制搜索超时为 800ms，
+        // 避免无 UPnP 环境拖慢 rd-relay 首次注册上线速度。
+        let opts = igd::SearchOptions {
+            timeout: Some(Duration::from_millis(800)),
+            ..Default::default()
+        };
+        let gw = igd::search_gateway(opts).ok()?;
         let ext = gw.get_external_ip().ok()?;
         // 有界租期（安全审计 F2）：不用 lease=0 永久映射——agent 进程意外
         // 退出时映射随租期自动消失；运行期由续租任务保持有效
@@ -99,7 +105,7 @@ async fn upnp_add_mapping(port: u16) -> Option<std::net::Ipv4Addr> {
         .ok()?;
         Some(ext)
     });
-    match tokio::time::timeout(std::time::Duration::from_secs(10), task).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(1500), task).await {
         Ok(Ok(Some(ip))) => Some(ip),
         _ => None,
     }

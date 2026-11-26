@@ -15,8 +15,8 @@ pub mod relay_ws;
 pub mod verify;
 
 pub use conn::{
-    client_config_for_test, connect, server_config_for_test, transport_config_for_test, Conn,
-    ControlRx, ControlTx, DataRx, DataTx, Server, ALPN,
+    client_config_for_test, connect, connect_socket, server_config_for_test,
+    transport_config_for_test, Conn, ControlRx, ControlTx, DataRx, DataTx, Server, ALPN,
 };
 pub use direct::bind_udp_socket;
 pub use framing::{DataFrame, StreamKind, TileHeader, VideoHeader};
@@ -24,7 +24,7 @@ pub use identity::{Fingerprint, Identity};
 /// 直连候选上限（透传 rd-relay 协议常量，agent 采集端用）。
 pub use rd_relay::MAX_CANDIDATES;
 pub use relay::{
-    bind_via_relay, bind_via_relay_ex, connect_via_relay, connect_via_relay_punch,
-    parse_relay_addr, punch_enabled, punch_respond, ConnPath, RelayServer,
+    bind_udp_bypassing_tun, bind_via_relay, bind_via_relay_ex, connect_via_relay,
+    connect_via_relay_punch, parse_relay_addr, punch_enabled, punch_respond, ConnPath, RelayServer,
 };
 pub use relay_ws::{bind_via_relay_ep, connect_via_relay_ep, parse_relay_endpoint, RelayEndpoint};

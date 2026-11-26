@@ -128,6 +128,45 @@ function mockReply(cmd: string, args?: Record<string, unknown>): unknown {
         winner: "方案 B",
         verdict: "方案 B 胜出：文字保真度 99.8%",
       };
+    case "lab_p2p_host_open":
+      return {
+        ok: true,
+        token: "rd-p2p://demo-token",
+        mappedAddr: "112.80.248.75:54321",
+        natType: "cone",
+        natLabel: "圆锥型 NAT",
+        pairCode: "654321",
+        stunUsed: "stun.miwifi.com:3478",
+        candidates: ["192.168.1.10:21118"],
+        advice: "已锁定公网洞口",
+      };
+    case "lab_p2p_connect_token":
+      return {
+        ok: false,
+        needReversePunch: true,
+        needPairCode: false,
+        reverseCode: "rd-punch://112.80.248.99:51234",
+        device: null,
+        routeTag: "等待双向开洞",
+        detail: "需双向开洞",
+      };
+    case "easytier_detect_status":
+      return {
+        installed: true,
+        binaryPath: "easytier-core",
+        enabled: true,
+        running: true,
+        noTun: false,
+        networkName: "rd-mesh-demo",
+        virtualIp: "10.126.126.1",
+        peerUrls: ["tcp://public.easytier.top:11010"],
+        inviteCode: "rd-et://demo-room",
+        peers: [{ hostname: "Office-PC", ipv4: "10.126.126.2", cost: "P2P", latencyMs: 16.5 }],
+      };
+    case "lab_scan_mesh_peers":
+      return [
+        { source: "EasyTier", name: "Office-PC", addr: "10.126.126.2", latencyMs: 16.5, cost: "P2P" },
+      ];
     default:
       return null;
   }
@@ -220,5 +259,27 @@ describe("RD Geek Lab 极客操控台", () => {
         "derp",
       ]),
     );
+  });
+
+  it("P2P 打洞向导与虚拟组网向导提供真实可走通的分步交互（生成打洞码/回执码/扫描组网成员直连）", async () => {
+    render(<Lab deviceId="dev-studio" />);
+    expect(await screen.findByText(/P2P 打洞直连 · 零服务器公共 STUN 实战向导/)).toBeTruthy();
+
+    // 1) 被控端一键生成 STUN 打洞连接码
+    fireEvent.click(screen.getByText(/生成本机 STUN 打洞连接码/));
+    expect(await screen.findByText("rd-p2p://demo-token")).toBeTruthy();
+
+    // 2) 控制端粘贴打洞码连接，遇到端口受限 NAT 自动给出双向开洞回执码
+    const tokenInput = screen.getByLabelText("粘贴对方 STUN 打洞连接码");
+    fireEvent.change(tokenInput, { target: { value: "rd-p2p://peer-token" } });
+    fireEvent.click(screen.getByText(/一键打洞并进入远程桌面/));
+    expect(await screen.findByText("rd-punch://112.80.248.99:51234")).toBeTruthy();
+
+    // 3) 切换到虚拟组网向导，扫描在线组网设备并呈现「连接桌面」按钮
+    fireEvent.click(screen.getByText("虚拟组网"));
+    expect(await screen.findByText(/虚拟组网直连 · EasyTier 免注册口令组网/)).toBeTruthy();
+    fireEvent.click(screen.getByText(/刷新在线组网设备/));
+    expect(await screen.findByText("Office-PC")).toBeTruthy();
+    expect(screen.getByText("10.126.126.2")).toBeTruthy();
   });
 });

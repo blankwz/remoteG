@@ -345,6 +345,8 @@ export interface EasyTierStatusDto {
   installed: boolean;
   binaryPath: string;
   enabled: boolean;
+  running?: boolean;
+  noTun?: boolean;
   networkName: string;
   virtualIp: string;
   peerUrls: string[];
@@ -354,6 +356,8 @@ export interface EasyTierStatusDto {
 
 export interface EasyTierInviteResultDto {
   ok: boolean;
+  launched?: boolean;
+  noTun?: boolean;
   inviteCode: string;
   networkName: string;
   peerUrls: string[];
@@ -415,4 +419,40 @@ export function relayResolveId(
   numericId: string,
 ): Promise<RelayResolveIdResultDto> {
   return call("relay_resolve_id", { relayAddr, numericId });
+}
+
+export interface DirectConnectOutcomeDto {
+  ok: boolean;
+  needPairCode: boolean;
+  device: DeviceDto | null;
+  routeTag: string;
+  detail: string;
+}
+
+export function labConnectDirectOrMesh(params: {
+  targetAddr: string;
+  relayAddr?: string;
+  code?: string;
+  name?: string;
+}): Promise<DirectConnectOutcomeDto> {
+  return call("lab_connect_direct_or_mesh", {
+    targetAddr: params.targetAddr.trim(),
+    relayAddr: params.relayAddr?.trim() || null,
+    code: params.code?.trim() || null,
+    name: params.name?.trim() || null,
+  });
+}
+
+export function connectByRelayId(params: {
+  relayAddr: string;
+  numericId: string;
+  code?: string;
+  name?: string;
+}): Promise<DirectConnectOutcomeDto> {
+  return call("connect_by_relay_id", {
+    relayAddr: params.relayAddr.trim(),
+    numericId: params.numericId.trim(),
+    code: params.code?.trim() || null,
+    name: params.name?.trim() || null,
+  });
 }

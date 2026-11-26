@@ -148,6 +148,18 @@ fn run_app(args: RunArgs) -> anyhow::Result<()> {
         for addr in &bound {
             println!("RD_LISTEN={addr}");
         }
+        let raw_fp = u64::from_le_bytes(
+            runtime.state.local_fp.0[..8]
+                .try_into()
+                .expect("fp first 8 bytes"),
+        );
+        let num_id = 100_000_000 + (raw_fp % 900_000_000) as u32;
+        println!(
+            "RD_NUMERIC_ID={:03} {:03} {:03}",
+            num_id / 1_000_000,
+            (num_id / 1_000) % 1_000,
+            num_id % 1_000
+        );
         let _ = std::io::stdout().flush();
     }
 

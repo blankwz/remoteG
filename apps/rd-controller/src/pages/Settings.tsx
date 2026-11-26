@@ -34,7 +34,11 @@ import {
 } from "../ui/uiScale";
 import { Switch } from "../ui/Switch";
 import { loadAdvancedMode, saveAdvancedMode } from "../ui/advancedMode";
-import { deployRelaySsh, type SshDeployResult } from "../api/relayDeploy";
+import {
+  deployRelaySsh,
+  normalizeSshInput,
+  type SshDeployResult,
+} from "../api/relayDeploy";
 import {
   activateLicense,
   getEasytier,
@@ -367,11 +371,17 @@ export function Settings() {
     }
     setSshBusy(true);
     try {
+      const normalized = normalizeSshInput({
+        host: sshHost,
+        port: sshPort,
+        user: sshUser,
+        keyPath: sshKeyPath,
+      });
       const res = await deployRelaySsh({
-        host: sshHost.trim(),
-        port: Number(sshPort) || 22,
-        user: sshUser.trim() || "root",
-        keyPath: sshKeyPath.trim(),
+        host: normalized.host,
+        port: normalized.port,
+        user: normalized.user,
+        keyPath: normalized.keyPath,
         relayPort: 21118,
         mode: sshMode,
         domain: sshDomain.trim(),

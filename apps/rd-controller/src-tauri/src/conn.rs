@@ -159,20 +159,28 @@ pub fn encode_invalidate_frame(h: &rd_transport::TileHeader) -> Vec<u8> {
     out
 }
 
-/// 瓦片解码为 RGBA（fmt=0 QOI / fmt=1 zstd-BGRA→RGBA）。
+/// 瓦片解码为 RGBA（fmt=0 QOI-BGRA→RGBA / fmt=1 zstd-BGRA→RGBA）。
+///
+/// 注意：Agent 侧 `rd-encode::tiles` 直接按 WGC 像素序（BGRA）送入 QOI / zstd，
+/// 渲染侧 Canvas `ImageData` 要求 RGBA 字节序，故两种格式解码后均须做 B↔R 交换
+/// 并钳位 Alpha=255（防止桌面含半透明像素透出底层旧视频帧）。
 pub fn decode_tile_to_rgba(h: &rd_transport::TileHeader, data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let expected = u32::from(h.w) as usize * u32::from(h.h) as usize * 4;
     match h.fmt {
         TILE_FMT_QOI => {
-            let (header, rgba) =
+            let (header, mut bgra) =
                 qoi::decode_to_vec(data).map_err(|e| anyhow::anyhow!("qoi decode: {e}"))?;
             if header.width != u32::from(h.w) || header.height != u32::from(h.h) {
                 anyhow::bail!("qoi 尺寸不符 {}x{}", header.width, header.height);
             }
-            if rgba.len() != expected {
-                anyhow::bail!("qoi 输出 {} 字节，期望 {}", rgba.len(), expected);
+            if bgra.len() != expected {
+                anyhow::bail!("qoi 输出 {} 字节，期望 {}", bgra.len(), expected);
             }
-            Ok(rgba)
+            for px in bgra.as_chunks_mut::<4>().0 {
+                px.swap(0, 2); // BGRA → RGBA
+                px[3] = 255;
+            }
+            Ok(bgra)
         }
         TILE_FMT_ZSTD_BGRA => {
             let mut bgra =
@@ -182,6 +190,7 @@ pub fn decode_tile_to_rgba(h: &rd_transport::TileHeader, data: &[u8]) -> anyhow:
             }
             for px in bgra.as_chunks_mut::<4>().0 {
                 px.swap(0, 2); // BGRA → RGBA
+                px[3] = 255;
             }
             Ok(bgra)
         }
@@ -464,6 +473,27 @@ pub async fn resolve_addr(addr: &str, default_port: u16) -> anyhow::Result<Socke
         .ok_or_else(|| anyhow::anyhow!("地址 {with_port} 未解析出任何结果"))
 }
 
+/// 解析中继地址（支持 IP、域名、`udp://host:port` 等格式，缺省端口补 21118）。
+pub async fn resolve_relay_socket(raw: &str) -> anyhow::Result<SocketAddr> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("中继地址为空");
+    }
+    if trimmed.to_ascii_lowercase().starts_with("stun:")
+        || trimmed.to_ascii_lowercase().starts_with("stun://")
+    {
+        anyhow::bail!("公共 STUN 节点仅用于查询公网映射打洞，不能作为中继转发服务器");
+    }
+    let stripped = trimmed
+        .strip_prefix("udp://")
+        .or_else(|| trimmed.strip_prefix("UDP://"))
+        .unwrap_or(trimmed);
+    if let Ok(sock) = rd_transport::parse_relay_addr(stripped) {
+        return Ok(sock);
+    }
+    resolve_addr(stripped, DEFAULT_AGENT_PORT).await
+}
+
 /// Hello 握手错误（`pair_device`/`connect_device` 分别处理 Unauthenticated）。
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
@@ -606,7 +636,9 @@ impl DeviceConn {
             let Some(target_fp) = expected else {
                 anyhow::bail!("强制中继模式失败：未配对设备无指纹");
             };
-            let relay_addr = rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+            let relay_addr = resolve_relay_socket(relay_raw)
+                .await
+                .context("中继地址无效")?;
             let (_, c) =
                 rd_transport::connect_via_relay_punch(relay_addr, target_fp, identity, expected)
                     .await
@@ -619,8 +651,9 @@ impl DeviceConn {
                     let Some(target_fp) = expected else {
                         anyhow::bail!("打洞模式失败：未配对设备无指纹");
                     };
-                    let relay_addr =
-                        rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+                    let relay_addr = resolve_relay_socket(relay_raw)
+                        .await
+                        .context("中继地址无效")?;
                     let (path, c) = rd_transport::connect_via_relay_punch(
                         relay_addr, target_fp, identity, expected,
                     )
@@ -655,6 +688,20 @@ impl DeviceConn {
                 active_route = format!("easytier-ip ({sock})");
                 Arc::new(c)
             }
+        } else if let Some(relay_raw) = relay.as_deref().filter(|s| !s.trim().is_empty())
+            && let Some(target_fp) = expected
+            && let Ok(relay_addr) = resolve_relay_socket(relay_raw).await
+            && relay_addr == sock
+        {
+            // 若设备保存的地址本身就是中转服务器地址（如通过 9 位 ID 添加），直接走中继+打洞竞速，
+            // 不再浪费 3~5 秒尝试对中转服务器发起直连 QUIC。
+            tracing::info!(%relay_addr, "目标地址即中转服务器，直走原生中继（含打洞竞速）");
+            let (path, conn) =
+                rd_transport::connect_via_relay_punch(relay_addr, target_fp, identity, expected)
+                    .await
+                    .context("经中继连接失败（被控端不在线或中继不可达）")?;
+            active_route = format!("{path:?} ({relay_addr})");
+            Arc::new(conn)
         } else {
             match connect(sock, identity, expected).await {
                 Ok(c) => {
@@ -703,8 +750,9 @@ impl DeviceConn {
                             // 首次配对没有已知指纹（DIAL 按指纹寻人），首连必须直连
                             return Err(direct_err);
                         };
-                        let relay_addr =
-                            rd_transport::parse_relay_addr(relay_raw).context("中继地址无效")?;
+                        let relay_addr = resolve_relay_socket(relay_raw)
+                            .await
+                            .context("中继地址无效")?;
                         tracing::info!(%relay_addr, "直连失败，回退原生中继（含打洞竞速）");
                         let (path, conn) = rd_transport::connect_via_relay_punch(
                             relay_addr, target_fp, identity, expected,
@@ -717,6 +765,27 @@ impl DeviceConn {
                 }
             }
         };
+        Self::from_established_arc(device_id, sock, conn, media_fec, active_route).await
+    }
+
+    /// 基于已完成 QUIC 握手的底层 `Conn` 构造控制端 `DeviceConn`（供 P2P 打洞直连码、9 位 ID 中转直拨复用）。
+    pub async fn from_established_conn(
+        device_id: &str,
+        sock: SocketAddr,
+        conn: Conn,
+        media_fec: bool,
+        active_route: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::from_established_arc(device_id, sock, Arc::new(conn), media_fec, active_route).await
+    }
+
+    async fn from_established_arc(
+        device_id: &str,
+        sock: SocketAddr,
+        conn: Arc<Conn>,
+        media_fec: bool,
+        active_route: String,
+    ) -> anyhow::Result<Arc<Self>> {
         let peer_fp = conn.peer_fingerprint();
         let (ctrl_tx, ctrl_rx) = conn.open_control().await?;
         tracing::info!(
@@ -1227,6 +1296,9 @@ pub struct ConnManager {
     device_conns: Mutex<HashMap<String, Arc<DeviceConn>>>,
     spike_conns: Mutex<HashMap<String, Arc<Conn>>>,
     decode_caps: Mutex<DecodeCaps>,
+    /// 按目标指纹串行化拨号锁：杜绝自动重连与手动 9 位 ID 连接并发 DIAL 同一中转 tag，
+    /// 互相覆盖 `rd-relay` 唯一 `ctrl` 槽位导致连接假死 20s 超时！
+    connect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ConnManager {
@@ -1251,7 +1323,17 @@ impl ConnManager {
             device_conns: Mutex::new(HashMap::new()),
             spike_conns: Mutex::new(HashMap::new()),
             decode_caps: Mutex::new(DecodeCaps::default()),
+            connect_locks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 获取按目标键（指纹 hex）隔离的异步拨号串行锁。
+    pub fn connect_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.connect_locks.lock().expect("connect locks");
+        Arc::clone(
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     /// 数据目录（devices.json / trusted.json 所在）。
@@ -1686,11 +1768,19 @@ mod tests {
 
     #[test]
     fn tile_qoi_roundtrip_and_size_check() {
-        // 2x2 RGBA 图 → QOI → 解码回 RGBA
-        let rgba: Vec<u8> = vec![
-            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        // 2x2 BGRA 图（含纯红 [0,0,255,255] 与纯蓝 [255,0,0,255]）→ QOI → 解码并转为 RGBA
+        let bgra: Vec<u8> = vec![
+            0, 0, 255, 255, // 纯红 BGRA
+            255, 0, 0, 255, // 纯蓝 BGRA
+            10, 20, 30, 128, // 半透明像素 alpha 钳位 255
+            40, 50, 60, 255,
         ];
-        let encoded = qoi::encode_to_vec(&rgba, 2, 2).expect("encode");
+        let expected_rgba: Vec<u8> = vec![
+            255, 0, 0, 255, // 纯红 RGBA
+            0, 0, 255, 255, // 纯蓝 RGBA
+            30, 20, 10, 255, 60, 50, 40, 255,
+        ];
+        let encoded = qoi::encode_to_vec(&bgra, 2, 2).expect("encode");
         let th = rd_transport::TileHeader {
             window_id: 1,
             frame_seq: 1,
@@ -1701,7 +1791,7 @@ mod tests {
             fmt: TILE_FMT_QOI,
         };
         let decoded = decode_tile_to_rgba(&th, &encoded).expect("decode");
-        assert_eq!(decoded, rgba);
+        assert_eq!(decoded, expected_rgba);
         // 尺寸不符拒绝
         let th_bad = rd_transport::TileHeader { w: 4, h: 1, ..th };
         assert!(decode_tile_to_rgba(&th_bad, &encoded).is_err());

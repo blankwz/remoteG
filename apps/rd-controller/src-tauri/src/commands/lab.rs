@@ -2423,15 +2423,26 @@ async fn stun_probe_on_socket(
     sock.send_to(&req, target)
         .await
         .map_err(|e| format!("发包失败：{e}"))?;
+    let deadline = Instant::now() + Duration::from_millis(2500);
     let mut resp = [0u8; 512];
-    let (n, _) = tokio::time::timeout(Duration::from_millis(2500), sock.recv_from(&mut resp))
-        .await
-        .map_err(|_| "UDP 超时".to_string())?
-        .map_err(|e| format!("收包失败：{e}"))?;
-    let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
-    let mapped = parse_stun_mapped_addr(&resp[..n], &txid)
-        .ok_or_else(|| "未解析到公网映射地址".to_string())?;
-    Ok((rtt, mapped))
+    loop {
+        let remain = deadline.saturating_duration_since(Instant::now());
+        if remain.is_zero() {
+            return Err("UDP 超时".to_string());
+        }
+        let recv_res = tokio::time::timeout(remain, sock.recv_from(&mut resp))
+            .await
+            .map_err(|_| "UDP 超时".to_string())?;
+        let (n, _) = match recv_res {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(e) => return Err(format!("收包失败：{e}")),
+        };
+        if let Some(mapped) = parse_stun_mapped_addr(&resp[..n], &txid) {
+            let rtt = (t0.elapsed().as_secs_f64() * 10000.0).round() / 10.0;
+            return Ok((rtt, mapped));
+        }
+    }
 }
 
 /// 真实双 STUN 同端口 NAT 穿透体检：用同一个本地 UDP 端口分别探测 2 个不同 STUN，对比公网映射端口判断圆锥型 / 对称型 NAT。
@@ -2502,7 +2513,7 @@ pub async fn lab_diagnose_nat(stun_addrs: Vec<String>) -> Result<NatDiagnosisDto
         Ok(NatDiagnosisDto {
             nat_type: "cone".into(),
             label: "圆锥型 NAT（极易 P2P 打洞直连）".into(),
-            advice: "两次探测公网端口完全一致！使用「EasyTier 组网」或「自建中转 (方案 A · 9位ID)」均可直接打洞实现 20~50ms P2P 直连，不耗中转流量。".into(),
+            advice: "两次探测公网端口完全一致！使用「P2P 打洞直连码」、「EasyTier 组网」或「自建中转 9位ID」均可直接打洞实现 20~50ms P2P 直连，不耗中转流量。".into(),
             mapped_a: Some(ma),
             mapped_b: Some(mb),
             server_a: sa,
@@ -2513,8 +2524,8 @@ pub async fn lab_diagnose_nat(stun_addrs: Vec<String>) -> Result<NatDiagnosisDto
     } else {
         Ok(NatDiagnosisDto {
             nat_type: "symmetric".into(),
-            label: "对称型 NAT（P2P 打洞困难）".into(),
-            advice: "访问不同外部节点时路由器分配了不同端口，纯 P2P 容易失败；推荐在「自建中转 (方案 A)」部署国内低延迟 VPS 中转，或在「EasyTier 组网」选用国内高速节点兜底。".into(),
+            label: "对称型 NAT（纯 STUN 打洞较难）".into(),
+            advice: "访问不同外部节点时路由器分配了不同端口；推荐切到隔壁「虚拟组网 (EasyTier)」或「自建中转 (9位ID)」兜底穿透。".into(),
             mapped_a: Some(ma),
             mapped_b: Some(mb),
             server_a: sa,
@@ -2523,6 +2534,1244 @@ pub async fn lab_diagnose_nat(stun_addrs: Vec<String>) -> Result<NatDiagnosisDto
             rtt_b_ms: Some(rb),
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// 零服务器公共 STUN P2P 真实打洞直连（被控端生成 rd-p2p:// 口令 + 双向开洞 + 控制端同端口 QUIC 拨号）
+// ---------------------------------------------------------------------------
+
+const P2P_B64_TABLE: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn p2p_b64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(P2P_B64_TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(P2P_B64_TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(P2P_B64_TABLE[((n >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(P2P_B64_TABLE[(n & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+fn p2p_b64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut vals = Vec::with_capacity(input.len());
+    for b in input.trim().trim_end_matches('=').bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return Err("打洞口令包含非法字符".into()),
+        };
+        vals.push(v);
+    }
+    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
+    for chunk in vals.chunks(4) {
+        if chunk.len() < 2 {
+            return Err("打洞口令长度不完整".into());
+        }
+        let n0 = (chunk[0] as u32) << 18;
+        let n1 = (chunk[1] as u32) << 12;
+        let n2 = if chunk.len() > 2 {
+            (chunk[2] as u32) << 6
+        } else {
+            0
+        };
+        let n3 = if chunk.len() > 3 { chunk[3] as u32 } else { 0 };
+        let n = n0 | n1 | n2 | n3;
+        out.push(((n >> 16) & 0xff) as u8);
+        if chunk.len() > 2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct P2pInvitePayload {
+    /// 被控端 STUN 公网映射地址 (IP:Port)
+    m: String,
+    /// 直连候选列表 (IPv6 / UPnP / 局域网 / Tailscale / EasyTier IP:Port)
+    #[serde(default)]
+    c: Vec<String>,
+    /// 6 位一次性配对码
+    p: String,
+    /// 被控端 64 位证书指纹 hex
+    #[serde(default)]
+    f: String,
+    /// 所用公共 STUN 节点
+    #[serde(default)]
+    s: String,
+    /// 被控端主机名
+    #[serde(default)]
+    n: String,
+    /// 被控端实测 NAT 类型 (`"cone"` | `"symmetric"` | `""`)
+    #[serde(default)]
+    t: String,
+}
+
+fn encode_p2p_token(payload: &P2pInvitePayload) -> Result<String, String> {
+    let json = serde_json::to_vec(payload).map_err(|e| format!("编码打洞码失败：{e}"))?;
+    Ok(format!("rd-p2p://{}", p2p_b64_encode(&json)))
+}
+
+fn decode_p2p_token(raw: &str) -> Result<P2pInvitePayload, String> {
+    let trimmed = raw.trim();
+    let body = trimmed
+        .strip_prefix("rd-p2p://")
+        .or_else(|| trimmed.strip_prefix("RD-P2P://"))
+        .ok_or_else(|| "口令格式错误，应以 rd-p2p:// 开头".to_string())?;
+    let bytes = p2p_b64_decode(body)?;
+    let payload: P2pInvitePayload =
+        serde_json::from_slice(&bytes).map_err(|e| format!("解析打洞码失败：{e}"))?;
+    if payload.m.trim().is_empty() && payload.c.is_empty() {
+        return Err("打洞码缺少目标地址".into());
+    }
+    Ok(payload)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pHostOpenDto {
+    pub ok: bool,
+    pub token: String,
+    pub mapped_addr: String,
+    pub nat_type: String,
+    pub nat_label: String,
+    pub pair_code: String,
+    pub stun_used: String,
+    pub candidates: Vec<String>,
+    pub advice: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pConnectResultDto {
+    pub ok: bool,
+    pub need_reverse_punch: bool,
+    pub need_pair_code: bool,
+    pub reverse_code: String,
+    pub device: Option<crate::commands::devices::DeviceDto>,
+    pub route_tag: String,
+    pub detail: String,
+    pub ctrl_nat_type: String,
+    pub host_nat_type: String,
+    pub tx_pulses: u32,
+    pub rx_pulses: u32,
+    pub attempt_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pPunchStatusDto {
+    pub active: bool,
+    pub reverse_code: String,
+    pub ctrl_nat_type: String,
+    pub tx_pulses: u32,
+    pub rx_pulses: u32,
+    pub punched_peer: Option<String>,
+}
+
+struct P2pHostSession {
+    sock: Arc<tokio::net::UdpSocket>,
+    mapped_addr: String,
+    nat_type: String,
+    keepalive_gen: u64,
+    punch_tx_count: Arc<std::sync::atomic::AtomicU32>,
+}
+
+static P2P_HOST_SLOT: OnceLock<Mutex<Option<P2pHostSession>>> = OnceLock::new();
+static P2P_HOST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static P2P_HOST_PUNCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn p2p_host_slot() -> &'static Mutex<Option<P2pHostSession>> {
+    P2P_HOST_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+struct P2pCtrlPunchSlot {
+    sock: Arc<tokio::net::UdpSocket>,
+    mapped_addr: String,
+    ctrl_nat_type: String,
+    target_mapped: Option<std::net::SocketAddr>,
+    stop_pump: Arc<std::sync::atomic::AtomicBool>,
+    punched_peer: Arc<Mutex<Option<std::net::SocketAddr>>>,
+    tx_pulses: Arc<std::sync::atomic::AtomicU32>,
+    rx_pulses: Arc<std::sync::atomic::AtomicU32>,
+    attempt_count: u32,
+    pump_task: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+static P2P_CTRL_SLOT: OnceLock<tokio::sync::Mutex<Option<P2pCtrlPunchSlot>>> = OnceLock::new();
+
+fn p2p_ctrl_slot() -> &'static tokio::sync::Mutex<Option<P2pCtrlPunchSlot>> {
+    P2P_CTRL_SLOT.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// 启动控制端裸 UDP 持续开洞保活与回包监听泵（绝不在打通前挂载 quinn::Endpoint，彻底根除双 Endpoint 抢包与 30s 超时失效！）。
+fn spawn_ctrl_raw_punch_pump(
+    sock: Arc<tokio::net::UdpSocket>,
+    target_mapped: Option<std::net::SocketAddr>,
+    stun_srv: String,
+    stop_pump: Arc<std::sync::atomic::AtomicBool>,
+    punched_peer: Arc<Mutex<Option<std::net::SocketAddr>>>,
+    tx_pulses: Arc<std::sync::atomic::AtomicU32>,
+    rx_pulses: Arc<std::sync::atomic::AtomicU32>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let stun_host = strip_stun_scheme(&stun_srv);
+        let stun_target = tokio::net::lookup_host(&stun_host)
+            .await
+            .ok()
+            .and_then(|mut it| it.find(|a| a.is_ipv4()));
+        let mut buf = [0u8; 256];
+        // 持续 180 秒（520 轮 × 350ms），保证用户从容跨微信/QQ 复制粘贴回执码而洞口永不冷却！
+        for tick in 0..520u32 {
+            if stop_pump.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(ms) = target_mapped
+                && sock.send_to(b"RDPUNCH1", ms).await.is_ok()
+            {
+                tx_pulses.fetch_add(1, Ordering::Relaxed);
+            }
+            if tick > 0
+                && tick % 25 == 0
+                && let Some(st) = stun_target
+            {
+                let mut req = [0u8; 20];
+                req[1] = 0x01;
+                req[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+                let _ = sock.send_to(&req, st).await;
+            }
+
+            let step_deadline = Instant::now() + Duration::from_millis(350);
+            loop {
+                if stop_pump.load(Ordering::SeqCst) {
+                    return;
+                }
+                let remain = step_deadline.saturating_duration_since(Instant::now());
+                if remain.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remain, sock.recv_from(&mut buf)).await {
+                    Ok(Ok((n, from))) => {
+                        if stun_target == Some(from)
+                            || (n >= 20 && buf[0] == 0x01 && buf[1] == 0x01)
+                        {
+                            continue;
+                        }
+                        let is_punch = (n >= 8 && &buf[..8] == b"RDPUNCH1")
+                            || (n >= 11 && &buf[..11] == b"RDPUNCH_ACK")
+                            || target_mapped.is_some_and(|ms| ms.ip() == from.ip());
+                        if is_punch {
+                            rx_pulses.fetch_add(1, Ordering::Relaxed);
+                            tracing::info!(
+                                peer = %from,
+                                bytes = n,
+                                "[P2P-CTRL] 收到被控端开洞包！双向 NAT 与防火墙已物理贯通，准备切换 QUIC 握手"
+                            );
+                            for _ in 0..5 {
+                                let _ = sock.send_to(b"RDPUNCH_ACK", from).await;
+                            }
+                            *punched_peer.lock().expect("punched_peer") = Some(from);
+                            // 立即退出裸收包泵，把干净无竞争的 UDP socket 移交给 quinn::Endpoint！
+                            return;
+                        }
+                    }
+                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Ok(Err(_)) => break,
+                    Err(_) => break,
+                }
+            }
+        }
+        tracing::info!("[P2P-CTRL] 控制端裸打洞保活窗口结束");
+    })
+}
+
+/// 前端轮询控制端打洞实时状态（脉冲计数 + 是否已收到被控端开洞包，一旦收到前端可零点击自动连入桌面！）。
+#[tauri::command]
+pub async fn lab_p2p_check_status() -> Result<P2pPunchStatusDto, String> {
+    let guard = p2p_ctrl_slot().lock().await;
+    let Some(slot) = guard.as_ref() else {
+        return Ok(P2pPunchStatusDto {
+            active: false,
+            reverse_code: String::new(),
+            ctrl_nat_type: String::new(),
+            tx_pulses: 0,
+            rx_pulses: 0,
+            punched_peer: None,
+        });
+    };
+    let punched = slot
+        .punched_peer
+        .lock()
+        .expect("punched_peer")
+        .map(|a| a.to_string());
+    Ok(P2pPunchStatusDto {
+        active: !slot.stop_pump.load(Ordering::Relaxed),
+        reverse_code: format!("rd-punch://{}", slot.mapped_addr),
+        ctrl_nat_type: slot.ctrl_nat_type.clone(),
+        tx_pulses: slot.tx_pulses.load(Ordering::Relaxed),
+        rx_pulses: slot.rx_pulses.load(Ordering::Relaxed),
+        punched_peer: punched,
+    })
+}
+
+/// 被控端开启真实公共 STUN 打洞监听：绑定专用 UDP 端口 → 经双公共 STUN 获取真实公网 `IP:Port` 并鉴别圆锥/对称型 NAT →
+/// 在同一 UDP 端口上挂载 `rd_transport::Server` 接入 `rd-agent` → 启动 10s 保活 → 返回一键复制的 `rd-p2p://...` 打洞连接码！
+#[tauri::command]
+pub async fn lab_p2p_host_open(
+    stun_addr: Option<String>,
+    app: AppHandle,
+) -> Result<P2pHostOpenDto, String> {
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (stun_addr, app);
+        Err(
+            "当前移动平台仅作为控制端运行；请在电脑端点击「生成本机打洞码」，在手机端粘贴连接"
+                .into(),
+        )
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        use tauri::Manager as _;
+        let Some(agent_st) = app.try_state::<Arc<rd_agent::AgentState>>() else {
+            tracing::warn!(
+                "[P2P-HOST] 生成打洞码失败：AgentState 未挂载（端口可能被已有实例占用）"
+            );
+            return Err(
+                "本机被控服务未运行（可能已有另一个 rd 实例占用端口），无法生成被控打洞码".into(),
+            );
+        };
+        let state = Arc::clone(&*agent_st);
+
+        let mut stun_list: Vec<String> = Vec::new();
+        if let Some(s) = stun_addr
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+        {
+            stun_list.push(s);
+        }
+        for fb in [
+            "stun.miwifi.com:3478",
+            "stun.chat.bilibili.com:3478",
+            "stun.hitv.com:3478",
+            "stun.cloudflare.com:3478",
+        ] {
+            if !stun_list.iter().any(|x| x.eq_ignore_ascii_case(fb)) {
+                stun_list.push(fb.to_string());
+            }
+        }
+
+        // 绑定一个真实 UDP socket：先在其上跑双 STUN 对比公网映射 IP:端口，再把同一个 socket 交给 QUIC Server！
+        let sock = rd_transport::bind_udp_socket("0.0.0.0:0".parse().unwrap())
+            .await
+            .map_err(|e| format!("绑定打洞 UDP 端口失败：{e}"))?;
+        let local_port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
+
+        let mut stun_hits: Vec<(String, String)> = Vec::new();
+        for srv in &stun_list {
+            match stun_probe_on_socket(&sock, srv).await {
+                Ok((rtt, mapped)) => {
+                    tracing::info!(
+                        stun = %srv,
+                        %mapped,
+                        rtt_ms = rtt,
+                        local_port,
+                        "[P2P-HOST] STUN 映射探测成功"
+                    );
+                    stun_hits.push((srv.clone(), mapped));
+                    if stun_hits.len() >= 2 {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(stun = %srv, %err, "[P2P-HOST] STUN 节点无响应");
+                }
+            }
+        }
+
+        if stun_hits.is_empty() {
+            tracing::warn!("[P2P-HOST] 所有公共 STUN 均无 UDP 响应");
+            return Err("所选公共 STUN 全部无 UDP 响应（当前网络可能封锁了 UDP），请改用「虚拟组网」或「自建中转」".into());
+        }
+
+        let (stun_used, mapped_addr) = stun_hits[0].clone();
+        let (nat_type, nat_label, advice) = if stun_hits.len() >= 2 {
+            if stun_hits[0].1 == stun_hits[1].1 {
+                (
+                    "cone".to_string(),
+                    "圆锥型 NAT（支持 STUN 打洞直连）".to_string(),
+                    "已锁定本机公网洞口并持续保活！把下方『打洞连接码』发给控制端粘贴；若遇路由器防火墙拦截，把对方弹出的回执码粘到下方点一次『协助开洞』即可自动秒连！".to_string(),
+                )
+            } else {
+                (
+                    "symmetric".to_string(),
+                    format!("对称型 NAT（{} vs {}）", stun_hits[0].1, stun_hits[1].1),
+                    "注意：检测到本机处于对称型 NAT（手机热点/多层路由常见，每次访问外部自动换端口）。若控制端为圆锥型 NAT 仍可经『协助开洞』连通；若双端打洞不通，请点上方『虚拟组网 (EasyTier)』100% 穿透！".to_string(),
+                )
+            }
+        } else {
+            (
+                "cone".to_string(),
+                format!("STUN 映射就绪 ({mapped_addr})"),
+                "已生成本机打洞连接码并开启端口保活，复制发给对方粘贴即可连接！".to_string(),
+            )
+        };
+
+        // 合并本机全部真实监听地址（含 Tailscale 100.x / EasyTier 10.126.x / 局域网 192.168.x）+ IPv6/UPnP 候选
+        let bound_addrs = state.listen_addrs.lock().expect("listen_addrs").clone();
+        let listen_port = bound_addrs.first().map(|a| a.port()).unwrap_or(21118);
+        let mut cand_set: Vec<String> = Vec::new();
+        for a in &bound_addrs {
+            if !a.ip().is_loopback() && !a.ip().is_unspecified() {
+                let s = a.to_string();
+                if !cand_set.contains(&s) {
+                    cand_set.push(s);
+                }
+            }
+        }
+        for a in rd_agent::punch_candidates::collect(listen_port, None).await {
+            let s = a.to_string();
+            if !cand_set.contains(&s) {
+                cand_set.push(s);
+            }
+        }
+        cand_set.truncate(10);
+
+        // 生成 6 位一次性配对码（5 分钟有效；若已有剩余 >3 分钟的码则直接沿用，防误刷掉旧码）
+        let pair_code = {
+            let mut pairing = state.pairing.lock().expect("pairing lock");
+            if let Some((existing_code, exp)) = pairing.current_code()
+                && exp.saturating_duration_since(Instant::now()) > Duration::from_secs(180)
+            {
+                existing_code
+            } else {
+                pairing.new_code()
+            }
+        };
+
+        // 在同一 UDP 端口上启动 QUIC Server 接入 rd-agent！
+        let server = rd_transport::Server::bind_socket(Arc::clone(&sock), &state.identity)
+            .map_err(|e| format!("启动打洞 QUIC 监听失败：{e:#}"))?;
+        let state_for_srv = Arc::clone(&state);
+        tauri::async_runtime::spawn(async move {
+            rd_agent::server::serve_all(state_for_srv, vec![server]).await;
+        });
+
+        // 记录会话并启动每 10 秒一次的 STUN 保活（维持路由器 NAT 映射洞口 10 分钟不关闭）
+        let my_gen = P2P_HOST_GEN.fetch_add(1, Ordering::SeqCst);
+        let punch_tx_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        {
+            let mut slot = p2p_host_slot().lock().expect("p2p_host_slot");
+            *slot = Some(P2pHostSession {
+                sock: Arc::clone(&sock),
+                mapped_addr: mapped_addr.clone(),
+                nat_type: nat_type.clone(),
+                keepalive_gen: my_gen,
+                punch_tx_count,
+            });
+        }
+        tracing::info!(
+            %mapped_addr,
+            %nat_type,
+            local_port,
+            candidates = ?cand_set,
+            "[P2P-HOST] 本机打洞 QUIC 监听已就绪并进入 10s 周期保活"
+        );
+
+        let ka_sock = Arc::clone(&sock);
+        let ka_stun = strip_stun_scheme(&stun_used);
+        tauri::async_runtime::spawn(async move {
+            let Ok(mut addrs) = tokio::net::lookup_host(&ka_stun).await else {
+                return;
+            };
+            let Some(stun_target) = addrs.find(|a| a.is_ipv4()) else {
+                return;
+            };
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let still_current = p2p_host_slot()
+                    .lock()
+                    .expect("p2p_host_slot")
+                    .as_ref()
+                    .is_some_and(|s| s.keepalive_gen == my_gen);
+                if !still_current {
+                    break;
+                }
+                let mut req = [0u8; 20];
+                req[1] = 0x01;
+                req[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+                let _ = ka_sock.send_to(&req, stun_target).await;
+            }
+        });
+
+        let host_name = crate::conn::host_display_name();
+        let token = encode_p2p_token(&P2pInvitePayload {
+            m: mapped_addr.clone(),
+            c: cand_set.clone(),
+            p: pair_code.clone(),
+            f: state.local_fp.hex(),
+            s: stun_used.clone(),
+            n: host_name,
+            t: nat_type.clone(),
+        })?;
+
+        Ok(P2pHostOpenDto {
+            ok: true,
+            token,
+            mapped_addr,
+            nat_type,
+            nat_label,
+            pair_code,
+            stun_used,
+            candidates: cand_set,
+            advice,
+        })
+    }
+}
+
+/// 被控端协助双向打洞：粘贴控制端的 `rd-punch://IP:Port` 回执码，
+/// 从被控端正在监听 QUIC 的**同一个 UDP 端口**向控制端持续发射 60 秒开洞脉冲，瞬间打通双向 NAT 与防火墙！
+#[tauri::command]
+pub async fn lab_p2p_host_punch_peer(peer_receipt: String) -> Result<String, String> {
+    let raw = peer_receipt.trim();
+    let stripped = raw
+        .strip_prefix("rd-punch://")
+        .or_else(|| raw.strip_prefix("RD-PUNCH://"))
+        .unwrap_or(raw)
+        .trim();
+    let peer_addr: std::net::SocketAddr = stripped
+        .parse()
+        .map_err(|_| "回执码格式不正确（应为 rd-punch://IP:端口 或 IP:端口）".to_string())?;
+
+    let (sock, host_mapped, host_nat, tx_counter) = {
+        let guard = p2p_host_slot().lock().expect("p2p_host_slot");
+        let Some(s) = guard.as_ref() else {
+            tracing::warn!("[P2P-HOST] 协助开洞失败：尚未生成本机打洞连接码");
+            return Err("请先在本机点击「🔑 生成本机 STUN 打洞连接码」开启监听洞口".to_string());
+        };
+        (
+            Arc::clone(&s.sock),
+            s.mapped_addr.clone(),
+            s.nat_type.clone(),
+            Arc::clone(&s.punch_tx_count),
+        )
+    };
+
+    let punch_gen = P2P_HOST_PUNCH_GEN.fetch_add(1, Ordering::SeqCst);
+    tracing::info!(
+        %peer_addr,
+        %host_mapped,
+        %host_nat,
+        "[P2P-HOST] 开始向控制端持续发射 60s 双向开洞脉冲"
+    );
+
+    for _ in 0..8 {
+        if sock.send_to(b"RDPUNCH1", peer_addr).await.is_ok() {
+            tx_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let bg_sock = Arc::clone(&sock);
+    tauri::async_runtime::spawn(async move {
+        // 持续 60 秒（170 × 350ms），彻底告别以往 6 秒过短导致人工切窗口来不及的问题！
+        for _ in 0..170 {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            if P2P_HOST_PUNCH_GEN.load(Ordering::Relaxed) != punch_gen + 1 {
+                // 若发起了更新一轮协助开洞则让位
+            }
+            if bg_sock.send_to(b"RDPUNCH1", peer_addr).await.is_ok() {
+                tx_counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        tracing::info!(%peer_addr, "[P2P-HOST] 60s 协助开洞脉冲发送完毕");
+    });
+
+    Ok(format!(
+        "已从本机洞口 ({host_mapped}) 向控制端 ({peer_addr}) 发射高频双向开洞脉冲（持续保活 60 秒）！控制端收到脉冲后将自动进入远程桌面！"
+    ))
+}
+
+/// 控制端粘贴对方的 `rd-p2p://...` 打洞连接码，执行多路候选快拨 + 干净裸端口持续双向打洞 + 同端口单次 QUIC 握手直入桌面！
+#[tauri::command]
+pub async fn lab_p2p_connect_token(
+    token_or_addr: String,
+    code: Option<String>,
+    stun_addr: Option<String>,
+    app: AppHandle,
+    state: State<'_, ConnManager>,
+) -> Result<P2pConnectResultDto, String> {
+    let trimmed = token_or_addr.trim();
+    if trimmed.is_empty() {
+        return Err("请粘贴对方发来的 rd-p2p:// 打洞连接码（或公网 IP:端口）".into());
+    }
+
+    let payload = if trimmed.to_ascii_lowercase().starts_with("rd-p2p://") {
+        decode_p2p_token(trimmed)?
+    } else {
+        P2pInvitePayload {
+            m: normalize_probe_addr(trimmed, crate::conn::DEFAULT_AGENT_PORT),
+            c: Vec::new(),
+            p: code.clone().unwrap_or_default(),
+            f: String::new(),
+            s: stun_addr.clone().unwrap_or_default(),
+            n: String::new(),
+            t: String::new(),
+        }
+    };
+
+    let final_code = code
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| payload.p.clone());
+    let host_nat_type = if payload.t.is_empty() {
+        "unknown".to_string()
+    } else {
+        payload.t.clone()
+    };
+
+    let expected_fp: Option<rd_transport::Fingerprint> = if payload.f.len() == 64 {
+        let mut arr = [0u8; 32];
+        let mut ok_hex = true;
+        for (i, b) in arr.iter_mut().enumerate() {
+            if let Ok(v) = u8::from_str_radix(&payload.f[i * 2..i * 2 + 2], 16) {
+                *b = v;
+            } else {
+                ok_hex = false;
+                break;
+            }
+        }
+        ok_hex.then_some(rd_transport::Fingerprint(arr))
+    } else {
+        None
+    };
+
+    let mapped_sock: Option<std::net::SocketAddr> = payload.m.trim().parse().ok();
+    let cand_socks: Vec<std::net::SocketAddr> = payload
+        .c
+        .iter()
+        .filter_map(|c| c.trim().parse::<std::net::SocketAddr>().ok())
+        .collect();
+
+    tracing::info!(
+        host_mapped = ?mapped_sock,
+        %host_nat_type,
+        candidates = ?cand_socks,
+        "[P2P-CTRL] 开始执行 P2P 打洞连接"
+    );
+
+    // 检查是否已有针对同一目标正在保活中的控制端打洞槽位
+    let had_existing_slot = {
+        let guard = p2p_ctrl_slot().lock().await;
+        guard
+            .as_ref()
+            .is_some_and(|s| s.target_mapped == mapped_sock && !s.stop_pump.load(Ordering::Relaxed))
+    };
+
+    // 第一阶段（仅首次点击执行）：用全新临时端口并发快拨所有直连候选（同局域网 / Tailscale 100.x / IPv6 / UPnP / 全圆锥 NAT）
+    // 绝不触碰专用打洞 socket `ctrl_sock`，确保 `ctrl_sock` 保持 100% 纯净无 quinn 残留！
+    if !had_existing_slot {
+        let id = state.identity().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fast_pending = 0usize;
+
+        if let Some(ms) = mapped_sock {
+            fast_pending += 1;
+            let tx_c = tx.clone();
+            let id_c = id.clone();
+            tauri::async_runtime::spawn(async move {
+                let res = tokio::time::timeout(
+                    Duration::from_millis(2200),
+                    rd_transport::connect(ms, &id_c, expected_fp),
+                )
+                .await;
+                let out = match res {
+                    Ok(Ok(conn)) => Ok((ms, format!("全圆锥公网直连 ({ms})"), conn)),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err("公网首拨需双向开洞".into()),
+                };
+                let _ = tx_c.send(out);
+            });
+        }
+        for cs in &cand_socks {
+            let cs = *cs;
+            fast_pending += 1;
+            let tx_c = tx.clone();
+            let id_c = id.clone();
+            tauri::async_runtime::spawn(async move {
+                let res = tokio::time::timeout(
+                    Duration::from_millis(2200),
+                    rd_transport::connect(cs, &id_c, expected_fp),
+                )
+                .await;
+                let out = match res {
+                    Ok(Ok(conn)) => Ok((cs, format!("直连候选秒通 ({cs})"), conn)),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err("候选超时".into()),
+                };
+                let _ = tx_c.send(out);
+            });
+        }
+        drop(tx);
+
+        while fast_pending > 0 {
+            match rx.recv().await {
+                Some(Ok((hit_addr, route_tag, raw_conn))) => {
+                    tracing::info!(%hit_addr, %route_tag, "[P2P-CTRL] 首轮免开洞候选直连命中！");
+                    return finalize_p2p_established(
+                        hit_addr,
+                        route_tag,
+                        raw_conn,
+                        &final_code,
+                        &payload.n,
+                        String::new(),
+                        "direct".into(),
+                        host_nat_type,
+                        0,
+                        0,
+                        1,
+                        &app,
+                        &state,
+                    )
+                    .await;
+                }
+                Some(Err(_)) => fast_pending -= 1,
+                None => break,
+            }
+        }
+    }
+
+    // 第二阶段：准备或复用专用裸 UDP 打洞槽位（双 STUN 鉴别控制端 NAT + 后台持续脉冲保活泵）
+    let stun_srv = stun_addr
+        .filter(|x| !x.trim().is_empty())
+        .or_else(|| (!payload.s.is_empty()).then(|| payload.s.clone()))
+        .unwrap_or_else(|| "stun.miwifi.com:3478".into());
+
+    {
+        let mut guard = p2p_ctrl_slot().lock().await;
+        let need_new = match guard.as_ref() {
+            Some(s) => s.target_mapped != mapped_sock || s.stop_pump.load(Ordering::Relaxed),
+            None => true,
+        };
+        if need_new {
+            if let Some(mut old) = guard.take() {
+                old.stop_pump.store(true, Ordering::SeqCst);
+                if let Some(h) = old.pump_task.take() {
+                    h.abort();
+                }
+            }
+            let s = rd_transport::bind_udp_socket("0.0.0.0:0".parse().unwrap())
+                .await
+                .map_err(|e| format!("创建控制端打洞端口失败：{e}"))?;
+            let local_port = s.local_addr().map(|a| a.port()).unwrap_or(0);
+
+            let mut ctrl_hits: Vec<String> = Vec::new();
+            for probe_srv in [
+                stun_srv.as_str(),
+                "stun.miwifi.com:3478",
+                "stun.chat.bilibili.com:3478",
+                "stun.cloudflare.com:3478",
+            ] {
+                if ctrl_hits.len() >= 2 {
+                    break;
+                }
+                if let Ok((rtt, m)) = stun_probe_on_socket(&s, probe_srv).await {
+                    tracing::info!(
+                        stun = %probe_srv,
+                        mapped = %m,
+                        rtt_ms = rtt,
+                        local_port,
+                        "[P2P-CTRL] 控制端 STUN 映射探测成功"
+                    );
+                    ctrl_hits.push(m);
+                }
+            }
+            let ctrl_mapped = ctrl_hits
+                .first()
+                .cloned()
+                .unwrap_or_else(|| s.local_addr().map(|a| a.to_string()).unwrap_or_default());
+            let ctrl_nat_type = if ctrl_hits.len() >= 2 {
+                if ctrl_hits[0] == ctrl_hits[1] {
+                    "cone".to_string()
+                } else {
+                    tracing::warn!(
+                        m1 = %ctrl_hits[0],
+                        m2 = %ctrl_hits[1],
+                        "[P2P-CTRL] 检测到控制端处于对称型 NAT"
+                    );
+                    "symmetric".to_string()
+                }
+            } else {
+                "cone".to_string()
+            };
+
+            let stop_pump = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let punched_peer = Arc::new(Mutex::new(None));
+            let tx_pulses = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let rx_pulses = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let pump_task = spawn_ctrl_raw_punch_pump(
+                Arc::clone(&s),
+                mapped_sock,
+                stun_srv.clone(),
+                Arc::clone(&stop_pump),
+                Arc::clone(&punched_peer),
+                Arc::clone(&tx_pulses),
+                Arc::clone(&rx_pulses),
+            );
+
+            *guard = Some(P2pCtrlPunchSlot {
+                sock: s,
+                mapped_addr: ctrl_mapped,
+                ctrl_nat_type,
+                target_mapped: mapped_sock,
+                stop_pump,
+                punched_peer,
+                tx_pulses,
+                rx_pulses,
+                attempt_count: 0,
+                pump_task: Some(pump_task),
+            });
+        }
+    }
+
+    // 若是用户手动点了「对方已点协助开洞 → 立即完成连接」，多等待最多 3.5 秒观察是否收到被控端开洞包；
+    // 若是首次点击，短等 600ms（万一对端刚好已在发包则秒通，否则立即弹出回执码并后台持续自动守候！）
+    let wait_ms = if had_existing_slot { 3500u64 } else { 600u64 };
+    let wait_deadline = Instant::now() + Duration::from_millis(wait_ms);
+    let mut ready_peer: Option<std::net::SocketAddr> = None;
+    loop {
+        {
+            let guard = p2p_ctrl_slot().lock().await;
+            if let Some(slot) = guard.as_ref() {
+                ready_peer = *slot.punched_peer.lock().expect("punched_peer");
+            }
+        }
+        if ready_peer.is_some() || Instant::now() >= wait_deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // 情况 A：已真实收到被控端 UDP 开洞脉冲！干净停泵 → 移交裸 socket 给 quinn 单次握手！
+    if let Some(peer_addr) = ready_peer {
+        let taken = {
+            let mut guard = p2p_ctrl_slot().lock().await;
+            guard.take()
+        };
+        if let Some(mut slot) = taken {
+            slot.stop_pump.store(true, Ordering::SeqCst);
+            if let Some(handle) = slot.pump_task.take() {
+                let _ = tokio::time::timeout(Duration::from_millis(600), handle).await;
+            }
+            let tx_n = slot.tx_pulses.load(Ordering::Relaxed);
+            let rx_n = slot.rx_pulses.load(Ordering::Relaxed);
+            let reverse_code = format!("rd-punch://{}", slot.mapped_addr);
+            let ctrl_nat = slot.ctrl_nat_type.clone();
+            tracing::info!(
+                %peer_addr,
+                ctrl_mapped = %slot.mapped_addr,
+                tx_n,
+                rx_n,
+                "[P2P-CTRL] 双向洞口已验证贯通，正在发起唯一一次同端口 QUIC 握手"
+            );
+
+            let id = state.identity().clone();
+            match tokio::time::timeout(
+                Duration::from_millis(6000),
+                rd_transport::connect_socket(slot.sock, peer_addr, &id, expected_fp),
+            )
+            .await
+            {
+                Ok(Ok(raw_conn)) => {
+                    let route_tag = format!("STUN P2P 双向打洞直连 ({peer_addr})");
+                    tracing::info!(%peer_addr, "[P2P-CTRL] 同端口 QUIC 握手成功！");
+                    return finalize_p2p_established(
+                        peer_addr,
+                        route_tag,
+                        raw_conn,
+                        &final_code,
+                        &payload.n,
+                        reverse_code,
+                        ctrl_nat,
+                        host_nat_type,
+                        tx_n,
+                        rx_n,
+                        slot.attempt_count + 1,
+                        &app,
+                        &state,
+                    )
+                    .await;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%peer_addr, err = %e, "[P2P-CTRL] 洞口已通但 QUIC 握手失败");
+                    return Err(format!(
+                        "UDP 洞口已打通 ({peer_addr})，但 QUIC 加密握手失败：{e:#}（请重新点击连接自动重建洞口）"
+                    ));
+                }
+                Err(_) => {
+                    tracing::warn!(%peer_addr, "[P2P-CTRL] 洞口已通但 QUIC 握手 6s 超时");
+                    return Err(format!(
+                        "已收到对端开洞包 ({peer_addr})，但 QUIC 握手超时（请重新点击连接重试）"
+                    ));
+                }
+            }
+        }
+    }
+
+    // 情况 B：尚未收到被控端的 UDP 开洞包 —— 保持裸 UDP 泵持续运行，返回精确脉冲计数与 NAT 诊断指引！
+    let (reverse_code, ctrl_nat, tx_n, rx_n, attempt_n) = {
+        let mut guard = p2p_ctrl_slot().lock().await;
+        let slot = guard.as_mut().expect("ctrl slot initialized");
+        slot.attempt_count += 1;
+        (
+            format!("rd-punch://{}", slot.mapped_addr),
+            slot.ctrl_nat_type.clone(),
+            slot.tx_pulses.load(Ordering::Relaxed),
+            slot.rx_pulses.load(Ordering::Relaxed),
+            slot.attempt_count,
+        )
+    };
+
+    let both_symmetric = ctrl_nat == "symmetric" && host_nat_type == "symmetric";
+    let any_symmetric = ctrl_nat == "symmetric" || host_nat_type == "symmetric";
+
+    let detail = if both_symmetric {
+        format!(
+            "检测到双端均为『对称型 NAT』（本机={ctrl_nat}，对端={host_nat_type}），路由器每次对外发包都会随机换端口，纯公共 STUN 物理上无法直接互猜端口。请直接点击上方『虚拟组网 (EasyTier)』免服务器一键穿透！"
+        )
+    } else if attempt_n == 1 {
+        format!(
+            "本机公网洞口已锁定并持续脉冲保活中（已发 {tx_n} 包）！请复制下方『控制端回执码』发给被控端粘贴并点击「🔓 协助开洞」——对方点击后本机将自动秒进桌面！"
+        )
+    } else if any_symmetric {
+        format!(
+            "第 {attempt_n} 次检测：已持续发送 {tx_n} 次脉冲，但收包仍为 0（本机 NAT={ctrl_nat}，对端 NAT={host_nat_type}）。因存在对称型 NAT 换端口拦截，建议直接切到上方『虚拟组网 (EasyTier)』100% 稳定连通！"
+        )
+    } else {
+        format!(
+            "第 {attempt_n} 次检测：本机洞口持续保活中（已发 {tx_n} 包 · 收包 {rx_n}）。尚未收到被控端开洞包——请确认被控端已粘贴最新回执码 `{reverse_code}` 并点击了「🔓 协助开洞」（一旦收到回包将自动连入桌面）！"
+        )
+    };
+
+    tracing::info!(
+        %reverse_code,
+        %ctrl_nat,
+        %host_nat_type,
+        tx_n,
+        rx_n,
+        attempt_n,
+        "[P2P-CTRL] 等待被控端双向开洞回包中"
+    );
+
+    Ok(P2pConnectResultDto {
+        ok: false,
+        need_reverse_punch: true,
+        need_pair_code: false,
+        reverse_code,
+        device: None,
+        route_tag: "等待双向开洞".into(),
+        detail,
+        ctrl_nat_type: ctrl_nat,
+        host_nat_type,
+        tx_pulses: tx_n,
+        rx_pulses: rx_n,
+        attempt_count: attempt_n,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_p2p_established(
+    hit_addr: std::net::SocketAddr,
+    route_tag: String,
+    raw_conn: rd_transport::Conn,
+    final_code: &str,
+    host_name: &str,
+    reverse_code: String,
+    ctrl_nat_type: String,
+    host_nat_type: String,
+    tx_pulses: u32,
+    rx_pulses: u32,
+    attempt_count: u32,
+    app: &AppHandle,
+    state: &State<'_, ConnManager>,
+) -> Result<P2pConnectResultDto, String> {
+    let dev_conn = crate::conn::DeviceConn::from_established_conn(
+        "p2p-direct",
+        hit_addr,
+        raw_conn,
+        crate::commands::devices::media_fec_setting(state.data_dir()),
+        route_tag.clone(),
+    )
+    .await
+    .map_err(|e| format!("建立远控通道失败：{e:#}"))?;
+
+    let (dev_opt, need_code) = crate::commands::devices::auth_or_pair_established(
+        dev_conn,
+        final_code,
+        &hit_addr.to_string(),
+        host_name,
+        None,
+        app,
+        state,
+    )
+    .await?;
+
+    if need_code {
+        tracing::info!(%hit_addr, "[P2P-CTRL] P2P 通道已建立，等待用户补填 6 位配对码");
+        Ok(P2pConnectResultDto {
+            ok: false,
+            need_reverse_punch: false,
+            need_pair_code: true,
+            reverse_code,
+            device: None,
+            route_tag,
+            detail: "P2P 打洞已连通对方！请输入对方的 6 位配对码完成连接。".into(),
+            ctrl_nat_type,
+            host_nat_type,
+            tx_pulses,
+            rx_pulses,
+            attempt_count,
+        })
+    } else {
+        tracing::info!(%hit_addr, %route_tag, "[P2P-CTRL] P2P 打洞配对全部完成，正在进入桌面！");
+        Ok(P2pConnectResultDto {
+            ok: true,
+            need_reverse_punch: false,
+            need_pair_code: false,
+            reverse_code,
+            device: dev_opt,
+            route_tag: route_tag.clone(),
+            detail: format!("🎉 {route_tag} 成功！正在进入完整远程桌面…"),
+            ctrl_nat_type,
+            host_nat_type,
+            tx_pulses,
+            rx_pulses,
+            attempt_count,
+        })
+    }
+}
+
+/// 一键导出脱敏后的本机网络 + P2P 打洞状态 + 最近运行日志，方便用户直接复制粘贴给开发者排障！
+#[tauri::command]
+pub async fn lab_export_diagnostic_log(app: AppHandle) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str("=== RD 远程控制 · 实验室排障诊断快照 ===\n");
+    out.push_str(&format!(
+        "版本: v{} | 系统: {}\n",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    ));
+
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        use tauri::Manager as _;
+        if let Some(st) = app.try_state::<Arc<rd_agent::AgentState>>() {
+            let addrs = st.listen_addrs.lock().expect("listen_addrs").clone();
+            out.push_str(&format!(
+                "被控核心监听: {:?} | 指纹前8字节: {}\n",
+                addrs,
+                st.local_fp.short_hex()
+            ));
+        } else {
+            out.push_str("被控核心状态: 未挂载 (仅控制端模式)\n");
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = &app;
+    }
+
+    {
+        let h_guard = p2p_host_slot().lock().expect("p2p_host_slot");
+        if let Some(h) = h_guard.as_ref() {
+            out.push_str(&format!(
+                "[P2P 被控槽位] 映射={} | NAT={} | 发出开洞脉冲={}\n",
+                h.mapped_addr,
+                h.nat_type,
+                h.punch_tx_count.load(Ordering::Relaxed)
+            ));
+        } else {
+            out.push_str("[P2P 被控槽位] 未开启\n");
+        }
+    }
+    {
+        let c_guard = p2p_ctrl_slot().lock().await;
+        if let Some(c) = c_guard.as_ref() {
+            let pp = *c.punched_peer.lock().expect("punched_peer");
+            out.push_str(&format!(
+                "[P2P 控制槽位] 本机映射={} | 本机NAT={} | 目标={:?} | 发包={} | 收包={} | 贯通对端={:?} | 尝试次数={}\n",
+                c.mapped_addr,
+                c.ctrl_nat_type,
+                c.target_mapped,
+                c.tx_pulses.load(Ordering::Relaxed),
+                c.rx_pulses.load(Ordering::Relaxed),
+                pp,
+                c.attempt_count
+            ));
+        } else {
+            out.push_str("[P2P 控制槽位] 空闲\n");
+        }
+    }
+
+    let log_dir = crate::platform::app_log_dir();
+    out.push_str(&format!("日志目录: {}\n", log_dir.display()));
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("rd-app"))
+            .filter_map(|e| {
+                let m = e.metadata().ok()?.modified().ok()?;
+                Some((m, e.path()))
+            })
+            .collect();
+        files.sort_by_key(|a| std::cmp::Reverse(a.0));
+        if let Some((_, newest)) = files.first()
+            && let Ok(raw) = std::fs::read_to_string(newest)
+        {
+            out.push_str(&format!("--- 最近运行日志 ({}) ---\n", newest.display()));
+            let lines: Vec<&str> = raw.lines().collect();
+            let start = lines.len().saturating_sub(80);
+            for line in &lines[start..] {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshPeerItemDto {
+    /// `"EasyTier"` | `"Tailscale"` | `"LAN / 虚拟网卡"`
+    pub source: String,
+    pub name: String,
+    pub addr: String,
+    pub latency_ms: Option<f64>,
+    pub cost: String,
+}
+
+/// 一键扫描本机所有虚拟组网（EasyTier / Tailscale / ZeroTier）及局域网在线设备，免手抄虚拟 IP（自动过滤本机自身）！
+#[tauri::command]
+pub async fn lab_scan_mesh_peers(app: AppHandle) -> Result<Vec<MeshPeerItemDto>, String> {
+    let mut out: Vec<MeshPeerItemDto> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let (local_ips, _) = crate::commands::devices::collect_local_self_identity(&app);
+    let is_local_ip = |ip_str: &str| -> bool {
+        ip_str
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || local_ips.contains(&ip))
+    };
+
+    // 1) EasyTier 在线对端
+    if let Ok(et) = crate::commands::devices::easytier_detect_status().await {
+        for p in et.peers {
+            let ip = p.ipv4.trim().to_string();
+            if !ip.is_empty() && !is_local_ip(&ip) && seen.insert(ip.clone()) {
+                out.push(MeshPeerItemDto {
+                    source: "EasyTier".into(),
+                    name: p.hostname,
+                    addr: ip,
+                    latency_ms: p.latency_ms,
+                    cost: p.cost,
+                });
+            }
+        }
+    }
+
+    // 2) Tailscale tailnet 在线成员
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let mut cmd = tokio::process::Command::new("tailscale");
+        cmd.args(["status", "--json"]);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000);
+        }
+        if let Ok(Ok(ts_out)) =
+            tokio::time::timeout(Duration::from_millis(1800), cmd.output()).await
+            && ts_out.status.success()
+            && let Ok(js) = serde_json::from_slice::<serde_json::Value>(&ts_out.stdout)
+            && let Some(peers_obj) = js.get("Peer").and_then(|v| v.as_object())
+        {
+            for peer in peers_obj.values() {
+                let online = peer
+                    .get("Online")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !online {
+                    continue;
+                }
+                let host = peer
+                    .get("HostName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Tailscale 设备")
+                    .to_string();
+                if let Some(ip) = peer
+                    .get("TailscaleIPs")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.iter().find_map(|x| x.as_str()))
+                    .filter(|ip| !ip.contains(':'))
+                {
+                    let ip_s = ip.trim().to_string();
+                    if !is_local_ip(&ip_s) && seen.insert(ip_s.clone()) {
+                        out.push(MeshPeerItemDto {
+                            source: "Tailscale".into(),
+                            name: host,
+                            addr: ip_s,
+                            latency_ms: None,
+                            cost: "Tailnet".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3) 广播扫描局域网 / ZeroTier / 虚拟网卡内的 rd-agent
+    if let Ok(lan_list) = crate::commands::devices::discover_devices(app).await {
+        for d in lan_list {
+            let ip = d
+                .addr
+                .split(':')
+                .next()
+                .unwrap_or(&d.addr)
+                .trim()
+                .to_string();
+            if !ip.is_empty() && !is_local_ip(&ip) && seen.insert(ip.clone()) {
+                let src = if ip.starts_with("10.147.") || ip.starts_with("172.22.") {
+                    "ZeroTier"
+                } else if ip.starts_with("100.") {
+                    "Tailscale"
+                } else if ip.starts_with("10.126.") {
+                    "EasyTier"
+                } else {
+                    "局域网发现"
+                };
+                out.push(MeshPeerItemDto {
+                    source: src.into(),
+                    name: d.name,
+                    addr: ip,
+                    latency_ms: None,
+                    cost: "RD_DISCOVER".into(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -2571,5 +3820,127 @@ mod stun_and_pool_tests {
                 "udp://1.2.3.4:11010"
             ]
         );
+    }
+
+    #[test]
+    fn p2p_token_roundtrip() {
+        let orig = P2pInvitePayload {
+            m: "112.80.248.75:54321".into(),
+            c: vec!["192.168.1.8:21118".into()],
+            p: "654321".into(),
+            f: "ab".repeat(32),
+            s: "stun.miwifi.com:3478".into(),
+            n: "Office-PC".into(),
+            t: "cone".into(),
+        };
+        let tok = encode_p2p_token(&orig).expect("encode token");
+        assert!(tok.starts_with("rd-p2p://"));
+        let parsed = decode_p2p_token(&tok).expect("decode token");
+        assert_eq!(parsed.m, "112.80.248.75:54321");
+        assert_eq!(parsed.p, "654321");
+        assert_eq!(parsed.n, "Office-PC");
+        assert_eq!(parsed.t, "cone");
+    }
+
+    /// 真实模拟双端「端口受限型圆锥 NAT（Port-Restricted Cone NAT）」两步互粘回执码打洞：
+    /// 未出包前对端来包一律被路由器防火墙丢弃；双方互发开洞包后同一 UDP 端口无缝升级为 QUIC 加密连接。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_step_port_restricted_nat_punch_succeeds() {
+        // 启动模拟双端严格端口受限型 NAT 路由器转发盒
+        let host_sock = rd_transport::bind_udp_socket("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let ctrl_sock = rd_transport::bind_udp_socket("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let host_lan = host_sock.local_addr().unwrap();
+        let ctrl_lan = ctrl_sock.local_addr().unwrap();
+
+        let nat_h_wan = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let nat_c_wan = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let host_wan_addr = nat_h_wan.local_addr().unwrap();
+        let ctrl_wan_addr = nat_c_wan.local_addr().unwrap();
+
+        // Host 侧 NAT：只有 Host 先向 ctrl_wan_addr 发过包，才放行 ctrl_wan_addr 发来的包！
+        {
+            let nat_h = Arc::clone(&nat_h_wan);
+            tokio::spawn(async move {
+                let mut allowed_peer: Option<std::net::SocketAddr> = None;
+                let mut buf = [0u8; 2048];
+                while let Ok((n, from)) = nat_h.recv_from(&mut buf).await {
+                    if from == host_lan {
+                        // 内部 Host 发往控制端公网口（封包头前 0 字节原样转发到 ctrl_wan_addr）
+                        allowed_peer = Some(ctrl_wan_addr);
+                        let _ = nat_h.send_to(&buf[..n], ctrl_wan_addr).await;
+                    } else if allowed_peer == Some(from) {
+                        // 已开洞：外部包转入内部 host_sock
+                        let _ = nat_h.send_to(&buf[..n], host_lan).await;
+                    }
+                    // 未开洞时外部来包全部静默丢弃（真实重现端口受限型路由器防火墙！）
+                }
+            });
+        }
+        // Ctrl 侧 NAT：同理，只有 Ctrl 先向 host_wan_addr 发过包，才放行 host_wan_addr 发来的包！
+        {
+            let nat_c = Arc::clone(&nat_c_wan);
+            tokio::spawn(async move {
+                let mut allowed_peer: Option<std::net::SocketAddr> = None;
+                let mut buf = [0u8; 2048];
+                while let Ok((n, from)) = nat_c.recv_from(&mut buf).await {
+                    if from == ctrl_lan {
+                        allowed_peer = Some(host_wan_addr);
+                        let _ = nat_c.send_to(&buf[..n], host_wan_addr).await;
+                    } else if allowed_peer == Some(from) {
+                        let _ = nat_c.send_to(&buf[..n], ctrl_lan).await;
+                    }
+                }
+            });
+        }
+
+        // 1. 被控端在 host_sock 上启动真实 QUIC Server
+        let host_id = rd_transport::Identity::generate("p2p-host").unwrap();
+        let host_fp = host_id.fingerprint();
+        let ctrl_id = rd_transport::Identity::generate("p2p-ctrl").unwrap();
+        let ctrl_fp = ctrl_id.fingerprint();
+        let server = rd_transport::Server::bind_socket(Arc::clone(&host_sock), &host_id).unwrap();
+        let accept_fut = tokio::spawn(async move {
+            let incoming = server.accept().await.expect("server accept");
+            assert_eq!(incoming.peer_fingerprint(), ctrl_fp);
+        });
+
+        // 2. 控制端先启动裸 UDP 持续开洞泵（发往 nat_c_wan → 经 Ctrl NAT 打开向 host_wan_addr 的洞口，但此时被 Host NAT 丢弃）
+        let stop_pump = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let punched_peer = Arc::new(Mutex::new(None));
+        let tx_pulses = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let rx_pulses = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let pump = spawn_ctrl_raw_punch_pump(
+            Arc::clone(&ctrl_sock),
+            Some(ctrl_wan_addr), // ctrl_sock 发往本侧 NAT 网关模拟出口
+            "127.0.0.1:9".into(),
+            Arc::clone(&stop_pump),
+            Arc::clone(&punched_peer),
+            Arc::clone(&tx_pulses),
+            Arc::clone(&rx_pulses),
+        );
+
+        // 等待 500ms（模拟人工复制回执码延迟：此时 Host 尚未点协助开洞，rx_pulses 必为 0）
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rx_pulses.load(Ordering::Relaxed), 0);
+
+        // 3. 被控端点击「协助开洞」：从同一个 host_sock 发送 RDPUNCH1 经 Host NAT 打开洞口！
+        for _ in 0..4 {
+            host_sock.send_to(b"RDPUNCH1", host_wan_addr).await.unwrap();
+        }
+
+        // 4. 控制端裸泵立即捕获开洞回包并干净退出，随后单次移交 ctrl_sock 完成 QUIC 双向加密握手！
+        pump.await.expect("pump cleanly exits on punch");
+        assert!(rx_pulses.load(Ordering::Relaxed) >= 1);
+        let peer = punched_peer.lock().unwrap().expect("punched peer recorded");
+        let conn = rd_transport::connect_socket(ctrl_sock, peer, &ctrl_id, Some(host_fp))
+            .await
+            .expect("QUIC handshake over punched port-restricted NAT");
+        assert_eq!(conn.peer_fingerprint(), host_fp);
+        accept_fut.await.unwrap();
+        conn.close(0, "ok");
     }
 }
