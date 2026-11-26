@@ -3,7 +3,7 @@
 # 开发消失。产物路径相应变为 <root>/target/release/(bat2/CI 同步)。
 [package]
 name = "rd-controller"
-version = "0.4.5"
+version = "0.4.6"
 description = "rd window-level remote control - controller app"
 edition = "2024"
 
@@ -21,7 +21,6 @@ bytes = "1"
 if-addrs = "0.13"
 qoi = "0.4"
 rd-crash = { path = "../../../crates/rd-crash" }
-rd-encode = { path = "../../../crates/rd-encode" }
 rd-proto = { path = "../../../crates/rd-proto" }
 rd-security = { path = "../../../crates/rd-security" }
 rd-touch-translate = { path = "../../../crates/rd-touch-translate" }
@@ -45,10 +44,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.14"
 
-# 桌面端专属能力（Windows / macOS / Linux）：托盘图标、自动更新、系统剪贴板。
-# 移动端（iOS / Android）自动跳过，避免链接桌面端专属原生库（宪法 #4）。
+# 桌面端专属能力（Windows / macOS / Linux）：托盘图标、自动更新、系统剪贴板、离线编码沙盒。
+# 移动端（iOS / Android）自动跳过，避免链接桌面端专属原生库或 C++ 编码器（宪法 #4）。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = "3"
+rd-encode = { path = "../../../crates/rd-encode" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 

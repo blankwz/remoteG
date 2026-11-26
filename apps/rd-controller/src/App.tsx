@@ -20,6 +20,7 @@ import { IconGear } from "./ui/Icon";
 import { MacPermissionBanner } from "./ui/MacPermissionBanner";
 import { UpdateBanner } from "./ui/UpdateBanner";
 import { loadAdvancedMode, saveAdvancedMode, subscribeAdvancedMode } from "./ui/advancedMode";
+import { useIsMobile } from "./mobile/viewport";
 import styles from "./App.module.css";
 
 type Route =
@@ -150,9 +151,12 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
+  const isMobile = useIsMobile();
+  const hideNav = isMobile && route.page === "session";
+
   return (
-    <div className={styles.app}>
-      <Nav active={route.page} />
+    <div className={isMobile ? `${styles.app} ${styles.appMobile}` : styles.app}>
+      {!hideNav && <Nav active={route.page} isMobile={isMobile} />}
       <MacPermissionBanner />
       <UpdateBanner />
       {route.page === "spike" && <SpikePage />}
@@ -166,7 +170,7 @@ export default function App() {
 }
 
 /** 导航上「窗口列表 / 会话」指向的最后连接设备 id；没有时链接禁用。 */
-function Nav({ active }: { active: Route["page"] }) {
+function Nav({ active, isMobile }: { active: Route["page"]; isMobile: boolean }) {
   const lastDeviceId = getLastDeviceId();
   const [advancedMode, setAdvancedMode] = useState<boolean>(loadAdvancedMode);
   useEffect(() => subscribeAdvancedMode(setAdvancedMode), []);
@@ -175,20 +179,22 @@ function Nav({ active }: { active: Route["page"] }) {
       ? `${styles.navLink} ${styles.navLinkActive}`
       : styles.navLink;
   return (
-    <nav className={styles.nav}>
-      <a className={styles.brand} href="#/devices" title="返回设备页">
-        <span className={styles.brandMark} aria-hidden="true" />
-        rd-controller
-      </a>
+    <nav className={isMobile ? `${styles.nav} ${styles.navBottom}` : styles.nav}>
+      {!isMobile && (
+        <a className={styles.brand} href="#/devices" title="返回设备页">
+          <span className={styles.brandMark} aria-hidden="true" />
+          rd-controller
+        </a>
+      )}
       <div className={styles.navLinks}>
         <a className={linkClass("devices")} href="#/devices">
           设备
         </a>
-        {advancedMode && (
+        {(advancedMode || isMobile) && (
           <a
             className={linkClass("lab")}
             href={lastDeviceId ? `#/lab/${lastDeviceId}` : "#/lab"}
-            title="方案实验室（高级模式）"
+            title="方案实验室（智能寻优与自建中转）"
           >
             实验室
           </a>
@@ -202,7 +208,7 @@ function Nav({ active }: { active: Route["page"] }) {
           <IconGear size={14} />
           设置
         </a>
-        {active === "devices" && lastDeviceId !== null && (
+        {!isMobile && active === "devices" && lastDeviceId !== null && (
           <>
             <a
               className={linkClass("windows")}
@@ -219,26 +225,28 @@ function Nav({ active }: { active: Route["page"] }) {
           </>
         )}
       </div>
-      <div className={styles.navRight}>
-        <button
-          type="button"
-          className={advancedMode ? `${styles.modePill} ${styles.modePillPro}` : styles.modePill}
-          onClick={() => {
-            const next = !advancedMode;
-            saveAdvancedMode(next);
-            setAdvancedMode(next);
-          }}
-          title={
-            advancedMode
-              ? "当前：高级模式（已解锁实验室与底层调优）· 点击切回简洁模式"
-              : "当前：简洁模式（全自动零打扰）· 点击一键开启高级模式与实验室"
-          }
-          aria-pressed={advancedMode}
-        >
-          <span className={styles.modeDot} aria-hidden="true" />
-          {advancedMode ? "高级模式" : "简洁模式"}
-        </button>
-      </div>
+      {!isMobile && (
+        <div className={styles.navRight}>
+          <button
+            type="button"
+            className={advancedMode ? `${styles.modePill} ${styles.modePillPro}` : styles.modePill}
+            onClick={() => {
+              const next = !advancedMode;
+              saveAdvancedMode(next);
+              setAdvancedMode(next);
+            }}
+            title={
+              advancedMode
+                ? "当前：高级模式（已解锁实验室与底层调优）· 点击切回简洁模式"
+                : "当前：简洁模式（全自动零打扰）· 点击一键开启高级模式与实验室"
+            }
+            aria-pressed={advancedMode}
+          >
+            <span className={styles.modeDot} aria-hidden="true" />
+            {advancedMode ? "高级模式" : "简洁模式"}
+          </button>
+        </div>
+      )}
     </nav>
   );
 }

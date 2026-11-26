@@ -13,7 +13,6 @@ mod video_pump;
 #[cfg(any(windows, target_os = "macos"))]
 use std::sync::Arc;
 
-#[cfg(any(windows, target_os = "macos"))]
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 
@@ -83,6 +82,13 @@ pub fn run() {
     builder
         .manage(state)
         .setup(|_app| {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                if let Ok(dir) = _app.path().app_config_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    platform::init_config_dir(dir);
+                }
+            }
             // 被控核心启动（Windows 与 macOS 融合版均内嵌 rd-agent；iOS / Android 作为纯控制端运行）
             #[cfg(any(windows, target_os = "macos"))]
             {

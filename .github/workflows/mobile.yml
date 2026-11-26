@@ -1,0 +1,89 @@
+name: Mobile Build (Android & iOS)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android-apk:
+    name: Build Android APK (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/rd-controller/pnpm-lock.yaml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & SDK Build Tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install frontend dependencies
+        working-directory: apps/rd-controller
+        run: pnpm install --frozen-lockfile
+
+      - name: Init Tauri Android project & build release APK
+        working-directory: apps/rd-controller
+        run: |
+          pnpm tauri android init --ci
+          pnpm tauri android build --apk --target aarch64
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rd-controller-android-apk
+          path: apps/rd-controller/src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          if-no-files-found: warn
+
+  ios-check:
+    name: Verify iOS (aarch64-apple-ios)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/rd-controller/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Install frontend dependencies
+        working-directory: apps/rd-controller
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend & verify iOS Rust library compilation
+        run: |
+          pnpm --dir apps/rd-controller build
+          cargo check --manifest-path apps/rd-controller/src-tauri/Cargo.toml --lib --target aarch64-apple-ios

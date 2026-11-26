@@ -5,9 +5,21 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static CUSTOM_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 在 Tauri `setup()` 中注入平台沙盒配置目录（Android / iOS 必须走系统沙盒路径）。
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+pub fn init_config_dir(dir: PathBuf) {
+    let _ = CUSTOM_CONFIG_DIR.set(dir);
+}
 
 /// 应用融合配置目录（Windows 为 `%LOCALAPPDATA%\rd\app` 或 `%APPDATA%\rd\app`，与 `rd-agent` 保持一致）。
 pub fn app_config_dir() -> PathBuf {
+    if let Some(dir) = CUSTOM_CONFIG_DIR.get() {
+        return dir.clone();
+    }
     #[cfg(windows)]
     {
         rd_agent::default_config_dir().join("app")

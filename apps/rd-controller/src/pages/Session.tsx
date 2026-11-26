@@ -52,6 +52,19 @@ import {
 } from "../ui/Icon";
 import { Lab } from "./Lab";
 import type { FitMode } from "../api/session";
+import {
+  IDENTITY_VIEWPORT,
+  useIsMobile,
+  type ViewportTransform,
+} from "../mobile/viewport";
+import {
+  loadMobileInputMode,
+  saveMobileInputMode,
+  type MobileInputMode,
+} from "../mobile/trackpad";
+import { MobileFloatingBall } from "../mobile/MobileFloatingBall";
+import { MobileKeyboardBar } from "../mobile/MobileKeyboardBar";
+import { MobileTouchOverlay } from "../mobile/MobileTouchOverlay";
 import styles from "../session/Session.module.css";
 
 /** 终端标签 id 前缀（窗口 id 为十进制字符串，命名空间不重叠）。 */
@@ -111,6 +124,13 @@ export function Session({ deviceId }: { deviceId: string }) {
   const [showFiles, setShowFiles] = useState(false);
   // 方案实验室极客抽屉显隐（v0.4，顶栏按钮打开）
   const [showLabDrawer, setShowLabDrawer] = useState(false);
+  /** 移动端专属态（iOS / Android：双模触控 + 视口捏合缩放 + 悬浮球 + 快捷键盘条）。 */
+  const isMobile = useIsMobile();
+  const [mobileInputMode, setMobileInputMode] =
+    useState<MobileInputMode>(loadMobileInputMode);
+  const [mobileKeyboardOpen, setMobileKeyboardOpen] = useState(false);
+  const [mobileViewport, setMobileViewport] =
+    useState<ViewportTransform>(IDENTITY_VIEWPORT);
   /** 画质档位（受控真实态；localStorage 记忆上次选择）。 */
   const [quality, setQuality] = useState<Quality>(() => {
     const saved = window.localStorage.getItem("rd.quality");
@@ -1152,31 +1172,117 @@ function readInitialSidebarOpen(): boolean {
             <div
               key={t.id}
               className={styles.stage}
-              style={t.id === activeId ? undefined : { display: "none" }}
+              style={
+                t.id === activeId
+                  ? isMobile
+                    ? {
+                        position: "relative",
+                        overflow: "hidden",
+                      }
+                    : undefined
+                  : { display: "none" }
+              }
             >
-              <WindowGroupView
-                key={t.id}
-                active={t.id === activeId}
-                deviceName={deviceName}
-                deviceId={deviceId}
-                windowId={t.id}
-                store={t.store}
-                showHud={hudVisible && t.id === activeId}
-                exportFnRef={exportFnRef}
-                recordCtlRef={recordCtlRef}
-                sessionCtlRef={sessionCtlRef}
-                onRecordingAutoStop={handleRecordingAutoStop}
-                vdisplayWidth={vdisplay !== null && vdisplay.kind !== 3 ? vdisplay.width : null}
-                onRootGone={() => {
-                  const title = titleCacheRef.current.get(t.id);
-                  closeTab(t.id);
-                  showToast(`对方已关闭${title !== undefined ? `「${title}」` : "该窗口"}，可从左侧列表重新打开`, false);
-                }}
-              />
+              <div
+                style={
+                  isMobile
+                    ? {
+                        width: "100%",
+                        height: "100%",
+                        transformOrigin: "0 0",
+                        transform: `translate(${mobileViewport.tx}px, ${mobileViewport.ty}px) scale(${mobileViewport.scale})`,
+                      }
+                    : { width: "100%", height: "100%" }
+                }
+              >
+                <WindowGroupView
+                  key={t.id}
+                  active={t.id === activeId}
+                  deviceName={deviceName}
+                  deviceId={deviceId}
+                  windowId={t.id}
+                  store={t.store}
+                  showHud={hudVisible && t.id === activeId}
+                  exportFnRef={exportFnRef}
+                  recordCtlRef={recordCtlRef}
+                  sessionCtlRef={sessionCtlRef}
+                  onRecordingAutoStop={handleRecordingAutoStop}
+                  vdisplayWidth={vdisplay !== null && vdisplay.kind !== 3 ? vdisplay.width : null}
+                  onRootGone={() => {
+                    const title = titleCacheRef.current.get(t.id);
+                    closeTab(t.id);
+                    showToast(`对方已关闭${title !== undefined ? `「${title}」` : "该窗口"}，可从左侧列表重新打开`, false);
+                  }}
+                />
+              </div>
+              {isMobile && t.id === activeId && (
+                <MobileTouchOverlay
+                  deviceId={deviceId}
+                  windowId={t.id}
+                  inputMode={mobileInputMode}
+                  remoteWidth={snapshot.ack?.w || 1920}
+                  remoteHeight={snapshot.ack?.h || 1080}
+                  viewport={mobileViewport}
+                  onViewportChange={setMobileViewport}
+                  onThreeFingerTap={() => setMobileKeyboardOpen((v) => !v)}
+                />
+              )}
             </div>
           ))}
         </div>
       </div>
+
+      {/* 移动端低侵入悬浮球 + 极客快捷键盘条（借鉴 Scrcpy + RustDesk Mobile） */}
+      {isMobile && (
+        <>
+          <MobileFloatingBall
+            inputMode={mobileInputMode}
+            onToggleInputMode={() => {
+              const next: MobileInputMode =
+                mobileInputMode === "trackpad" ? "direct" : "trackpad";
+              setMobileInputMode(next);
+              saveMobileInputMode(next);
+              showToast(
+                next === "trackpad"
+                  ? "已切换为「触控板模式」：单指移动指针、轻点左键、双指右键/滚轮"
+                  : "已切换为「直触模式」：点哪控哪，单指拖动惯性滚动",
+                false,
+              );
+            }}
+            keyboardOpen={mobileKeyboardOpen}
+            onToggleKeyboard={() => setMobileKeyboardOpen((v) => !v)}
+            zoomScale={mobileViewport.scale}
+            onResetZoom={() => setMobileViewport(IDENTITY_VIEWPORT)}
+            quality={quality}
+            onCycleQuality={() => {
+              const order: Quality[] = ["auto", "high", "medium", "low"];
+              const next = order[(order.indexOf(quality) + 1) % order.length] ?? "auto";
+              void doQuality(next);
+            }}
+            onOpenTerm={() => openTermTab(DEFAULT_TERM_SHELL)}
+            onOpenFiles={() => setShowFiles(true)}
+            onFitMobileDisplay={
+              vdisplay !== null && vdisplay.kind !== 3
+                ? () => {
+                    void setDisplayWidth(deviceId, 1280).catch((e) =>
+                      showToast(`虚拟屏适配失败：${errText(e)}`, true),
+                    );
+                  }
+                : undefined
+            }
+            onBackDevices={() => {
+              window.location.hash = "#/devices";
+            }}
+          />
+          {mobileKeyboardOpen && (
+            <MobileKeyboardBar
+              onSendCombo={(keys) => void doSendCombo(keys)}
+              onSendText={(text) => void doSendText(text)}
+              onClose={() => setMobileKeyboardOpen(false)}
+            />
+          )}
+        </>
+      )}
     </main>
   );
 }
