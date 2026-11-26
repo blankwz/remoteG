@@ -9,7 +9,8 @@ use anyhow::{bail, Result};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    SetProcessDpiAwarenessContext, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
@@ -52,8 +53,33 @@ pub fn client_to_absolute(
     (nx as i32, ny as i32)
 }
 
-/// 当前虚拟桌面矩形（多显示器并集，含负坐标）。
+/// 线程级 Per-Monitor-V2 DPI 感知守卫：融合进程（Tauri + WebView2）中某些工作线程
+/// 可能继承系统缩放上下文，导致 `GetSystemMetrics(SM_*VIRTUALSCREEN)` / `ClientToScreen`
+/// 返回逻辑像素（125%/150% 缩放下与 WGC 物理像素产生 25%~50% 鼠标坐标偏移）。
+/// 每次查询几何与调用 `SendInput` 时临时切到 Per-Monitor-V2 并在退出时恢复。
+struct ThreadDpiV2Guard(DPI_AWARENESS_CONTEXT);
+
+impl ThreadDpiV2Guard {
+    fn enter() -> Self {
+        let prev =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Self(prev)
+    }
+}
+
+impl Drop for ThreadDpiV2Guard {
+    fn drop(&mut self) {
+        if !self.0 .0.is_null() {
+            unsafe {
+                let _ = SetThreadDpiAwarenessContext(self.0);
+            }
+        }
+    }
+}
+
+/// 当前虚拟桌面矩形（多显示器并集，物理像素，含负坐标）。
 pub(crate) fn virtual_desktop() -> (i32, i32, i32, i32) {
+    let _dpi = ThreadDpiV2Guard::enter();
     unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -64,8 +90,9 @@ pub(crate) fn virtual_desktop() -> (i32, i32, i32, i32) {
     }
 }
 
-/// 窗口客户区原点的屏幕坐标（物理像素；进程须为 Per-Monitor-V2 DPI 感知）。
+/// 窗口客户区原点的屏幕坐标（物理像素；强制线程级 Per-Monitor-V2 DPI 感知）。
 pub(crate) fn client_origin(hwnd: isize) -> Result<(i32, i32)> {
+    let _dpi = ThreadDpiV2Guard::enter();
     let mut pt = POINT { x: 0, y: 0 };
     let ok = unsafe { ClientToScreen(HWND(hwnd as *mut core::ffi::c_void), &mut pt) };
     if !ok.as_bool() {
@@ -83,6 +110,7 @@ pub(crate) fn set_process_dpi_awareness() {
 
 /// 一次 `SendInput` 注入全部事件；注入数不足视为失败（如 UIPI 拦截）。
 pub(crate) fn send(inputs: &[INPUT]) -> Result<()> {
+    let _dpi = ThreadDpiV2Guard::enter();
     let want = inputs.len() as u32;
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent != want {

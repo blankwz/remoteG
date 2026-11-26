@@ -253,4 +253,23 @@ describe("dispatchFrame", () => {
     expect(sink.tile.handleTile).not.toHaveBeenCalled();
     expect(sink.tile.handleInvalidate).not.toHaveBeenCalled();
   });
+
+  it("跨流防残影：晚于更新视频帧到达的过期瓦片被丢弃", () => {
+    const surface = new RecordingSurface();
+    const layer = new TileLayer(surface);
+    layer.setSize(128, 128);
+    surface.ops.length = 0;
+    layer.onVideoSeq(105);
+    const rgba = new Uint8ClampedArray(4 * 4 * 4);
+    // 过期瓦片（frameSeq=100 < latestVideoSeq=105）必须丢弃
+    expect(
+      layer.handleTile({ windowId: 1n, frameSeq: 100, x: 0, y: 0, w: 4, h: 4 }, rgba),
+    ).toBe(false);
+    expect(surface.ops).toHaveLength(0);
+    // 对齐最新帧（frameSeq=105）的瓦片正常绘制
+    expect(
+      layer.handleTile({ windowId: 1n, frameSeq: 105, x: 0, y: 0, w: 4, h: 4 }, rgba),
+    ).toBe(true);
+    expect(surface.ops).toHaveLength(1);
+  });
 });

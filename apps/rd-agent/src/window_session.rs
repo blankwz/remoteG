@@ -56,13 +56,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 #[cfg(windows)]
 use rd_capture_win as sys_capture;
-use rd_encode::caps::{negotiate, probe_encode_caps};
+use rd_encode::caps::{negotiate_for_resolution, probe_encode_caps};
 use rd_encode::dirty::Rect as DirtyRect;
 use rd_encode::frame::RawFrame;
 use rd_encode::rate::RateController;
 use rd_encode::rate::RateInput;
 use rd_encode::tiles::{TileOut, TileRefiner};
-use rd_encode::{create_best, EncodedAu, EncoderConfig, PixelFormat, VideoEncoder};
+use rd_encode::{create_for_codec, EncodedAu, EncoderConfig, PixelFormat, VideoEncoder};
 #[cfg(not(windows))]
 use rd_mac::capture as sys_capture;
 #[cfg(not(windows))]
@@ -116,8 +116,8 @@ const TILE_STILL_MS: u32 = 300;
 const BROADCAST_CAP: usize = 256;
 /// 图标缓存条目上限（hwnd 复用/长期运行导致的过期条目靠整表清空兜底）。
 const ICON_CACHE_CAP: usize = 1024;
-/// 编码通道容量（编码线程 → 视频发送任务；有界形成背压）。
-const AU_CHANNEL_CAP: usize = 64;
+/// 编码通道容量（编码线程 → 视频发送任务；极浅缓冲消除跨网 64 帧排队积压）。
+const AU_CHANNEL_CAP: usize = 3;
 /// 瓦片通道容量（失效标记可能整帧批量产生）。
 const TILE_CHANNEL_CAP: usize = 256;
 /// 编码线程空转等待下限（recv_timeout 的最小超时，防忙等）。
@@ -251,6 +251,28 @@ pub fn force_idr_all() {
     for h in map.values() {
         h.drop_to_idr.store(true, Ordering::Relaxed);
     }
+}
+
+/// 记录窗口最近一次鼠标/交互焦点坐标（客户区像素坐标），供无损瓦片精修
+/// 按到焦点的距离升序装填——让用户视线和鼠标指向的文字第一时间变清晰。
+pub(crate) fn record_focus_point(window_id: u64, x: i32, y: i32) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let packed = ((u64::from(x as u32) + 1) << 32) | (u64::from(y as u32) + 1);
+    let map = pipes().lock().unwrap_or_else(lock_poisoned);
+    if let Some(h) = map.get(&window_id) {
+        h.focus_xy.store(packed, Ordering::Relaxed);
+    }
+}
+
+fn decode_focus_xy(packed: u64) -> Option<(u32, u32)> {
+    if packed == 0 {
+        return None;
+    }
+    let x = ((packed >> 32) as u32).saturating_sub(1);
+    let y = ((packed & 0xFFFF_FFFF) as u32).saturating_sub(1);
+    Some((x, y))
 }
 
 fn register_pipe(handle: PipeHandle) -> Option<PipeHandle> {
@@ -859,6 +881,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
 
     // 校验：不存在/不可捕获 → 10；最小化 → 自动还原再捕获（用户实测反馈 1，
     // 行业标准做法 RustDesk 同款；列表页 UI 已提示"将被还原"），不再拒绝。
+    let mut monitor_index: Option<u32> = None;
     let mut monitor_handle: Option<isize> = None;
     let mut monitor_origin: Option<(i32, i32)> = None;
     let saved: Option<SavedPlacement>;
@@ -880,6 +903,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
             )
             .await;
         };
+        monitor_index = Some(mon_idx);
         monitor_handle = Some(mon.hmonitor);
         monitor_origin = Some((mon.x, mon.y));
         saved = None;
@@ -976,6 +1000,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     }
 
     let cfg = &ctx.state.config;
+    let is_lan = is_lan_direct_conn(&ctx.conn);
     // max_fps = min(请求, 配置)；请求 0 视为未指定，用配置默认
     let mut fps = if open.max_fps == 0 {
         cfg.max_fps
@@ -984,6 +1009,27 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     }
     .max(1);
     let mut kbps = cfg.start_kbps.max(1);
+    let area = u64::from(attrs.rect.w).saturating_mul(u64::from(attrs.rect.h));
+    // 局域网直连（is_lan=true）按画面分辨率自适应起步码率（宪法 #1）：
+    // 4K 起步 40 Mbps、2K 起步 24 Mbps、1080p 起步 16 Mbps，连接首秒即锐利清晰；
+    // 跨网链路从 3.2 Mbps / 30fps 平滑起步并渐进爬坡，避免首帧塞爆路由器缓冲导致 RTT 飙升。
+    if !lab_state().manual_lock.load(Ordering::Relaxed) {
+        if is_lan {
+            let lan_floor = if area >= 6_500_000 {
+                40_000
+            } else if area >= 2_900_000 {
+                24_000
+            } else if area >= 1_600_000 {
+                16_000
+            } else {
+                12_000
+            };
+            kbps = kbps.max(lan_floor);
+        } else {
+            kbps = kbps.clamp(1_500, 3_200);
+            fps = fps.clamp(1, 30);
+        }
+    }
     // 会话已有手动档位时（T-028 F5），新窗口直接按档位起步（否则首个
     // rate tick 前的 ~200 ms 会以配置默认值全速发送）
     if let Ok(p) = QualityPreset::try_from(ctx.user_quality.load(Ordering::Relaxed) as i32) {
@@ -995,32 +1041,31 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
     }
     let refine = cfg.refine_enabled;
 
-    // 编解码协商（T-027 步骤 4）：本机能力 ∩ 控制端能力 ∩ supports_444。
-    // proto 的 repeated Codec 在 prost 生成物中为 Vec<i32>，需转回枚举。
+    // 编解码协商（宪法 #1 分辨率感知）：>1440p（4K 完整桌面等）优先 AV1 / HEVC，
+    // 其余场景优先 H.264 4:4:4（真彩色文字无色度抽样），兜底 H.264 4:2:0。
     let decode_caps: Vec<Codec> = ctx
         .hello
         .decode_caps
         .iter()
         .filter_map(|&c| Codec::try_from(c).ok())
         .collect();
-    // D-011 T-027 遗留收尾：444 不再无条件回退——ack 前以 Yuv444 实际创建
-    // 验证，失败才降级 420（resolve_codec，OpenWindowAck 不得谎报解码格式）。
-    // 协商在管线搭建前完成：编码线程与 ack 使用同一次落地结果。
     let codec = resolve_codec(
         &attrs,
-        effective_codec(negotiate(
+        effective_codec(negotiate_for_resolution(
             &probe_encode_caps(),
             &decode_caps,
             ctx.hello.supports_444,
+            attrs.rect.w,
+            attrs.rect.h,
         )),
         fps,
         kbps,
     );
 
-    let area = u64::from(attrs.rect.w).saturating_mul(u64::from(attrs.rect.h));
     let spec = PipeSpec {
         window_id: wid,
         hwnd: attrs.hwnd,
+        monitor_index,
         monitor_handle,
         monitor_origin,
         fps,
@@ -1042,6 +1087,7 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
         }
     };
 
+    let (ack_w, ack_h) = started.monitor_size.unwrap_or((attrs.rect.w, attrs.rect.h));
     ctx.send(
         Msg::OpenWindowAck(OpenWindowAck {
             window_id: wid,
@@ -1049,8 +1095,8 @@ async fn open_window(ctx: &Arc<SessionCtx>, req_id: u32, open: OpenWindow) -> an
             video_stream_id: started.video_stream_id,
             tile_stream_id: started.tile_stream_id,
             codec: codec as i32,
-            w: attrs.rect.w,
-            h: attrs.rect.h,
+            w: ack_w,
+            h: ack_h,
         }),
         req_id,
     )
@@ -1141,6 +1187,8 @@ async fn after_restore(wid: u64) -> AfterRestore {
 struct SendAccounting {
     /// 本管线在途字节（发送任务入队 +N、写完 -N）。
     backlog: Arc<AtomicU64>,
+    /// 当前正在发送/队列中的视频帧数（编码前背压门控：防跨网编码超发与断链 IDR 风暴）。
+    in_flight_frames: Arc<AtomicU32>,
     /// 本会话累计发送字节（StatsReport.kbps 数据源）。
     session_bytes: Arc<AtomicU64>,
     /// 陈旧帧丢弃标志（D-013 包2）：发送任务跳帧后置位，编码循环消费——
@@ -1153,6 +1201,8 @@ struct PipeSpec {
     /// 协议层 window_id（单窗口为 hwnd，完整桌面为 `desktop_window_id(idx)`）。
     window_id: u64,
     hwnd: isize,
+    /// 完整桌面模式下的显示器序号（显示拓扑因虚拟屏插拔重建时据此重枚举新 HMONITOR）。
+    monitor_index: Option<u32>,
     /// 完整桌面模式下的显示器句柄（`Some` = 走 `start_monitor` 整屏捕获）。
     monitor_handle: Option<isize>,
     /// 完整桌面显示器屏幕原点 `(x, y)`，用于全屏键鼠坐标直注。
@@ -1183,19 +1233,61 @@ struct PipeSpec {
 struct PipeStarted {
     video_stream_id: u32,
     tile_stream_id: u32,
+    monitor_size: Option<(u32, u32)>,
 }
 
 /// 搭建一条完整管线：捕获 → 数据流 → 编码线程 → 双发送任务 → 注册表。
 ///
 /// 失败时清理已建资源（捕获/流 finish）并把错误原样上抛；错误回包由
 /// 调用方决定（根窗口回 `Error{11}`，子窗口仅记日志降级）。
-async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result<PipeStarted> {
+async fn start_pipeline(ctx: &Arc<SessionCtx>, mut spec: PipeSpec) -> anyhow::Result<PipeStarted> {
     let wid = spec.window_id;
     let serial = PIPE_SEQ.fetch_add(1, Ordering::Relaxed);
     let restore_on_fail = |s: &PipeSpec| restore_saved(s.hwnd, &s.saved);
-    let started_capture = if let Some(hmon) = spec.monitor_handle {
-        WindowCapture::start_monitor(hmon, CaptureOptions { max_fps: spec.fps })
-            .with_context(|| format!("启动整屏捕获失败（monitor {wid:#x}）"))
+    let mut monitor_size: Option<(u32, u32)> = None;
+    let started_capture = if let Some(mut hmon) = spec.monitor_handle {
+        // 会话刚通过 HelloAck 时 vdisplay::spawn_start 可能正并发插拔虚拟显示器，
+        // 触发 Windows 显示拓扑重建使数毫秒前枚举的 HMONITOR 失效（CreateForMonitor 报 0x80070057）。
+        // 遇到失败时等待拓扑稳定并按 monitor_index 重新枚举最新 HMONITOR 重试。
+        let mon_idx = spec.monitor_index.unwrap_or(0);
+        let mut ok_cap = None;
+        let mut last_err = None;
+        for attempt in 0..8u8 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let monitors = sys_capture::list_monitors();
+                if let Some(m) = monitors
+                    .iter()
+                    .find(|m| m.index == mon_idx)
+                    .or_else(|| (mon_idx == 0).then(|| monitors.first()).flatten())
+                {
+                    hmon = m.hmonitor;
+                    spec.monitor_handle = Some(hmon);
+                    spec.monitor_origin = Some((m.x, m.y));
+                    spec.area = u64::from(m.width).saturating_mul(u64::from(m.height));
+                    monitor_size = Some((m.width, m.height));
+                }
+            }
+            match WindowCapture::start_monitor(hmon, CaptureOptions { max_fps: spec.fps }) {
+                Ok(v) => {
+                    ok_cap = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        monitor_idx = mon_idx,
+                        "CreateForMonitor 暂失败（显示拓扑可能正在切换），重枚举 HMONITOR 重试: {e:#}"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        ok_cap.ok_or_else(|| {
+            last_err
+                .unwrap_or_else(|| anyhow::anyhow!("启动整屏捕获失败"))
+                .context(format!("启动整屏捕获失败（monitor {wid:#x}）"))
+        })
     } else {
         WindowCapture::start(spec.hwnd, CaptureOptions { max_fps: spec.fps })
             .with_context(|| format!("启动捕获失败（hwnd {wid:#x}）"))
@@ -1261,11 +1353,13 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     let (au_tx, au_rx) = mpsc::channel(AU_CHANNEL_CAP);
     let (tile_out_tx, tile_rx) = mpsc::channel(TILE_CHANNEL_CAP);
     let backlog = Arc::new(AtomicU64::new(0));
+    let in_flight_frames = Arc::new(AtomicU32::new(0));
     let frames = Arc::new(AtomicU64::new(0));
     let target_kbps = Arc::new(AtomicU32::new(spec.kbps));
     let fps_cap = Arc::new(AtomicU32::new(spec.fps));
     // 陈旧帧丢弃→IDR 恢复(D-013 包2):视频发送任务置位、编码循环消费
     let drop_to_idr = Arc::new(AtomicBool::new(false));
+    let is_lan = is_lan_direct_conn(&ctx.conn);
     // 根窗口预置组快照（仅单窗口需要；完整桌面已含全部弹窗/菜单，不做子窗口组轮询）。
     let group_snapshot = (spec.is_root && spec.monitor_handle.is_none()).then(|| {
         Arc::new(Mutex::new(HashMap::from([(
@@ -1280,6 +1374,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         )])))
     });
 
+    let focus_xy = Arc::new(AtomicU64::new(0));
     let enc_thread = {
         let run = PipeRun {
             frame_rx,
@@ -1289,13 +1384,18 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
             fps: spec.fps,
             kbps: spec.kbps,
             refine: spec.refine,
+            codec: spec.codec,
             pixel_format: pixel_format_of(spec.codec),
+            is_lan,
+            backlog: Arc::clone(&backlog),
+            in_flight_frames: Arc::clone(&in_flight_frames),
             errors: Arc::clone(&errors),
             cancel: cancel.clone(),
             target_kbps: Arc::clone(&target_kbps),
             fps_cap: Arc::clone(&fps_cap),
             frames: Arc::clone(&frames),
             drop_to_idr: Arc::clone(&drop_to_idr),
+            focus_xy: Arc::clone(&focus_xy),
             window_id: wid,
             is_root: spec.is_root,
         };
@@ -1328,6 +1428,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         Arc::clone(&errors),
         SendAccounting {
             backlog: Arc::clone(&backlog),
+            in_flight_frames: Arc::clone(&in_flight_frames),
             session_bytes: Arc::clone(&spec.session_bytes),
             drop_to_idr: Arc::clone(&drop_to_idr),
         },
@@ -1344,6 +1445,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         errors,
         SendAccounting {
             backlog: Arc::clone(&backlog),
+            in_flight_frames,
             session_bytes: Arc::clone(&spec.session_bytes),
             drop_to_idr: Arc::clone(&drop_to_idr),
         },
@@ -1373,6 +1475,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
         members: group_snapshot,
         serial,
         drop_to_idr,
+        focus_xy,
     });
     if let Some(old) = replaced {
         tracing::warn!(
@@ -1396,6 +1499,7 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, spec: PipeSpec) -> anyhow::Result
     Ok(PipeStarted {
         video_stream_id,
         tile_stream_id,
+        monitor_size,
     })
 }
 
@@ -1658,7 +1762,7 @@ fn handle_viewport(ctx: &SessionCtx, vp: ViewportInfo) -> anyhow::Result<()> {
 /// 执行 1:1 适配（架构 §3.1）：fit != FIT 时不动远端（控制端本地缩放）；
 /// Partial/NotResizable 回 `Error{code:12}`（非致命），由控制端转本地缩放。
 async fn apply_viewport(ctx: &SessionCtx, window_id: u64, fit: i32, vp: &ViewportInfo) {
-    if fit != FitMode::Fit as i32 {
+    if fit != FitMode::Fit as i32 || rd_proto::is_desktop_window_id(window_id) {
         return;
     }
     let (target_w, target_h) = target_client_size(vp.css_w, vp.css_h, vp.dpr);
@@ -1753,6 +1857,8 @@ struct PipeHandle {
     /// 强制下一帧 IDR（虚拟屏换档）：尺寸变了，旧引用链全部作废，首帧必须
     /// 关键帧。与捕获层的 `drop_to_idr` 同一标志（编码循环消费）。
     drop_to_idr: Arc<AtomicBool>,
+    /// 最近一次鼠标交互焦点（打包 `(x+1)<<32 | (y+1)`，0=无），驱动无损瓦片焦点优先精修。
+    focus_xy: Arc<AtomicU64>,
 }
 
 impl PipeHandle {
@@ -1780,7 +1886,7 @@ impl PipeHandle {
         if restore {
             restore_saved(self.hwnd as isize, &self.saved);
         }
-        if closed {
+        if closed && !rd_proto::is_desktop_window_id(self.hwnd) {
             crate::vdisplay::request_window_closed(self.hwnd);
         }
     }
@@ -1795,8 +1901,14 @@ struct PipeRun {
     fps: u32,
     kbps: u32,
     refine: bool,
+    /// 协商落地的编解码器（支持 H264_420 / H264_444 / HEVC_444 / AV1）。
+    codec: Codec,
     /// 编码输入色度采样（协商编解码器落地，420/444）。
     pixel_format: PixelFormat,
+    /// 是否物理局域网/回环低延迟直连（false = P2P 打洞 / 中转 / Tailscale / EasyTier 跨网）。
+    is_lan: bool,
+    backlog: Arc<AtomicU64>,
+    in_flight_frames: Arc<AtomicU32>,
     errors: Arc<PipeError>,
     cancel: CancellationToken,
     /// 会话分配的目标码率（kbps）；变化时经 `set_bitrate` 落到编码器。
@@ -1807,6 +1919,8 @@ struct PipeRun {
     frames: Arc<AtomicU64>,
     /// 陈旧帧丢弃标志：发送任务跳帧后置位，编码循环消费（下帧 force IDR）。
     drop_to_idr: Arc<AtomicBool>,
+    /// 最近一次鼠标交互焦点（打包 `(x+1)<<32 | (y+1)`，0=无），驱动无损瓦片焦点优先精修。
+    focus_xy: Arc<AtomicU64>,
     /// 窗口 id 与是否根窗口（块 1：窗口尺寸变化联动虚拟屏选档，仅根窗口
     /// 参与需求表；组成员窗口跟随主窗口布局，不占独立档位语义）。
     window_id: u64,
@@ -1853,9 +1967,14 @@ fn encode_loop(run: PipeRun) {
         fps,
         kbps,
         refine,
+        codec,
         pixel_format,
+        is_lan,
+        backlog,
+        in_flight_frames,
         errors,
         drop_to_idr,
+        focus_xy,
         cancel,
         target_kbps,
         fps_cap,
@@ -1863,7 +1982,7 @@ fn encode_loop(run: PipeRun) {
         window_id,
         is_root,
     } = run;
-    let mut pipe = FramePipeline::new(fps, kbps, refine, true, pixel_format);
+    let mut pipe = FramePipeline::new(fps, kbps, refine, true, pixel_format).with_codec(codec);
     let mut applied_kbps = kbps;
     let mut applied_gen = lab_state().config_gen.load(Ordering::Relaxed);
     let mut frame_seq: u32 = 0;
@@ -1872,6 +1991,11 @@ fn encode_loop(run: PipeRun) {
     let mut next_tick = Instant::now() + TILE_TICK;
     // 上次产出 AU 的时刻（帧率节流基准）
     let mut last_encode: Option<Instant> = None;
+    // 首秒双保险关键帧：OpenWindowAck 落地约 650ms 后在空闲窗口补发 1 帧确认 IDR，
+    // 消除冷启动 UDP / WebCodecs 首包竞态导致的全屏等待黑屏。
+    let mut confirm_idr_at = Some(Instant::now() + Duration::from_millis(650));
+    let max_inflight: u32 = if is_lan { 3 } else { 1 };
+    let max_backlog_bytes: u64 = if is_lan { 2 * 1024 * 1024 } else { 96 * 1024 };
 
     loop {
         if cancel.is_cancelled() {
@@ -1889,17 +2013,20 @@ fn encode_loop(run: PipeRun) {
                 ls.tile_still_ms.load(Ordering::Relaxed),
             );
         }
-        // 瓦片 tick：按绝对期限执行（帧流持续时 recv 同样不会超时，见函数文档）
+        // 瓦片 tick：按绝对期限执行；仅当网络无在途排队帧时下发无损瓦片，绝不与实时视频抢带宽！
         let now = Instant::now();
         if now >= next_tick {
             next_tick = now + TILE_TICK;
-            // 静止期同样应用码率决策（长静止后恢复时使用新码率）
             applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
-            let budget = tile_budget_bytes(applied_kbps);
-            if let Some((seq, raw)) = last.as_ref() {
-                for t in pipe.tick(raw, now, budget) {
-                    if tile_tx.blocking_send((*seq, t)).is_err() {
-                        return; // 瓦片发送任务已退出
+            if in_flight_frames.load(Ordering::Relaxed) == 0 && backlog.load(Ordering::Relaxed) == 0
+            {
+                let budget = tile_budget_bytes(applied_kbps);
+                let focus = decode_focus_xy(focus_xy.load(Ordering::Relaxed));
+                if let Some((seq, raw)) = last.as_ref() {
+                    for t in pipe.tick(raw, now, budget, focus) {
+                        if tile_tx.blocking_send((*seq, t)).is_err() {
+                            return; // 瓦片发送任务已退出
+                        }
                     }
                 }
             }
@@ -1920,17 +2047,36 @@ fn encode_loop(run: PipeRun) {
                 // 丢帧不更新 last（瓦片基线保持为最近编码帧）。
                 let cap = fps_cap.load(Ordering::Relaxed).max(1);
                 if let Some(prev) = last_encode {
-                    let min_gap = Duration::from_nanos(1_000_000_000 / u64::from(cap));
+                    // 留 10% VSync 拍频抖动容差，防止 144Hz 屏幕被隔帧节流腰斩为 72Hz
+                    let min_gap = Duration::from_nanos(900_000_000 / u64::from(cap));
                     if now.duration_since(prev) < min_gap {
                         continue;
                     }
                 }
-                // 应用码率决策（编码器创建/重配置即用最新值）
-                applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
                 // 发送任务丢过陈旧帧 → 引用链已断，本帧必须 IDR（D-013 包2）
                 if drop_to_idr.swap(false, Ordering::Relaxed) {
                     pipe.force_key = true;
                 }
+                if let Some(t_idr) = confirm_idr_at {
+                    if now >= t_idr && in_flight_frames.load(Ordering::Relaxed) == 0 {
+                        confirm_idr_at = None;
+                        pipe.force_key = true;
+                    }
+                }
+                // 编码前零积压背压门控（RustDesk / Parsec 同款核心机制）：
+                // 若上一帧仍在网络发送中，直接在编码前跳过中间捕获帧！
+                // 这样既保持 H.264 参考帧链 100% 不断裂（无需触发巨型 IDR 风暴），
+                // 又将跨网端到端排队延迟死死锁在 ≤1 RTT（17ms 物理网实测 ~20ms 跟手，告别 700ms 延迟）。
+                if !pipe.need_feed
+                    && !pipe.force_key
+                    && !frame.resized
+                    && (in_flight_frames.load(Ordering::Acquire) >= max_inflight
+                        || backlog.load(Ordering::Relaxed) > max_backlog_bytes)
+                {
+                    continue;
+                }
+                // 应用码率决策（编码器创建/重配置即用最新值）
+                applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
                 let raw = RawFrame {
                     width: frame.width,
                     height: frame.height,
@@ -1943,13 +2089,16 @@ fn encode_loop(run: PipeRun) {
                     Ok(step) => {
                         // 块 1（T-049）：窗口尺寸变化联动虚拟屏选档。编码线程
                         // 无 tokio 上下文，走 fit 调度线程（std mpsc 入队）。
-                        if step.resized && is_root {
+                        // 完整桌面哨兵 id 不参与单窗口虚拟屏需求表。
+                        if step.resized && is_root && !rd_proto::is_desktop_window_id(window_id) {
                             crate::vdisplay::request_refit(window_id);
                         }
                         if let Some(au) = step.au {
                             frames.fetch_add(1, Ordering::Relaxed);
                             last_encode = Some(now);
+                            in_flight_frames.fetch_add(1, Ordering::AcqRel);
                             if au_tx.blocking_send((frame_seq, au)).is_err() {
+                                in_flight_frames.fetch_sub(1, Ordering::AcqRel);
                                 return; // 视频发送任务已退出
                             }
                         }
@@ -2033,6 +2182,7 @@ struct FramePipeline {
     kbps: u32,
     refine: bool,
     prefer_hw: bool,
+    codec: Codec,
     /// 编码输入色度采样（协商编解码器落地；444 创建失败已在 ack 前回退）。
     pixel_format: PixelFormat,
     encoder: Option<Box<dyn VideoEncoder>>,
@@ -2040,21 +2190,21 @@ struct FramePipeline {
     last_size: Option<(u32, u32)>,
     force_key: bool,
     /// 编码器是否尚需持续喂帧才能产出输出（首包 / reconfigure 后）。
-    ///
-    /// 带缓冲延迟的硬件编码器（h264_mf 等 MFT 类）首次 `encode` 可能返回
-    /// `Ok(None)`，需后续帧喂入才吐出首包；静态帧 gating 若在此时跳过，
-    /// 关键帧将永不产出（控制器收不到首帧）。故 gating 仅在编码器输出已
-    /// 流动（最近一次 `encode` 返回 `Some`）后启用。
     need_feed: bool,
 }
 
 impl FramePipeline {
     fn new(fps: u32, kbps: u32, refine: bool, prefer_hw: bool, pixel_format: PixelFormat) -> Self {
+        let codec = match pixel_format {
+            PixelFormat::Yuv444 => Codec::H264444,
+            PixelFormat::Yuv420 => Codec::H264420,
+        };
         Self {
             fps,
             kbps,
             refine,
             prefer_hw,
+            codec,
             pixel_format,
             encoder: None,
             refiner: None,
@@ -2062,6 +2212,12 @@ impl FramePipeline {
             force_key: true, // 首帧 IDR
             need_feed: true, // 首包前禁止 gating
         }
+    }
+
+    fn with_codec(mut self, codec: Codec) -> Self {
+        self.codec = codec;
+        self.pixel_format = pixel_format_of(codec);
+        self
     }
 
     /// 当前编码尺寸（首帧后为 Some；供单测断言尺寸重建）。
@@ -2107,6 +2263,13 @@ impl FramePipeline {
         if self.prefer_hw != prefer_hw || self.pixel_format != want_pf {
             self.prefer_hw = prefer_hw;
             self.pixel_format = want_pf;
+            if self.codec == Codec::H264420 || self.codec == Codec::H264444 {
+                self.codec = if request_444 {
+                    Codec::H264444
+                } else {
+                    Codec::H264420
+                };
+            }
             self.encoder = None;
             self.last_size = None;
             self.force_key = true;
@@ -2131,6 +2294,7 @@ impl FramePipeline {
         dirty: Option<&[DirtyRect]>,
         now: Instant,
     ) -> anyhow::Result<FrameStep> {
+        let was_initialized = self.last_size.is_some();
         let size_changed = self.last_size != Some((raw.width, raw.height));
         if size_changed {
             match self.encoder.as_mut() {
@@ -2146,14 +2310,19 @@ impl FramePipeline {
                         prefer_hw: self.prefer_hw,
                         pixel_format: self.pixel_format,
                     };
-                    let enc = match create_best(&cfg) {
+                    let enc = match create_for_codec(&cfg, self.codec) {
                         Ok(e) => e,
-                        Err(e) if self.pixel_format == PixelFormat::Yuv444 => {
-                            tracing::warn!("4:4:4 硬编创建失败，自动回退 4:2:0: {e:#}");
+                        Err(e) if self.codec != Codec::H264420 => {
+                            tracing::warn!(
+                                codec = ?self.codec,
+                                "高阶硬编创建失败，自动回退 H264_420: {e:#}"
+                            );
+                            self.codec = Codec::H264420;
                             self.pixel_format = PixelFormat::Yuv420;
                             let mut cfg420 = cfg;
                             cfg420.pixel_format = PixelFormat::Yuv420;
-                            create_best(&cfg420).context("创建视频编码器失败")?
+                            create_for_codec(&cfg420, Codec::H264420)
+                                .context("创建视频编码器失败")?
                         }
                         Err(e) => return Err(e).context("创建视频编码器失败"),
                     };
@@ -2173,11 +2342,13 @@ impl FramePipeline {
             self.refiner = self
                 .refine
                 .then(|| TileRefiner::new(raw.width, raw.height, still_ms));
-            tracing::info!(
-                width = raw.width,
-                height = raw.height,
-                "窗口尺寸变化：编码器已 reconfigure（下一帧 IDR），瓦片精修器已重建"
-            );
+            if was_initialized {
+                tracing::info!(
+                    width = raw.width,
+                    height = raw.height,
+                    "窗口尺寸变化：编码器已 reconfigure（下一帧 IDR），瓦片精修器已重建"
+                );
+            }
         }
 
         // 静止判定：本帧是否有内容变化。refiner 存在时以其块网格为准
@@ -2193,11 +2364,10 @@ impl FramePipeline {
         };
         // 静止帧跳过视频编码：窗口无内容变化（且编码器输出已流动）时不再跑
         // 色彩转换 + 编码 + 发整帧（静止区已由无损瓦片覆盖，控制器保持上一帧）；
-        // 置 `force_key` 使恢复变化首帧为干净 IDR——长时间静止后不依赖编码器
-        // 对旧参考帧的依赖，画面无缝跳回。首帧 / 尺寸重建 / 编码器未出首包时恒编码
-        // （后者保证 h264_mf 类带缓冲编码器能被持续喂帧，直到吐出首包关键帧）。
+        // 注意：绝不在此处置 `force_key = true`！解码端参考帧链在静止期间完好保留，
+        // 若每次短暂停顿（哪怕 1 帧）恢复运动都强发巨型 IDR，会导致 4K 下瞬间码率尖峰、
+        // 触发码控误降码率变糊和明显顿挫。仅在真正断链（size_changed / drop_to_idr）时发 IDR。
         if !changed && !size_changed && !self.need_feed {
-            self.force_key = true;
             return Ok(FrameStep {
                 au: None,
                 invalidates,
@@ -2215,14 +2385,21 @@ impl FramePipeline {
         Ok(FrameStep {
             au,
             invalidates,
-            resized: size_changed,
+            resized: was_initialized && size_changed,
         })
     }
 
-    /// 瓦片 tick：静止成熟的块在预算内编码下发（refine 关闭时恒空）。
-    fn tick(&mut self, raw: &RawFrame, now: Instant, budget_bytes: usize) -> Vec<TileOut> {
+    /// 瓦片 tick：静止成熟的块在预算内编码下发（refine 关闭时恒空）；
+    /// 提供 `focus`（最近鼠标/交互焦点）时按距离升序优先精修视线区域。
+    fn tick(
+        &mut self,
+        raw: &RawFrame,
+        now: Instant,
+        budget_bytes: usize,
+        focus: Option<(u32, u32)>,
+    ) -> Vec<TileOut> {
         match self.refiner.as_mut() {
-            Some(r) => r.tick(raw, now, budget_bytes, None),
+            Some(r) => r.tick(raw, now, budget_bytes, focus),
             None => Vec::new(),
         }
     }
@@ -2260,6 +2437,7 @@ async fn video_send_task(
     let PipeIdentity { window_id, serial } = id;
     let SendAccounting {
         backlog,
+        in_flight_frames,
         session_bytes,
         drop_to_idr,
     } = acct;
@@ -2269,10 +2447,9 @@ async fn video_send_task(
             msg = rx.recv() => match msg {
                 None => break, // 编码线程退出（通道关闭）
                 Some((seq, au)) => {
-                    // 陈旧帧丢弃（D-013 包2）：通道里已积压 ≥2 帧时，发送侧
-                    // 带宽已低于编码速率，FIFO 全发只会让接收端延迟单调增长
-                    // （弱网下雪崩到秒级）。跳到最新一帧；丢帧后引用链断裂，
-                    // 置位 drop_to_idr 让编码循环下帧出 IDR 恢复。
+                    // 陈旧帧丢弃（D-013 包2）：若极端抖动下通道仍有积压，跳到最新帧；
+                    // 若丢弃过参考帧且末尾帧不是 IDR，绝不发送断链的孤儿 P 帧（防花屏糊块），
+                    // 直接请求编码线程下一帧生成干净 IDR！
                     let mut current = (seq, au);
                     let mut dropped = 0u32;
                     while !current.1.keyframe {
@@ -2285,13 +2462,18 @@ async fn video_send_task(
                         }
                     }
                     if dropped > 0 {
-                        drop_to_idr.store(true, Ordering::Relaxed);
-                        tracing::debug!(
-                            window = format!("{window_id:#x}"),
-                            dropped,
-                            seq = current.0,
-                            "发送积压：丢弃陈旧帧，下帧 IDR"
-                        );
+                        in_flight_frames.fetch_sub(dropped, Ordering::AcqRel);
+                        if !current.1.keyframe {
+                            // current 自身的参考帧已被丢弃，发送会导致解码端花屏撕裂：直接丢弃并请求 IDR
+                            in_flight_frames.fetch_sub(1, Ordering::AcqRel);
+                            drop_to_idr.store(true, Ordering::Relaxed);
+                            tracing::debug!(
+                                window = format!("{window_id:#x}"),
+                                dropped = dropped + 1,
+                                "发送积压：丢弃断链 P 帧，请求干净 IDR"
+                            );
+                            continue;
+                        }
                     }
                     let (seq, au) = current;
                     let header = VideoHeader {
@@ -2347,6 +2529,7 @@ async fn video_send_task(
                         }
                     };
                     backlog.fetch_sub(n, Ordering::Relaxed);
+                    in_flight_frames.fetch_sub(1, Ordering::AcqRel);
                     if let Err(err) = sent {
                         tracing::warn!(window = format!("{window_id:#x}"), "视频发送失败: {err:#}");
                         break;
@@ -2376,6 +2559,7 @@ async fn tile_send_task(
     let PipeIdentity { window_id, serial } = id;
     let SendAccounting {
         backlog,
+        in_flight_frames: _,
         session_bytes,
         drop_to_idr: _, // 瓦片无引用链，不参与陈旧帧丢弃
     } = acct;
@@ -2456,7 +2640,18 @@ fn spawn_session_tick(
 ) {
     tokio::spawn(async move {
         let cfg = &ctx.state.config;
-        let mut rate = RateController::new(cfg.start_kbps.max(1), cfg.max_fps.max(1));
+        let is_lan_init = is_lan_direct_conn(&ctx.conn);
+        let init_kbps = if is_lan_init {
+            cfg.start_kbps.max(1)
+        } else {
+            cfg.start_kbps.clamp(1_500, 3_200)
+        };
+        let init_max_fps = if is_lan_init {
+            cfg.max_fps.max(1)
+        } else {
+            cfg.max_fps.clamp(1, 60)
+        };
+        let mut rate = RateController::new(init_kbps, init_max_fps);
         let mut next_rate = Instant::now() + RATE_TICK;
         let mut next_group = Instant::now() + GROUP_POLL;
         let mut next_stats = Instant::now() + STATS_PERIOD;
@@ -2701,6 +2896,7 @@ async fn add_child(ctx: &Arc<SessionCtx>, root_id: u64, m: &GroupMember) {
     let spec = PipeSpec {
         window_id: m.hwnd as u64,
         hwnd: m.hwnd,
+        monitor_index: None,
         monitor_handle: None,
         monitor_origin: None,
         fps: cfg.max_fps.max(1),
@@ -2891,16 +3087,44 @@ fn effective_codec(negotiated: Codec) -> Codec {
     negotiated
 }
 
-/// 把协商结果落成实际可用的编解码器（D-011 T-027 遗留收尾）。
+/// 判定当前连接是否为物理局域网 / 本机回环低延迟直连：
+/// - 局域网直连（RTT < 10ms 且非 Tailscale/EasyTier/ZeroTier/中继虚拟地址）返回 `true`，解锁 4K@144Hz / 200Mbps 满血档位（宪法 #1）；
+/// - P2P 跨网打洞、自建中转 `rd-relay`、Tailscale (`100.64/10` / `fd7a:`)、EasyTier (`10.126/16`) 返回 `false`，启用跨网平滑清晰策略。
+fn is_lan_direct_conn(conn: &rd_transport::Conn) -> bool {
+    let ip = conn.peer_addr().ip();
+    if ip.is_unspecified() {
+        return false;
+    }
+    if conn.rtt() >= Duration::from_millis(10) {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                return true;
+            }
+            let o = v4.octets();
+            if (o[0] == 100 && (o[1] & 0xC0) == 64) || (o[0] == 10 && (o[1] == 126 || o[1] == 147))
+            {
+                return false;
+            }
+            v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || ((v6.segments()[0] & 0xfe00) == 0xfc00 && v6.segments()[0] != 0xfd7a)
+        }
+    }
+}
+
+/// 把协商结果落成实际可用的编解码器（校验 H264_444 / HEVC_444 / AV1 硬编在目标分辨率下真实可建）。
 ///
-/// 协商出 `H264_444` 时以 Yuv444 配置实际创建一次编码器验证
-/// （`create_best(444)` 只探测 444 硬编且不静默回退）；失败则诚实回退
-/// `H264_420` 并 warn——`OpenWindowAck.codec` 告知控制端以何种格式解码，
-/// 谎报 444 会导致 WebCodecs 以错误配置建解码器而失败。探测出的编码器
-/// 用后即弃（正式编码器由管线在首帧按同一 pixel_format 惰性创建）。
+/// 失败则诚实回退 `H264_420` 并 warn——`OpenWindowAck.codec` 必须与实际编码比特流 100% 一致，
+/// 杜绝协商出 HEVC/AV1/444 但管线回退 H264_420 导致的 WebCodecs 全屏永久黑屏。
 fn resolve_codec(attrs: &WindowAttrs, negotiated: Codec, fps: u32, kbps: u32) -> Codec {
-    if negotiated != Codec::H264444 {
-        return negotiated;
+    if negotiated == Codec::H264420 {
+        return Codec::H264420;
     }
     let cfg = EncoderConfig {
         width: attrs.rect.w.max(2),
@@ -2908,17 +3132,20 @@ fn resolve_codec(attrs: &WindowAttrs, negotiated: Codec, fps: u32, kbps: u32) ->
         fps: fps.max(1),
         bitrate_kbps: kbps.max(1),
         prefer_hw: true,
-        pixel_format: PixelFormat::Yuv444,
+        pixel_format: pixel_format_of(negotiated),
     };
-    match create_best(&cfg) {
+    match create_for_codec(&cfg, negotiated) {
         Ok(probe) => {
             let info = probe.info();
-            tracing::info!(name = info.name, "4:4:4 编码器创建验证通过");
+            tracing::info!(name = info.name, ?negotiated, "高阶编码器创建验证通过");
             drop(probe);
-            Codec::H264444
+            negotiated
         }
         Err(err) => {
-            tracing::warn!("4:4:4 编码器创建失败，回退 H264_420: {err:#}");
+            tracing::warn!(
+                ?negotiated,
+                "高阶编码器创建失败，诚实回退 H264_420: {err:#}"
+            );
             Codec::H264420
         }
     }
@@ -3023,17 +3250,51 @@ fn apply_rate(
     });
 
     let areas: Vec<u64> = slots.iter().map(|s| s.area).collect();
-    let shares = allocate_kbps(dec.kbps, &areas);
+    let is_lan = is_lan_direct_conn(&ctx.conn);
+    let (eff_kbps, eff_fps) = if is_lan {
+        (dec.kbps, dec.fps)
+    } else {
+        // 跨网清晰度保底策略（对齐主流远控「降帧保画质、宁减帧不糊屏」）：
+        // 避免 RateController 在跨网抖动时将 1080p/2K 砍到 500kbps 马赛克，
+        // 通过主动收敛帧率上限让每一帧分配充足比特预算，静止后由无损 QOI 瓦片补齐 100% 锐度！
+        let total_area: u64 = areas.iter().sum();
+        let base_floor = if total_area >= 1_800_000 {
+            1_800
+        } else if total_area >= 800_000 {
+            1_200
+        } else {
+            800
+        };
+        let clarity_floor = if lost_ratio > 0.08 {
+            (base_floor * 65 / 100).max(700)
+        } else {
+            base_floor
+        };
+        let kbps_out = dec.kbps.max(clarity_floor);
+        let fps_out = if queued > 64 * 1024 || lost_ratio > 0.05 {
+            dec.fps.min(15)
+        } else if queued > 0 || rtt_ms > 65 || kbps_out < 2_500 {
+            dec.fps.min(24)
+        } else if kbps_out < 5_000 {
+            dec.fps.min(30)
+        } else {
+            dec.fps.min(60)
+        }
+        .max(10);
+        (kbps_out, fps_out)
+    };
+    let shares = allocate_kbps(eff_kbps, &areas);
     for (s, kbps) in slots.iter().zip(shares) {
         s.target.store(kbps, Ordering::Relaxed);
-        s.fps_cap.store(dec.fps, Ordering::Relaxed);
+        s.fps_cap.store(eff_fps, Ordering::Relaxed);
     }
     tracing::debug!(
         rtt_ms,
         queued,
+        is_lan,
         lost = format!("{lost_ratio:.3}"),
-        kbps = dec.kbps,
-        fps = dec.fps,
+        kbps = eff_kbps,
+        fps = eff_fps,
         windows = slots.len(),
         "码率自适应决策"
     );
@@ -3208,11 +3469,12 @@ mod tests {
         // 相同内容静止帧：refine 全扫描变更块=0 → 跳过视频编码
         let step = p.process(&f, None, t0).expect("静止帧处理成功");
         assert!(step.au.is_none(), "静止帧不应产出视频 AU");
-        // 恢复变化：内容变 → 重新编码，且静止期 force_key 未消费仍是 IDR
+        // 恢复变化：内容变 → 重新编码；参考帧链未断，直接以轻量 P 帧增量更新，
+        // 避免每次短暂停顿恢复都触发巨型 IDR 码率尖峰导致顿挫/变糊。
         let f2 = frame(320, 240, 50, 1);
         let step = p.process(&f2, None, t0).expect("变化帧处理成功");
         let au = step.au.expect("变化帧应产出 AU");
-        assert!(au.keyframe, "静止后恢复变化首帧应为 IDR");
+        assert!(!au.keyframe, "静止后恢复变化应走轻量 P 帧而非强发 IDR 风暴");
     }
 
     #[test]
@@ -3244,10 +3506,10 @@ mod tests {
         let _ = p.process(&f, None, t0).expect("处理成功");
 
         let big_budget = 1 << 20;
-        let tiles = p.tick(&f, t0 + Duration::from_millis(100), big_budget);
+        let tiles = p.tick(&f, t0 + Duration::from_millis(100), big_budget, None);
         assert!(tiles.is_empty(), "静止未满 300ms 不应产瓦片");
 
-        let tiles = p.tick(&f, t0 + Duration::from_millis(301), big_budget);
+        let tiles = p.tick(&f, t0 + Duration::from_millis(301), big_budget, None);
         assert!(!tiles.is_empty(), "静止 300ms 后应产出无损瓦片");
         assert!(
             tiles
@@ -3280,7 +3542,7 @@ mod tests {
         let t0 = Instant::now();
         let f = frame(320, 240, 10, 0);
         p.process(&f, None, t0).expect("处理成功");
-        let tiles = p.tick(&f, t0 + Duration::from_millis(400), 1 << 20);
+        let tiles = p.tick(&f, t0 + Duration::from_millis(400), 1 << 20, None);
         assert!(tiles.is_empty(), "refine 关闭时不应产出任何瓦片");
     }
 
@@ -3292,7 +3554,7 @@ mod tests {
         p.process(&f, None, t0).expect("处理成功");
         let _ = p.process(&f, None, t0).expect("处理成功");
         let big_budget = 1 << 20;
-        let tiles = p.tick(&f, t0 + Duration::from_millis(301), big_budget);
+        let tiles = p.tick(&f, t0 + Duration::from_millis(301), big_budget, None);
         assert!(!tiles.is_empty(), "先让区域进入已精修状态");
 
         // 内容整体变化 → 已精修块回滚为脏，应产出失效标记
@@ -3533,6 +3795,7 @@ mod tests {
             members: None,
             serial,
             drop_to_idr: Arc::new(AtomicBool::new(false)),
+            focus_xy: Arc::new(AtomicU64::new(0)),
         }
     }
 

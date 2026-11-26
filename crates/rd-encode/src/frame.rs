@@ -1,15 +1,76 @@
 //! 帧抽象：BGRA 帧缓冲与 YUV（I420 / NV12 / I444）转换。
 //!
 //! - 源帧为 WGC 捕获侧常见的 BGRA 布局，支持任意源 stride；
-//! - 颜色空间统一 BT.601 有限范围（H.264 未携带 VUI 时播放器的缺省假设，
-//!   OpenH264 路径显式写入 VUI BT.601）；
-//! - 编码输入宽高必须偶数：奇数时右/下各补 1 像素，padding 量随
-//!   `EncodedAu.crop` 下发，由解码端裁掉；
+//! - 颜色空间升级为 **BT.709**（与现代 PC 显示器 sRGB 原色及 WebCodecs HD/4K 缺省矩阵对齐，
+//!   消除 BT.601→BT.709 绿偏/红偏色差）；默认优先 **Full Range（0..255）** 保留 100% 灰阶，
+//!   对不支持 Full Range VUI 的硬编（如部分 MFT 驱动）可切 [`ColorProfile::Bt709Limited`]
+//!   保持编解码范围严格一致；
+//! - 编码输入宽高必须偶数：奇数时右/下各补 1 像素（边缘像素复制而非黑边，避免边缘绿线/暗边），
+//!   padding 量随 `EncodedAu.crop` 下发；
 //! - 转换使用 `dcv-color-primitives`（运行时按 CPU 指令集分派 SIMD）。
 
 use anyhow::{Context, Result};
 
 use dcv_color_primitives as dcv;
+
+/// 编码色彩矩阵与动态范围配置。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorProfile {
+    /// BT.709 全动态范围（0..255）：PC 桌面/代码文字首选，黑是纯黑、白是纯白，无灰阶损失。
+    #[default]
+    Bt709Full,
+    /// BT.709 有限动态范围（Y 16..235, UV 16..240）：仅用于不支持 Full Range VUI 的硬编兜底。
+    Bt709Limited,
+}
+
+impl ColorProfile {
+    fn to_dcv(self) -> dcv::ColorSpace {
+        match self {
+            ColorProfile::Bt709Full => dcv::ColorSpace::Bt709FR,
+            ColorProfile::Bt709Limited => dcv::ColorSpace::Bt709,
+        }
+    }
+
+    /// 本色彩配置下纯黑对应的亮度平面（Y）初始值。
+    pub const fn black_y(self) -> u8 {
+        match self {
+            ColorProfile::Bt709Full => 0,
+            ColorProfile::Bt709Limited => 16,
+        }
+    }
+}
+
+/// 复制边缘像素填充奇数宽/高产生的 1 像素 padding（避免 4:2:0 色度采样在边缘混入黑线/绿线）。
+fn pad_plane_edges(
+    plane: &mut [u8],
+    stride: usize,
+    valid_w: usize,
+    valid_h: usize,
+    enc_w: usize,
+    enc_h: usize,
+) {
+    if valid_w == 0 || valid_h == 0 {
+        return;
+    }
+    if enc_w > valid_w {
+        for row in 0..valid_h {
+            let base = row * stride;
+            let edge = plane[base + valid_w - 1];
+            for col in valid_w..enc_w {
+                plane[base + col] = edge;
+            }
+        }
+    }
+    if enc_h > valid_h {
+        let src_row = (valid_h - 1) * stride;
+        for row in valid_h..enc_h {
+            let dst_row = row * stride;
+            for col in 0..enc_w {
+                plane[dst_row + col] = plane[src_row + col];
+            }
+        }
+    }
+}
 
 /// BGRA 源帧（来自窗口捕获）。
 #[derive(Clone, Debug)]
@@ -39,8 +100,13 @@ impl RawFrame {
         }
     }
 
-    /// BGRA → I420，写入 `dst`（其宽高必须为本帧宽高的偶数化几何）。
+    /// BGRA → I420（默认 BT.709 Full Range），写入 `dst`（其宽高必须为本帧宽高的偶数化几何）。
     pub fn bgra_to_i420_into(&self, dst: &mut YuvPlanes) -> Result<()> {
+        self.bgra_to_i420_with(dst, ColorProfile::Bt709Full)
+    }
+
+    /// BGRA → I420（指定色彩配置），写入 `dst`。
+    pub fn bgra_to_i420_with(&self, dst: &mut YuvPlanes, profile: ColorProfile) -> Result<()> {
         let (enc_w, enc_h) = (dst.width, dst.height);
         let src_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::Bgra,
@@ -49,7 +115,7 @@ impl RawFrame {
         };
         let dst_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::I420,
-            color_space: dcv::ColorSpace::Bt601,
+            color_space: profile.to_dcv(),
             num_planes: 3,
         };
         dcv::convert_image(
@@ -62,7 +128,7 @@ impl RawFrame {
             Some(&[enc_w as usize, (enc_w / 2) as usize, (enc_w / 2) as usize]),
             &mut [&mut dst.y, &mut dst.u, &mut dst.v],
         )
-        .map_err(|e| anyhow::anyhow!("BGRA->I420 转换失败: {e:?}"))
+        .map_err(|e| anyhow::anyhow!("BGRA->I420 转换失败 ({profile:?}): {e:?}"))
         .with_context(|| {
             format!(
                 "帧 {w}x{h} stride {s} -> 编码尺寸 {ew}x{eh}",
@@ -72,17 +138,37 @@ impl RawFrame {
                 ew = enc_w,
                 eh = enc_h
             )
-        })
+        })?;
+        pad_plane_edges(
+            &mut dst.y,
+            enc_w as usize,
+            self.width as usize,
+            self.height as usize,
+            enc_w as usize,
+            enc_h as usize,
+        );
+        Ok(())
     }
 
-    /// BGRA → NV12，写入调用方提供的两个平面（Y 平面 + 交错 UV 平面，
-    /// 可带自定义 stride，典型用途是直写 ffmpeg 帧缓冲避免拷贝）。
+    /// BGRA → NV12（默认 BT.709 Full Range），写入调用方提供的两个平面。
     pub fn bgra_to_nv12_into(
         &self,
         y: &mut [u8],
         y_stride: usize,
         uv: &mut [u8],
         uv_stride: usize,
+    ) -> Result<()> {
+        self.bgra_to_nv12_with(y, y_stride, uv, uv_stride, ColorProfile::Bt709Full)
+    }
+
+    /// BGRA → NV12（指定色彩配置），写入调用方提供的两个平面。
+    pub fn bgra_to_nv12_with(
+        &self,
+        y: &mut [u8],
+        y_stride: usize,
+        uv: &mut [u8],
+        uv_stride: usize,
+        profile: ColorProfile,
     ) -> Result<()> {
         let src_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::Bgra,
@@ -91,7 +177,7 @@ impl RawFrame {
         };
         let dst_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::Nv12,
-            color_space: dcv::ColorSpace::Bt601,
+            color_space: profile.to_dcv(),
             num_planes: 2,
         };
         dcv::convert_image(
@@ -104,21 +190,38 @@ impl RawFrame {
             Some(&[y_stride, uv_stride]),
             &mut [y, uv],
         )
-        .map_err(|e| anyhow::anyhow!("BGRA->NV12 转换失败: {e:?}"))
+        .map_err(|e| anyhow::anyhow!("BGRA->NV12 转换失败 ({profile:?}): {e:?}"))?;
+        let (enc_w, enc_h, _) = even_geometry(self.width, self.height);
+        pad_plane_edges(
+            y,
+            y_stride,
+            self.width as usize,
+            self.height as usize,
+            enc_w as usize,
+            enc_h as usize,
+        );
+        Ok(())
     }
 
-    /// BGRA → I444（yuv444p，4:4:4），写入三个紧凑平面（行距均为 `stride`，
-    /// 典型用途是直写编码器暂存缓冲；与 4:2:0 不同，U/V 平面与 Y 同尺寸，
-    /// 每像素独立 Y/U/V，无色度下采样）。
-    ///
-    /// dcv-color-primitives 1.0.0 注册了 `Bgra → I444 (Bt601)` 全指令集
-    /// 分派（含标量回退），无需手写转换。
+    /// BGRA → I444（yuv444p，4:4:4，默认 BT.709 Full Range）。
     pub fn bgra_to_yuv444_into(
         &self,
         y: &mut [u8],
         u: &mut [u8],
         v: &mut [u8],
         stride: usize,
+    ) -> Result<()> {
+        self.bgra_to_yuv444_with(y, u, v, stride, ColorProfile::Bt709Full)
+    }
+
+    /// BGRA → I444（yuv444p，4:4:4，指定色彩配置），写入三个紧凑平面。
+    pub fn bgra_to_yuv444_with(
+        &self,
+        y: &mut [u8],
+        u: &mut [u8],
+        v: &mut [u8],
+        stride: usize,
+        profile: ColorProfile,
     ) -> Result<()> {
         let src_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::Bgra,
@@ -127,7 +230,7 @@ impl RawFrame {
         };
         let dst_format = dcv::ImageFormat {
             pixel_format: dcv::PixelFormat::I444,
-            color_space: dcv::ColorSpace::Bt601,
+            color_space: profile.to_dcv(),
             num_planes: 3,
         };
         dcv::convert_image(
@@ -140,7 +243,7 @@ impl RawFrame {
             Some(&[stride, stride, stride]),
             &mut [y, u, v],
         )
-        .map_err(|e| anyhow::anyhow!("BGRA->I444 转换失败: {e:?}"))
+        .map_err(|e| anyhow::anyhow!("BGRA->I444 转换失败 ({profile:?}): {e:?}"))
         .with_context(|| {
             format!(
                 "帧 {w}x{h} stride {s} -> 行距 {st}",
@@ -149,7 +252,19 @@ impl RawFrame {
                 s = self.stride,
                 st = stride
             )
-        })
+        })?;
+        let (enc_w, enc_h, _) = even_geometry(self.width, self.height);
+        for plane in [y, u, v] {
+            pad_plane_edges(
+                plane,
+                stride,
+                self.width as usize,
+                self.height as usize,
+                enc_w as usize,
+                enc_h as usize,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -234,17 +349,29 @@ mod tests {
     }
 
     #[test]
-    fn bgra_to_i420_matches_bt601_reference() {
-        // 纯红帧（BT.601 有限范围: Y=81, U=90, V=240）。
+    fn bgra_to_i420_matches_bt709_full_reference() {
+        // 纯红帧（BT.709 Full Range: Y≈54, U≈99, V≈255）。
         let mut frame = RawFrame::new(4, 4, 0);
         for px in frame.data.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[0, 0, 255, 255]);
         }
         let mut planes = YuvPlanes::new(4, 4);
         frame.bgra_to_i420_into(&mut planes).expect("转换应成功");
-        assert!(planes.y.iter().all(|&v| (76..=86).contains(&v)));
-        assert!(planes.u.iter().all(|&v| (85..=95).contains(&v)));
-        assert!(planes.v.iter().all(|&v| (235..=245).contains(&v)));
+        assert!(
+            planes.y.iter().all(|&v| (49..=59).contains(&v)),
+            "Y={:?}",
+            planes.y
+        );
+        assert!(
+            planes.u.iter().all(|&v| (94..=104).contains(&v)),
+            "U={:?}",
+            planes.u
+        );
+        assert!(
+            planes.v.iter().all(|&v| (250..=255).contains(&v)),
+            "V={:?}",
+            planes.v
+        );
     }
 
     #[test]
@@ -258,15 +385,14 @@ mod tests {
         frame
             .bgra_to_nv12_into(&mut y, 4, &mut uv, 4)
             .expect("转换应成功");
-        // 灰色: Y≈126..136（BT.601 有限范围），UV≈128。
-        assert!(y.iter().all(|&v| (121..=131).contains(&v)));
-        assert!(uv.iter().all(|&v| (123..=133).contains(&v)));
+        // 灰色: Y≈128（BT.709 Full Range），UV≈128。
+        assert!(y.iter().all(|&v| (124..=132).contains(&v)));
+        assert!(uv.iter().all(|&v| (124..=132).contains(&v)));
     }
 
     #[test]
-    fn bgra_to_yuv444_pure_red_matches_bt601() {
-        // 纯红帧（BT.601 有限范围: Y=81, U=90, V=240）。444 的 U/V 平面与
-        // Y 同尺寸，每个像素三平面独立取值（无色度下采样）。
+    fn bgra_to_yuv444_pure_red_matches_bt709_full() {
+        // 纯红帧（BT.709 Full Range: Y≈54, U≈99, V≈255）。
         let mut frame = RawFrame::new(4, 4, 0);
         for px in frame.data.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[0, 0, 255, 255]);
@@ -277,15 +403,15 @@ mod tests {
         frame
             .bgra_to_yuv444_into(&mut y, &mut u, &mut v, 4)
             .expect("转换应成功");
-        assert!(y.iter().all(|&c| (76..=86).contains(&c)));
-        assert!(u.iter().all(|&c| (85..=95).contains(&c)));
-        assert!(v.iter().all(|&c| (235..=245).contains(&c)));
+        assert!(y.iter().all(|&c| (49..=59).contains(&c)));
+        assert!(u.iter().all(|&c| (94..=104).contains(&c)));
+        assert!(v.iter().all(|&c| (250..=255).contains(&c)));
     }
 
     #[test]
-    fn bgra_to_yuv444_gradient_matches_bt601_reference() {
-        // 混合渐变（横向灰阶 R、纵向蓝阶 B，G 恒 0）：逐像素对照 BT.601
-        // 有限范围参考公式，允许 ±3（dcv 定点实现的舍入偏差）。
+    fn bgra_to_yuv444_gradient_matches_bt709_full_reference() {
+        // 混合渐变（横向灰阶 R、纵向蓝阶 B，G 恒 0）：逐像素对照 BT.709
+        // Full Range 参考公式，允许 ±4（dcv 定点实现的舍入偏差）。
         const W: u32 = 16;
         const H: u32 = 16;
         let mut frame = RawFrame::new(W, H, 0);
@@ -305,20 +431,20 @@ mod tests {
         for (i, (&oy, (&ou, &ov))) in y.iter().zip(u.iter().zip(&v)).enumerate() {
             let r = (i % W as usize * 17) as f64;
             let b = (i / W as usize * 17) as f64;
-            // BT.601 有限范围参考式（Y 16..235，U/V 16..240）。
-            let ref_y = 16.0 + (65.481 * r + 128.553 * 0.0 + 24.966 * b) / 255.0;
-            let ref_u = 128.0 + (-37.797 * r - 74.203 * 0.0 + 112.0 * b) / 255.0;
-            let ref_v = 128.0 + (112.0 * r - 93.786 * 0.0 - 18.214 * b) / 255.0;
+            // BT.709 Full Range 参考式（Kr=0.2126, Kb=0.0722, Y/U/V 0..255）。
+            let ref_y = (0.2126 * r + 0.0722 * b).clamp(0.0, 255.0);
+            let ref_u = (128.0 + 0.5 * (b - ref_y) / (1.0 - 0.0722)).clamp(0.0, 255.0);
+            let ref_v = (128.0 + 0.5 * (r - ref_y) / (1.0 - 0.2126)).clamp(0.0, 255.0);
             assert!(
-                (f64::from(oy) - ref_y).abs() <= 3.0,
+                (f64::from(oy) - ref_y).abs() <= 4.0,
                 "Y[{i}]={oy} 偏离参考值 {ref_y}"
             );
             assert!(
-                (f64::from(ou) - ref_u).abs() <= 3.0,
+                (f64::from(ou) - ref_u).abs() <= 4.0,
                 "U[{i}]={ou} 偏离参考值 {ref_u}"
             );
             assert!(
-                (f64::from(ov) - ref_v).abs() <= 3.0,
+                (f64::from(ov) - ref_v).abs() <= 4.0,
                 "V[{i}]={ov} 偏离参考值 {ref_v}"
             );
         }

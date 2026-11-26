@@ -94,9 +94,24 @@ export class TileLayer {
   private readonly surface: TileSurface;
   private width = 0;
   private height = 0;
+  /** 最近已到达的视频帧序号（u32），用于丢弃跨流晚到的过期瓦片防止旧画面鬼影残影。 */
+  private latestVideoSeq: number | null = null;
 
   constructor(surface: TileSurface) {
     this.surface = surface;
+  }
+
+  /** 记录最新视频帧序号（u32 回绕安全比较）。 */
+  onVideoSeq(seq: number): void {
+    const u32 = seq >>> 0;
+    if (this.latestVideoSeq === null) {
+      this.latestVideoSeq = u32;
+      return;
+    }
+    const diff = (u32 - this.latestVideoSeq) >>> 0;
+    if (diff > 0 && diff < 0x80000000) {
+      this.latestVideoSeq = u32;
+    }
   }
 
   /** 对齐视频物理尺寸；尺寸变化时整层清空（视频重新 IDR 语义）。 */
@@ -106,6 +121,7 @@ export class TileLayer {
     }
     this.width = w;
     this.height = h;
+    this.latestVideoSeq = null;
     this.surface.resize(w, h);
     this.surface.clearAll();
   }
@@ -115,7 +131,7 @@ export class TileLayer {
     return { width: this.width, height: this.height };
   }
 
-  /** 帧类型 2：绘制瓦片（负载长度与边界校验，越界部分裁剪）。返回是否实际绘制。 */
+  /** 帧类型 2：绘制瓦片（负载长度、跨流时序防残影与边界校验）。返回是否实际绘制。 */
   handleTile(header: TileHeader, rgba: Uint8ClampedArray<ArrayBuffer>): boolean {
     if (header.w === 0 || header.h === 0) {
       return false;
@@ -125,6 +141,14 @@ export class TileLayer {
     }
     if (this.width === 0 || this.height === 0) {
       return false;
+    }
+    // 跨流防残影：若视频流已推进到严格更新的帧（seq > tile.frameSeq），
+    // 说明该静止瓦片对应旧画面，丢弃以防覆盖新视频帧产生矩形鬼影块。
+    if (this.latestVideoSeq !== null) {
+      const behind = (this.latestVideoSeq - (header.frameSeq >>> 0)) >>> 0;
+      if (behind > 0 && behind < 0x80000000) {
+        return false;
+      }
     }
     const tileRect: Rect = { x: header.x, y: header.y, w: header.w, h: header.h };
     const clip = clipRect(tileRect, this.width, this.height);
@@ -151,6 +175,7 @@ export class TileLayer {
 
   /** 整层清空（重连/模式重置等场景）。 */
   clear(): void {
+    this.latestVideoSeq = null;
     this.surface.clearAll();
   }
 }

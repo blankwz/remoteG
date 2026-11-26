@@ -220,6 +220,7 @@ fn mouse_button(ctx: &SessionCtx, m: &MouseButton) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    crate::window_session::record_focus_point(m.window_id, m.x, m.y);
     if let Some(origin) = ctx.windows.desktop_origin(m.window_id) {
         return ctx
             .state
@@ -266,6 +267,7 @@ fn mouse_wheel(ctx: &SessionCtx, m: &MouseWheel) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    crate::window_session::record_focus_point(m.window_id, m.x, m.y);
     if let Some(origin) = ctx.windows.desktop_origin(m.window_id) {
         return ctx
             .state
@@ -475,6 +477,7 @@ pub fn on_datagram(ctx: &SessionCtx, bytes: &[u8]) -> anyhow::Result<()> {
     if ctx.windows.is_view_only(mv.window_id) {
         return Ok(());
     }
+    crate::window_session::record_focus_point(mv.window_id, mv.x, mv.y);
     if let Some(origin) = ctx.windows.desktop_origin(mv.window_id) {
         return ctx
             .state

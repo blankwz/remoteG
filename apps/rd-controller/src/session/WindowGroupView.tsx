@@ -66,6 +66,13 @@ import {
   type DecodeStats,
 } from "../video/decoder";
 import {
+  buildCanvasFilter,
+  buildSharpenKernel,
+  loadPictureSettings,
+  subscribePictureSettings,
+  type PictureSettings,
+} from "../video/pictureEnhancer";
+import {
   CanvasTileSurface,
   FRAME_INVALIDATE,
   FRAME_TILE,
@@ -117,6 +124,7 @@ type Phase = "connecting" | "open" | "reconnecting" | "failed";
 interface SurfaceHandle {
   /** 后台标签降流（P0-3）：true 时 dispatchFrame 在入口丢弃该窗口全部帧。 */
   paused: boolean;
+  onKeyframe?: (slice: ArrayBuffer) => void;
   decoder: H264Decoder | null;
   tile: TileLayer | null;
   videoCanvas: HTMLCanvasElement | null;
@@ -185,6 +193,8 @@ export interface FrameSink {
   /** 暂停门控（P0-3）：true = 该窗口的帧在入口丢弃（解码/绘制全跳过）。
    * 缺省（undefined）视为不暂停——测试替身与既有用例无需感知。 */
   readonly paused?: boolean;
+  /** 最近一帧关键帧（25B 头 + AU），供 ack.codec 晚于首帧到达重建解码器时零延迟回放。 */
+  onKeyframe?: (slice: ArrayBuffer) => void;
   decoder: { push(buf: ArrayBuffer): void } | null;
   tile: {
     handleTile(
@@ -192,6 +202,7 @@ export interface FrameSink {
       rgba: Uint8ClampedArray<ArrayBuffer>,
     ): boolean;
     handleInvalidate(header: TileHeader): boolean;
+    onVideoSeq?: (seq: number) => void;
   } | null;
 }
 
@@ -233,12 +244,20 @@ export function dispatchFrame(
     if (buf.byteLength < 1 + VIDEO_HEADER_LEN) {
       return;
     }
-    const header = parseVideoHeader(buf.slice(1));
+    const videoSlice = buf.slice(1);
+    const header = parseVideoHeader(videoSlice);
     const sink = surfaces.get(header.windowId.toString());
-    if (sink === undefined || sink.paused === true) {
+    if (sink === undefined) {
       return;
     }
-    sink.decoder?.push(buf.slice(1));
+    if (header.keyframe) {
+      sink.onKeyframe?.(videoSlice);
+    }
+    if (sink.paused === true) {
+      return;
+    }
+    sink.tile?.onVideoSeq?.(header.seq);
+    sink.decoder?.push(videoSlice);
   } else if (type === FRAME_TILE) {
     const header = parseTileHeader(buf, 1);
     const len = tilePayloadLen(header);
@@ -293,6 +312,10 @@ function WindowSurface({
 }: WindowSurfaceProps) {
   const videoRef = useRef<HTMLCanvasElement>(null);
   const tileRef = useRef<HTMLCanvasElement>(null);
+  const lastKeyframeRef = useRef<{ epoch: number; slice: ArrayBuffer | null }>({
+    epoch: -1,
+    slice: null,
+  });
   const [size, setSize] = useState({ width: 0, height: 0 });
   // 回调走 ref，避免 effect 因回调身份变化反复重建 decoder
   const onStatsRef = useRef(onStats);
@@ -306,9 +329,15 @@ function WindowSurface({
     if (video === null || tileEl === null) {
       return undefined;
     }
+    if (lastKeyframeRef.current.epoch !== sessionEpoch) {
+      lastKeyframeRef.current = { epoch: sessionEpoch, slice: null };
+    }
     const handle: SurfaceHandle = {
       // paused 由 register 包装按当前 active 覆盖（挂载即降流对齐）
       paused: false,
+      onKeyframe: (slice) => {
+        lastKeyframeRef.current = { epoch: sessionEpoch, slice };
+      },
       decoder: null,
       tile: null,
       videoCanvas: video,
@@ -322,6 +351,10 @@ function WindowSurface({
         setSize({ width: stats.width, height: stats.height });
         onStatsRef.current(winId, stats);
       }, codec);
+      // 若首帧 IDR 早于 OpenWindowAck 到达（因 codec 变更触发本次重建），立即回放该 IDR 防黑屏
+      if (lastKeyframeRef.current.slice !== null) {
+        handle.decoder.push(lastKeyframeRef.current.slice);
+      }
     } catch (err) {
       // 解码器初始化失败不崩挂载 effect：decoder 保持 null，帧分发安全忽略，
       // 占位层（等待画面）持续显示
@@ -358,7 +391,11 @@ function WindowSurface({
         className={styles.videoCanvas}
         style={{ imageRendering: rendering }}
       />
-      <canvas ref={tileRef} className={styles.tileCanvas} />
+      <canvas
+        ref={tileRef}
+        className={styles.tileCanvas}
+        style={{ imageRendering: rendering }}
+      />
     </div>
   );
 }
@@ -1306,9 +1343,32 @@ export function WindowGroupView({
     };
   }, [active, sessionCtlRef, onToggleViewOnly, onCopyToRemote, onCopyFromRemote, viewOnly]);
 
+  // 实时跟踪屏幕 DPI 缩放变化（跨高分屏/普通屏拖动窗口时自动重算物理像素 1:1 映射）
+  const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    let mql: MediaQueryList | null = null;
+    const onChange = () => {
+      setDpr(window.devicePixelRatio || 1);
+      bind();
+    };
+    const bind = () => {
+      mql?.removeEventListener("change", onChange);
+      mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      mql.addEventListener("change", onChange);
+    };
+    bind();
+    return () => {
+      mql?.removeEventListener("change", onChange);
+    };
+  }, []);
+
+  // 实时画面增强与色彩设置（跨标签即时同步）
+  const [picture, setPicture] = useState<PictureSettings>(() => loadPictureSettings());
+  useEffect(() => subscribePictureSettings(setPicture), []);
+
   // ---- 渲染 ----
 
-  const dpr = window.devicePixelRatio || 1;
   const effDpr = effectiveDpr(dpr, snapshot.zoom);
   const cssW = rootStats !== null && rootStats.width > 0 ? rootStats.width / effDpr : 0;
   const cssH = rootStats !== null && rootStats.height > 0 ? rootStats.height / effDpr : 0;
@@ -1320,12 +1380,26 @@ export function WindowGroupView({
   const pixelated =
     snapshot.fit === "SCALE" ? Number.isInteger(scale) : Number.isInteger(snapshot.zoom);
   const scaled = snapshot.fit === "SCALE";
+  const sharpenFilterId = `rd-sharpen-${windowId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+  const canvasFilter = buildCanvasFilter(picture, sharpenFilterId);
+  // 物理像素对齐：消除 125%/150% DPI 与非整数 SCALE 缩放导致的 0.5px 亚像素整体发虚
+  const snapPx = (v: number) => Math.round(v * dpr) / dpr;
+  // 外层 .group 布局盒精确等于缩放后可视尺寸（杜绝 CSS transform 不收缩布局盒导致的居中偏置、多余滚动条与坐标偏差）
   const wrapStyle: CSSProperties = {
-    width: cssW > 0 ? `${cssW}px` : undefined,
-    height: cssH > 0 ? `${cssH}px` : undefined,
-    transform: scaled ? `scale(${scale})` : undefined,
-    transformOrigin: "top left",
+    width: cssW > 0 ? `${snapPx(scaled ? cssW * scale : cssW)}px` : undefined,
+    height: cssH > 0 ? `${snapPx(scaled ? cssH * scale : cssH)}px` : undefined,
+    overflow: scaled && cssW > 0 ? "hidden" : undefined,
+    filter: canvasFilter,
   };
+  const scaleInnerStyle: CSSProperties | undefined = scaled
+    ? {
+        width: cssW > 0 ? `${cssW}px` : undefined,
+        height: cssH > 0 ? `${cssH}px` : undefined,
+        transform: `scale(${scale})`,
+        transformOrigin: "top left",
+        position: "relative",
+      }
+    : undefined;
 
   // 按 ack.codec 选定解码 codec string（ack 前为 420 默认；444 协商命中时
   // ack 到达后变化，触发 WindowSurface 按正确 profile 重建解码器）
@@ -1405,10 +1479,21 @@ export function WindowGroupView({
       : "-";
   const fitLabel =
     snapshot.fit === "FIT" ? "适应" : snapshot.fit === "SCALE" ? "等比" : "原始";
+  const codecLabel =
+    snapshot.ack?.codec === "H264_444"
+      ? "H.264 4:4:4"
+      : snapshot.ack?.codec === "HEVC_444"
+        ? "HEVC"
+        : snapshot.ack?.codec === "AV1"
+          ? "AV1"
+          : "H.264";
+  const colorLabel = rootStats?.colorSpace ?? "BT.709";
   const hudText = [
     `帧率 ${rootStats !== null ? rootStats.fps : "-"}`,
     `解码 ${rootStats !== null ? `${rootStats.decodeMs.toFixed(1)} ms` : "-"}`,
     `分辨率 ${resText}`,
+    `编码 ${codecLabel}`,
+    `色彩 ${colorLabel}`,
     `延迟 ${snapshot.stats !== null ? `${snapshot.stats.rttMs} ms` : "-"}`,
     `码率 ${bitrateText}`,
     `显示 ${fitLabel}×${Math.round(snapshot.zoom * 100)}%`,
@@ -1426,6 +1511,9 @@ export function WindowGroupView({
         </span>
         <span className={styles.hudItem} title="远程画面原始分辨率">
           分辨率 {resText}
+        </span>
+        <span className={styles.hudItem} title="当前视频编解码与色度采样">
+          {codecLabel} · {colorLabel}
         </span>
         <span className={styles.hudItem} title="网络往返延迟">
           延迟 {snapshot.stats !== null ? `${snapshot.stats.rttMs} ms` : "-"}
@@ -1516,6 +1604,19 @@ export function WindowGroupView({
         <div className={styles.hostBusyBar} aria-live="polite">对方正在使用电脑，你的输入已暂停（对方停手约 2 秒后自动恢复）</div>
       )}
       <div className={scaled ? styles.stageCenter : styles.stageTopLeft}>
+        {picture.sharpness > 0 && (
+          <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
+            <defs>
+              <filter id={sharpenFilterId} colorInterpolationFilters="sRGB">
+                <feConvolveMatrix
+                  order="3"
+                  kernelMatrix={buildSharpenKernel(picture.sharpness)}
+                  preserveAlpha="true"
+                />
+              </filter>
+            </defs>
+          </svg>
+        )}
         <div
           className={styles.group}
           style={wrapStyle}
@@ -1531,8 +1632,17 @@ export function WindowGroupView({
             e.preventDefault();
           }}
         >
-          {rootSurface}
-          {children}
+          {scaleInnerStyle !== undefined ? (
+            <div style={scaleInnerStyle}>
+              {rootSurface}
+              {children}
+            </div>
+          ) : (
+            <>
+              {rootSurface}
+              {children}
+            </>
+          )}
           <textarea
             ref={textareaRef}
             style={CAPTURE_STYLE}

@@ -66,10 +66,10 @@ export const DEBT_GATES: readonly DebtGate[] = [
   },
   {
     id: "D09",
-    title: "捕获 textarea aria-hidden 持焦点（合法残留：纯装饰 spinner/品牌层各 1 处，均不持焦点——axe aria-hidden-focus 门禁行为级兜底）",
+    title: "捕获 textarea aria-hidden 持焦点（合法残留：纯装饰 spinner / 品牌层 / 0x0 SVG 锐化滤镜 defs 各 1 处，均不持焦点——axe aria-hidden-focus 门禁行为级兜底）",
     file: "session/WindowGroupView.tsx",
     probe: 'aria-hidden="true"',
-    maxCount: 2,
+    maxCount: 3,
   },
   {
     id: "D13",

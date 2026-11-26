@@ -5,9 +5,20 @@
  * - 画质受控（value 由页面层持有，重连/外部切换后显示真实档位）
  * - 更多菜单收纳低频：常用语/虚拟键/发文字/取文字/隐私屏/画面信息/全屏
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDismiss } from "../ui/useDismiss";
+import { loadAdvancedMode } from "../ui/advancedMode";
+import {
+  DEFAULT_PICTURE_SETTINGS,
+  loadPictureSettings,
+  PICTURE_PRESET_LABEL,
+  PICTURE_PRESETS,
+  savePictureSettings,
+  subscribePictureSettings,
+  type PicturePreset,
+  type PictureSettings,
+} from "../video/pictureEnhancer";
 import {
   IconCamera,
   IconChevronDown,
@@ -97,7 +108,9 @@ interface Props {
 export function FloatingToolbar(props: Props) {
   // 手动收起（无自动收起）：展开是默认态
   const [expanded, setExpanded] = useState(true);
-  const [panel, setPanel] = useState<"none" | "phrases" | "vkeys" | "more">("none");
+  const [panel, setPanel] = useState<"none" | "phrases" | "vkeys" | "more" | "picture">("none");
+  const [picture, setPicture] = useState<PictureSettings>(() => loadPictureSettings());
+  useEffect(() => subscribePictureSettings(setPicture), []);
   /** 弹出面板锚点：触发按钮打开瞬间的视口矩形——面板 fixed 定位在按钮
    * 上方（§5.11 手测：absolute 锚 toolbarRow 向下弹出视口被视频层遮、向上
    * 弹被祖先 overflow 裁剪，唯 fixed 视口层无裁剪）。 */
@@ -107,7 +120,10 @@ export function FloatingToolbar(props: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
 
   /** 触发钮点击 → 记锚点并切换面板（ToolBtn 回传 MouseEvent）。 */
-  function openPanel(e: React.MouseEvent<HTMLButtonElement>, p: "phrases" | "vkeys" | "more"): void {
+  function openPanel(
+    e: React.MouseEvent<HTMLButtonElement>,
+    p: "phrases" | "vkeys" | "more" | "picture",
+  ): void {
     setAnchor(e.currentTarget.getBoundingClientRect());
     setPanel(panel === p ? "none" : p);
   }
@@ -156,6 +172,15 @@ export function FloatingToolbar(props: Props) {
               ))}
             </select>
           </label>
+          <ToolBtn
+            icon={<IconGauge size={16} />}
+            label="色彩"
+            title="画面锐化与色彩调节（原色 / 文字锐利 / 鲜艳通透 / 护眼暖色）"
+            active={panel === "picture" || picture.preset !== "natural"}
+            ariaExpanded={panel === "picture"}
+            ariaHaspopup="menu"
+            onClick={(e) => openPanel(e, "picture")}
+          />
           <Sep />
         </>
       )}
@@ -243,6 +268,17 @@ export function FloatingToolbar(props: Props) {
               props.onSendCombo(k);
               setPanel("none");
             }}
+            onClose={() => setPanel("none")}
+          />,
+          document.body,
+        )}
+      {panel === "picture" &&
+        createPortal(
+          <PicturePanel
+            anchor={anchor}
+            panelRef={panelRef}
+            settings={picture}
+            onChange={(next) => setPicture(savePictureSettings(next))}
             onClose={() => setPanel("none")}
           />,
           document.body,
@@ -679,6 +715,141 @@ function VirtualKeysPanel({
           </button>
         ))}
       </div>
+      <button
+        type="button"
+        className={styles.closeRow}
+        onClick={onClose}
+        title="关闭面板"
+      >
+        <IconClose size={13} /> 关闭
+      </button>
+    </div>
+  );
+}
+
+/** 画面与色彩实时调优面板（小白一键预设 + 高级模式精细滑块）。 */
+function PicturePanel({
+  anchor,
+  panelRef,
+  settings,
+  onChange,
+  onClose,
+}: {
+  anchor: DOMRect | null;
+  panelRef: React.RefObject<HTMLDivElement | null>;
+  settings: PictureSettings;
+  onChange: (next: PictureSettings) => void;
+  onClose: () => void;
+}) {
+  const [showSliders, setShowSliders] = useState(
+    () => loadAdvancedMode() || settings.preset === "custom",
+  );
+
+  const applyPreset = (p: Exclude<PicturePreset, "custom">) => {
+    onChange({ ...PICTURE_PRESETS[p] });
+  };
+
+  const patch = (partial: Partial<PictureSettings>) => {
+    onChange({ ...settings, ...partial, preset: "custom" });
+  };
+
+  return (
+    <div
+      ref={panelRef}
+      className={`${styles.panel} ${styles.picturePanel}`}
+      style={panelStyle(anchor)}
+      role="menu"
+      aria-label="画面与色彩调节"
+    >
+      <div className={styles.pictureHeader}>
+        <b className={styles.panelTitle}>画面与色彩</b>
+        <button
+          type="button"
+          className={styles.pictureLinkBtn}
+          onClick={() => onChange({ ...DEFAULT_PICTURE_SETTINGS })}
+          title="恢复默认原色设置"
+        >
+          恢复原色
+        </button>
+      </div>
+      <div className={styles.picturePresets}>
+        {(Object.keys(PICTURE_PRESET_LABEL) as Array<Exclude<PicturePreset, "custom">>).map((p) => (
+          <button
+            key={p}
+            type="button"
+            className={`${styles.picturePresetBtn} ${settings.preset === p ? styles.picturePresetOn : ""}`}
+            onClick={() => applyPreset(p)}
+          >
+            {PICTURE_PRESET_LABEL[p]}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className={styles.pictureToggleBtn}
+        onClick={() => setShowSliders((v: boolean) => !v)}
+      >
+        {showSliders ? "收起精细微调" : "展开精细微调（锐化 / 对比度 / 饱和度）"}
+      </button>
+      {showSliders && (
+        <div className={styles.pictureSliders}>
+          <label className={styles.pictureSliderRow}>
+            <span>文字锐化</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={settings.sharpness}
+              onChange={(e) => patch({ sharpness: Number(e.currentTarget.value) })}
+            />
+            <span className={styles.pictureVal}>{settings.sharpness}%</span>
+          </label>
+          <label className={styles.pictureSliderRow}>
+            <span>对比度</span>
+            <input
+              type="range"
+              min={80}
+              max={120}
+              value={settings.contrast}
+              onChange={(e) => patch({ contrast: Number(e.currentTarget.value) })}
+            />
+            <span className={styles.pictureVal}>{settings.contrast}%</span>
+          </label>
+          <label className={styles.pictureSliderRow}>
+            <span>饱和度</span>
+            <input
+              type="range"
+              min={80}
+              max={130}
+              value={settings.saturation}
+              onChange={(e) => patch({ saturation: Number(e.currentTarget.value) })}
+            />
+            <span className={styles.pictureVal}>{settings.saturation}%</span>
+          </label>
+          <label className={styles.pictureSliderRow}>
+            <span>亮度</span>
+            <input
+              type="range"
+              min={80}
+              max={120}
+              value={settings.brightness}
+              onChange={(e) => patch({ brightness: Number(e.currentTarget.value) })}
+            />
+            <span className={styles.pictureVal}>{settings.brightness}%</span>
+          </label>
+          <label className={styles.pictureSliderRow}>
+            <span>护眼暖色</span>
+            <input
+              type="range"
+              min={0}
+              max={40}
+              value={settings.warmth}
+              onChange={(e) => patch({ warmth: Number(e.currentTarget.value) })}
+            />
+            <span className={styles.pictureVal}>{settings.warmth}%</span>
+          </label>
+        </div>
+      )}
       <button
         type="button"
         className={styles.closeRow}

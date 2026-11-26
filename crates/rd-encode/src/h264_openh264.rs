@@ -14,21 +14,26 @@
 //! 尺寸变化通过重建参数实现（openh264 crate 在输入尺寸变化时自动 reinit，
 //! reinit 后首帧为 IDR）；`force_key` / `reconfigure` 都走 `force_intra_frame`。
 
-use std::os::raw::c_void;
+use std::os::raw::{c_int, c_void};
 
 use anyhow::{bail, Context, Result};
 use openh264::encoder::{
-    BitRate, Encoder as Oh264Encoder, EncoderConfig as Oh264Config, FrameType, Profile,
+    BitRate, Encoder as Oh264Encoder, EncoderConfig as Oh264Config, FrameType, Level, Profile,
     RateControlMode, UsageType, VuiConfig,
 };
 use openh264::OpenH264API;
 use openh264::Timestamp;
 use openh264_sys2::{
-    SBitrateInfo, ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0,
+    SBitrateInfo, ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, ENCODER_OPTION_TRACE_LEVEL,
+    SPATIAL_LAYER_0, SPATIAL_LAYER_ALL, WELS_LOG_QUIET,
 };
 
 use crate::frame::{even_geometry, RawFrame, YuvPlanes};
 use crate::{EncodedAu, EncoderConfig, EncoderInfo, PixelFormat, VideoEncoder};
+
+/// OpenH264 Level 5.2 安全码率上限（bps）：支持 LAN 200 Mbps 极限档位且不超 Level 5.2 (240 Mbps)。
+const OH264_MAX_BPS: u32 = 200_000_000;
+const OH264_MIN_BPS: u32 = 100_000;
 
 /// OpenH264 兜底编码器的固定标识。
 pub const INFO: EncoderInfo = EncoderInfo {
@@ -41,6 +46,12 @@ pub struct OpenH264Encoder {
     inner: Oh264Encoder,
     /// `reconfigure` 设置的覆盖尺寸；未设置时按输入帧偶数化。
     override_dims: Option<(u32, u32)>,
+    /// 最近一次已送入 `encode_at` 的尺寸（检测 openh264 自动 reinit 后同步最新码率）。
+    encoded_dims: Option<(u32, u32)>,
+    /// 当前生效目标码率（bps）。
+    current_bps: u32,
+    /// 首帧 `encode_at` 前暂存的待应用码率（openh264 在首帧才调用 `InitializeExt`）。
+    pending_bps: Option<u32>,
     /// `reconfigure` 后下一帧强制 IDR（与尺寸无关，保证语义稳定）。
     force_idr_pending: bool,
     /// I420 复用缓冲。
@@ -58,12 +69,22 @@ impl OpenH264Encoder {
             bail!("OpenH264 不支持 4:4:4（仅 4:2:0）；请改用支持 444 的硬编或回退 Yuv420");
         }
         let (enc_w, enc_h, _) = even_geometry(cfg.width, cfg.height);
+        let init_bps = cfg
+            .bitrate_kbps
+            .saturating_mul(1000)
+            .clamp(OH264_MIN_BPS, OH264_MAX_BPS);
+        // 显式指定 Level 5.2（支持最高 4K 与 240 Mbps MaxBR，避免默认 Level 4.0 在 >14~20 Mbps 时拒绝调参）
+        // 并关闭 C++ 控制台日志。
         let config = Oh264Config::new()
             .usage_type(UsageType::CameraVideoRealTime)
             .profile(Profile::Baseline)
+            .level(Level::Level_5_2)
+            .debug(false)
             .rate_control_mode(RateControlMode::Bitrate)
-            .bitrate(BitRate::from_bps(cfg.bitrate_kbps.saturating_mul(1000)))
-            .max_frame_rate(openh264::encoder::FrameRate::from_hz(cfg.fps as f32))
+            .bitrate(BitRate::from_bps(init_bps))
+            .max_frame_rate(openh264::encoder::FrameRate::from_hz(
+                (cfg.fps.clamp(1, 144)) as f32,
+            ))
             // 远程桌面不丢帧：带宽自适应由上层（T-011）调码率/QP 完成。
             .skip_frames(false)
             // 低复杂度档 + 关场景切换检测：IDR 完全按需
@@ -72,15 +93,77 @@ impl OpenH264Encoder {
             .num_threads(4)
             .scene_change_detect(false)
             .sps_pps_strategy(openh264::encoder::SpsPpsStrategy::ConstantId)
-            .vui(VuiConfig::bt601());
-        let inner = Oh264Encoder::with_api_config(OpenH264API::from_source(), config)
+            // BT.709 Full Range（0..255）：对齐桌面 sRGB 原色与 frame.rs 色彩转换矩阵，
+            // 彻底消除 BT.601→BT.709 偏色与 16..235 灰阶发灰。
+            .vui(VuiConfig::bt709_full());
+        let mut inner = Oh264Encoder::with_api_config(OpenH264API::from_source(), config)
             .context("OpenH264 编码器初始化失败")?;
+        // openh264 crate 在首帧 InitializeExt 之后才设 TRACE_LEVEL，导致 InitializeExt 期间会向
+        // stderr 打印 `Warning:bEnableFrameSkip = 0...`；此处在创建期先行静默 C++ trace。
+        unsafe {
+            let mut quiet: c_int = WELS_LOG_QUIET as c_int;
+            let _ = inner.raw_api().set_option(
+                ENCODER_OPTION_TRACE_LEVEL,
+                (&mut quiet as *mut c_int).cast::<c_void>(),
+            );
+        }
         Ok(Self {
             inner,
             override_dims: None,
+            encoded_dims: None,
+            current_bps: init_bps,
+            pending_bps: None,
             force_idr_pending: false,
             yuv: YuvPlanes::new(enc_w, enc_h),
         })
+    }
+
+    /// 将目标码率（bps）按合法顺序写入已初始化的 OpenH264 实例。
+    ///
+    /// 关键不变量：OpenH264 在每次 `SetOption` 时都会立即校验
+    /// `SpatialBitrate <= MaxSpatialBitrate <= TotalMaxBitrate` 以及 Level MaxBR：
+    /// - **升码率**时必须先升 `MAX_BITRATE`（ALL → LAYER_0）再升 `BITRATE`；
+    /// - **降码率**时必须先降 `BITRATE`（LAYER_0 → ALL）再降 `MAX_BITRATE`
+    ///   （此前无论升降都先设 `MAX_BITRATE`，导致从 20Mbps 降到 15855kbps 时必报 `rc=1`！）。
+    fn apply_initialized_bps(&mut self, target_bps: u32) -> Result<()> {
+        let bps = target_bps.clamp(OH264_MIN_BPS, OH264_MAX_BPS) as c_int;
+        let max_bps = (OH264_MAX_BPS as c_int).max(bps);
+        unsafe {
+            let api = self.inner.raw_api();
+            // 先把全局与单层 MAX_BITRATE 拉到安全上限，彻底消除升降顺序冲突
+            for layer in [SPATIAL_LAYER_ALL, SPATIAL_LAYER_0] {
+                let mut max_info = SBitrateInfo {
+                    iLayer: layer,
+                    iBitrate: max_bps,
+                };
+                let _ = api.set_option(
+                    ENCODER_OPTION_MAX_BITRATE,
+                    (&mut max_info as *mut SBitrateInfo).cast::<c_void>(),
+                );
+            }
+            // 再设置目标 BITRATE（单层 + 全局）
+            let mut layer_info = SBitrateInfo {
+                iLayer: SPATIAL_LAYER_0,
+                iBitrate: bps,
+            };
+            let rc = api.set_option(
+                ENCODER_OPTION_BITRATE,
+                (&mut layer_info as *mut SBitrateInfo).cast::<c_void>(),
+            );
+            if rc != 0 {
+                bail!("OpenH264 SetOption(BITRATE, bps={bps}) 失败: rc={rc}");
+            }
+            let mut all_info = SBitrateInfo {
+                iLayer: SPATIAL_LAYER_ALL,
+                iBitrate: bps,
+            };
+            let _ = api.set_option(
+                ENCODER_OPTION_BITRATE,
+                (&mut all_info as *mut SBitrateInfo).cast::<c_void>(),
+            );
+        }
+        self.current_bps = target_bps.clamp(OH264_MIN_BPS, OH264_MAX_BPS);
+        Ok(())
     }
 
     /// 当前帧使用的编码几何：优先 reconfigure 覆盖值，否则偶数化输入帧。
@@ -111,14 +194,27 @@ impl VideoEncoder for OpenH264Encoder {
             self.force_idr_pending = false;
         }
 
+        let dims_reinit = self.encoded_dims != Some((enc_w, enc_h));
         // OpenH264 时间戳单位为毫秒。
         let ts = Timestamp::from_millis(frame.pts_us / 1000);
-        let bitstream = self
-            .inner
-            .encode_at(&self.yuv, ts)
-            .context("OpenH264 编码失败")?;
-        let keyframe = matches!(bitstream.frame_type(), FrameType::IDR | FrameType::I);
-        let data = bitstream.to_vec();
+        let (keyframe, data) = {
+            let bitstream = self
+                .inner
+                .encode_at(&self.yuv, ts)
+                .context("OpenH264 编码失败")?;
+            (
+                matches!(bitstream.frame_type(), FrameType::IDR | FrameType::I),
+                bitstream.to_vec(),
+            )
+        };
+        self.encoded_dims = Some((enc_w, enc_h));
+        if let Some(bps) = self.pending_bps.take() {
+            self.apply_initialized_bps(bps)?;
+        } else if dims_reinit {
+            // openh264 尺寸变化自动 reinit 会用初始 config.target_bitrate 覆盖运行中码率，需重刷
+            let bps = self.current_bps;
+            self.apply_initialized_bps(bps)?;
+        }
         if data.is_empty() {
             return Ok(None);
         }
@@ -131,39 +227,16 @@ impl VideoEncoder for OpenH264Encoder {
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
-        // 运行中调整码率：SetOption(ENCODER_OPTION_BITRATE / _MAX_BITRATE)。
-        // 必须作用于 SPATIAL_LAYER_0 且先设 MAX 再设 BITRATE——OpenH264 校验
-        // "层 MaxSpatialBitrate >= SpatialBitrate"，只改 BITRATE 且升码率时会
-        // 因 max 未同步被拒绝（cmInitParaError）。
-        let bps = kbps.saturating_mul(1000) as std::os::raw::c_int;
-        let mut max_info = SBitrateInfo {
-            iLayer: SPATIAL_LAYER_0,
-            iBitrate: bps,
-        };
-        let mut info = SBitrateInfo {
-            iLayer: SPATIAL_LAYER_0,
-            iBitrate: bps,
-        };
-        // SAFETY: 两个 info 均为合法的 SBitrateInfo，编码器在 encode 时已
-        // 初始化；OpenH264 仅在调用期间读取这些指针。
-        unsafe {
-            let api = self.inner.raw_api();
-            let rc = api.set_option(
-                ENCODER_OPTION_MAX_BITRATE,
-                (&mut max_info as *mut SBitrateInfo).cast::<c_void>(),
-            );
-            if rc != 0 {
-                bail!("OpenH264 SetOption(MAX_BITRATE) 失败: rc={rc}");
-            }
-            let rc = api.set_option(
-                ENCODER_OPTION_BITRATE,
-                (&mut info as *mut SBitrateInfo).cast::<c_void>(),
-            );
-            if rc != 0 {
-                bail!("OpenH264 SetOption(BITRATE) 失败: rc={rc}");
-            }
+        let bps = kbps
+            .saturating_mul(1000)
+            .clamp(OH264_MIN_BPS, OH264_MAX_BPS);
+        if self.encoded_dims.is_none() {
+            // 首帧尚未触发 InitializeExt，记录待生效码率并在首帧后自动落盘
+            self.pending_bps = Some(bps);
+            self.current_bps = bps;
+            return Ok(());
         }
-        Ok(())
+        self.apply_initialized_bps(bps)
     }
 
     fn reconfigure(&mut self, width: u32, height: u32) -> Result<()> {

@@ -158,16 +158,29 @@ fn odd_dimensions_encode_with_crop() {
     }
 }
 
-/// `set_bitrate` 运行中生效（OpenH264 SetOption 路径）。
+/// `set_bitrate` 运行中生效（覆盖首帧前调参、从 20Mbps 降到 15855/18233kbps、升到 80/200Mbps、再降回 2Mbps）。
 #[test]
 fn set_bitrate_takes_effect() {
-    let mut enc = OpenH264Encoder::new(&test_config(320, 240)).expect("OpenH264 初始化");
-    enc.encode(&make_frame(320, 240, 0), false)
+    let init_cfg = EncoderConfig {
+        width: 1920,
+        height: 1080,
+        fps: 144,
+        bitrate_kbps: 20_000,
+        prefer_hw: false,
+        pixel_format: PixelFormat::Yuv420,
+    };
+    let mut enc = OpenH264Encoder::new(&init_cfg).expect("OpenH264 1080p@144 初始化");
+    // 首帧前调用 set_bitrate 也不得报错
+    enc.set_bitrate(18_000).expect("首帧前 set_bitrate");
+    enc.encode(&make_frame(1920, 1080, 0), false)
         .expect("首帧编码");
-    enc.set_bitrate(4_000).expect("调整码率");
-    // 调整后继续编码若干帧不报错。
-    for i in 1..5u64 {
-        enc.encode(&make_frame(320, 240, i), false)
+    for (idx, kbps) in [15_855u32, 18_233, 4_000, 50_000, 200_000, 2_000]
+        .into_iter()
+        .enumerate()
+    {
+        enc.set_bitrate(kbps)
+            .unwrap_or_else(|e| panic!("调整码率到 {kbps} kbps 失败: {e:#}"));
+        enc.encode(&make_frame(1920, 1080, (idx + 1) as u64), false)
             .expect("调码率后编码");
     }
 }

@@ -22,7 +22,7 @@ use ffmpeg_next::codec::encoder::Video as FfmpegEncoderVideo;
 use ffmpeg_next::codec::packet::Packet as FfmpegPacket;
 use ffmpeg_next::util::frame::video::Video as FfmpegFrame;
 
-use crate::frame::{even_geometry, RawFrame};
+use crate::frame::{even_geometry, ColorProfile, RawFrame};
 use crate::{EncodedAu, EncoderConfig, EncoderInfo, PixelFormat, VideoEncoder};
 
 /// Windows 常见 H.264 硬编探测顺序（NVIDIA → Intel → AMD → 系统内置 MF）。
@@ -56,6 +56,8 @@ pub struct FfmpegEncoder {
     packet: FfmpegPacket,
     /// 输入色度采样（420 → NV12，444 → yuv444p）。
     pix_fmt: PixelFormat,
+    /// 与编码器 VUI 严格对齐的色彩矩阵/范围（优先 BT.709 Full，MFT 不支持时降级 Limited）。
+    color_profile: ColorProfile,
     /// NV12 紧凑暂存（dcv 输出 → 行拷贝进 ffmpeg 帧平面，规避双平面
     /// 同时可变借用，1080p 拷贝开销 < 0.5 ms；420 路径）。
     nv12_y: Vec<u8>,
@@ -68,6 +70,12 @@ pub struct FfmpegEncoder {
     pending: VecDeque<EncodedAu>,
     fps: u32,
     bitrate_kbps: u32,
+    /// 最近一次实际落到 avcodec 的码率（用于防抖，避免 200ms rate tick 频繁重建硬编）。
+    applied_bitrate_kbps: u32,
+    /// 最近一次创建/重建时刻（硬编重开节流）。
+    last_rebuild_at: std::time::Instant,
+    /// 最近一次送入 avcodec 的 pts（保证 MFT 等编码器严格单调递增时间戳）。
+    last_pts_us: Option<u64>,
     /// 编码宽高（偶数）。
     enc_width: u32,
     enc_height: u32,
@@ -94,17 +102,20 @@ impl FfmpegEncoder {
             }
             None => HW_CANDIDATES,
         };
-        let mut first_err = None;
+        let mut errs = Vec::new();
         for name in candidates {
             match Self::try_new(cfg, name) {
                 Ok(enc) => return Ok(enc),
                 Err(e) => {
                     tracing::debug!("硬编候选 {name} 不可用: {e:#}");
-                    first_err.get_or_insert(e);
+                    errs.push(format!("{name}: {e:#}"));
                 }
             }
         }
-        Err(first_err.unwrap_or_else(|| anyhow::anyhow!("无可用硬编候选")))
+        if errs.is_empty() {
+            bail!("无可用硬编候选");
+        }
+        bail!("{}", errs.join(" | "))
     }
 
     /// 按协议 [`rd_proto::v0::Codec`] 选择对应硬编候选列表并创建首个可用编码器。
@@ -114,22 +125,25 @@ impl FfmpegEncoder {
             rd_proto::v0::Codec::Hevc444 => HEVC_HW_CANDIDATES,
             rd_proto::v0::Codec::H264420 | rd_proto::v0::Codec::H264444 => HW_CANDIDATES,
         };
-        let mut first_err = None;
+        let mut errs = Vec::new();
         for name in candidates {
             match Self::try_new(cfg, name) {
                 Ok(enc) => return Ok(enc),
                 Err(e) => {
                     tracing::debug!("硬编候选 {name} ({codec:?}) 不可用: {e:#}");
-                    first_err.get_or_insert(e);
+                    errs.push(format!("{name}: {e:#}"));
                 }
             }
         }
-        Err(first_err.unwrap_or_else(|| anyhow::anyhow!("无可用 {codec:?} 硬编候选")))
+        if errs.is_empty() {
+            bail!("无可用 {codec:?} 硬编候选");
+        }
+        bail!("{}", errs.join(" | "))
     }
 
     fn try_new(cfg: &EncoderConfig, codec_name: &'static str) -> Result<Self> {
         let (enc_w, enc_h, crop) = even_geometry(cfg.width, cfg.height);
-        let (octx, frame) = open_encoder(
+        let (octx, frame, color_profile) = open_encoder(
             codec_name,
             enc_w,
             enc_h,
@@ -143,6 +157,7 @@ impl FfmpegEncoder {
             frame,
             packet: FfmpegPacket::empty(),
             pix_fmt: cfg.pixel_format,
+            color_profile,
             nv12_y: Vec::new(),
             nv12_uv: Vec::new(),
             y444: Vec::new(),
@@ -151,6 +166,9 @@ impl FfmpegEncoder {
             pending: VecDeque::new(),
             fps: cfg.fps,
             bitrate_kbps: cfg.bitrate_kbps,
+            applied_bitrate_kbps: cfg.bitrate_kbps,
+            last_rebuild_at: std::time::Instant::now(),
+            last_pts_us: None,
             enc_width: enc_w,
             enc_height: enc_h,
             crop,
@@ -159,17 +177,17 @@ impl FfmpegEncoder {
         // 仅「创建成功 + 编码不报错」不够：无 GPU 合成环境（CI 虚拟机、
         // RDP 会话、部分云主机）上 MFT 能打开但 drain 的 receive_packet
         // 永久阻塞——编码线程卡死、用户永远黑屏且无任何错误。
-        // 探测超时/无 AU 按候选不可用处理，create_best 420 路径据此回退
-        // OpenH264。超时路径会遗弃卡死的编码器线程（每候选至多一次的
-        // 进程内泄漏，换取功能在 VM/RDP 机器上可用）。
-        const PROBE_FRAMES: u8 = 5;
+        // 注意：MFT 要求单调递增 pts_us（重复 pts=0 会被丢弃），且默认无
+        // display_remoting 时可能缓冲 8~16 帧才吐出首包，故喂 24 帧递增时间戳。
+        const PROBE_FRAMES: u8 = 24;
         const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut e = enc;
-            let probe = probe_frame(e.enc_width, e.enc_height);
+            let mut probe = probe_frame(e.enc_width, e.enc_height);
             let _ = probe_tx.send((|| -> Result<Self> {
                 for n in 0..PROBE_FRAMES {
+                    probe.pts_us = u64::from(n) * 16_667;
                     if e.encode_raw(&probe, n == 0)?.is_some() {
                         return Ok(e);
                     }
@@ -201,16 +219,17 @@ impl FfmpegEncoder {
         let enc_w = self.enc_width as usize;
         let enc_h = self.enc_height as usize;
 
+        let black_y = self.color_profile.black_y();
         match self.pix_fmt {
             PixelFormat::Yuv420 => {
-                // 1) BGRA → NV12（紧凑暂存）。
+                // 1) BGRA → NV12（与编码器 VUI 同口径 BT.709 Full/Limited）。
                 self.nv12_y.clear();
                 self.nv12_uv.clear();
-                self.nv12_y.resize(enc_w * enc_h, 16);
+                self.nv12_y.resize(enc_w * enc_h, black_y);
                 self.nv12_uv.resize(enc_w * (enc_h / 2), 128);
                 {
                     let (y, uv) = (&mut self.nv12_y[..], &mut self.nv12_uv[..]);
-                    frame.bgra_to_nv12_into(y, enc_w, uv, enc_w)?;
+                    frame.bgra_to_nv12_with(y, enc_w, uv, enc_w, self.color_profile)?;
                 }
 
                 // 2) 行拷贝进 ffmpeg 帧平面（帧平面可能带对齐 stride）。
@@ -228,17 +247,16 @@ impl FfmpegEncoder {
                 }
             }
             PixelFormat::Yuv444 => {
-                // 1) BGRA → I444（紧凑三平面，行距均 enc_w；BT.601 有限范围
-                //    与 420 同口径）。
+                // 1) BGRA → I444（紧凑三平面，行距均 enc_w；与编码器 VUI 同口径）。
                 self.y444.clear();
                 self.u444.clear();
                 self.v444.clear();
-                self.y444.resize(enc_w * enc_h, 16);
+                self.y444.resize(enc_w * enc_h, black_y);
                 self.u444.resize(enc_w * enc_h, 128);
                 self.v444.resize(enc_w * enc_h, 128);
                 {
                     let (y, u, v) = (&mut self.y444[..], &mut self.u444[..], &mut self.v444[..]);
-                    frame.bgra_to_yuv444_into(y, u, v, enc_w)?;
+                    frame.bgra_to_yuv444_with(y, u, v, enc_w, self.color_profile)?;
                 }
 
                 // 2) 行拷贝进 ffmpeg 帧三平面。
@@ -260,7 +278,12 @@ impl FfmpegEncoder {
         } else {
             ffmpeg::util::picture::Type::None
         });
-        self.frame.set_pts(Some(frame.pts_us as i64));
+        let pts_us = match self.last_pts_us {
+            Some(prev) if frame.pts_us <= prev => prev.saturating_add(1_000),
+            _ => frame.pts_us,
+        };
+        self.last_pts_us = Some(pts_us);
+        self.frame.set_pts(Some(pts_us as i64));
 
         // 先清空可能的内部缓冲，避免 send_frame 因 EAGAIN 失败。
         self.drain();
@@ -308,7 +331,7 @@ impl FfmpegEncoder {
 
     /// 重建内部编码器（改码率/改尺寸共用，重建后首帧即 IDR）。
     fn rebuild(&mut self, enc_w: u32, enc_h: u32) -> Result<()> {
-        let (octx, frame) = open_encoder(
+        let (octx, frame, color_profile) = open_encoder(
             self.codec_name,
             enc_w,
             enc_h,
@@ -318,7 +341,9 @@ impl FfmpegEncoder {
         )?;
         self.octx = octx;
         self.frame = frame;
+        self.color_profile = color_profile;
         self.packet = FfmpegPacket::empty();
+        self.pending.clear();
         self.nv12_y = Vec::new();
         self.nv12_uv = Vec::new();
         self.y444 = Vec::new();
@@ -326,14 +351,22 @@ impl FfmpegEncoder {
         self.v444 = Vec::new();
         self.enc_width = enc_w;
         self.enc_height = enc_h;
+        self.applied_bitrate_kbps = self.bitrate_kbps;
+        self.last_rebuild_at = std::time::Instant::now();
+        self.last_pts_us = None;
         Ok(())
     }
 }
 
 /// 打开指定硬编编码器并配置低延迟参数，返回编码上下文与对应像素格式的
-/// 帧缓冲。444 打开方式与 `caps.rs` 探测一致：先带 `profile=high444p`
-/// 尝试（nvenc/qsv 支持该 profile 名），失败去掉 profile 重试（amf/mf
-/// 由像素格式自动选择 profile）。
+/// 帧缓冲。
+///
+/// 对 `h264_mf` / `hevc_mf`：
+/// 1. 优先尝试 `hw_encoding=true` + `scenario=display_remoting`（调用系统 GPU 硬件 D3D11 MFT，
+///    即使 FFmpeg 自带 `h264_nvenc` 因驱动 NVENC SDK 版本要求过高失败，系统级硬件 MFT 仍可直接跑在 GPU 上）；
+/// 2. 依次降级尝试不带 `scenario` 的硬件 MFT、软件低延迟 MFT；
+/// 3. 若因高刷帧率（如 144fps）触发 MFT Level 媒体类型上限拒绝，仅将 MFT 协商帧率元数据降档到 120 / 60 重试
+///    （编码时间基固定 1us，实际推帧吞吐仍按真实 `pts_us` 全速运行，不锁死帧率）。
 fn open_encoder(
     codec_name: &str,
     enc_w: u32,
@@ -341,32 +374,73 @@ fn open_encoder(
     fps: u32,
     bitrate_kbps: u32,
     pix_fmt: PixelFormat,
-) -> Result<(FfmpegEncoderVideo, FfmpegFrame)> {
+) -> Result<(FfmpegEncoderVideo, FfmpegFrame, ColorProfile)> {
     let av_fmt = match pix_fmt {
         PixelFormat::Yuv420 => ffmpeg::util::format::Pixel::NV12,
         PixelFormat::Yuv444 => ffmpeg::util::format::Pixel::YUV444P,
     };
     let attempts: Vec<Vec<(&'static str, &'static str)>> = match pix_fmt {
-        PixelFormat::Yuv444 => vec![
-            codec_options_444(codec_name, true),
-            codec_options_444(codec_name, false),
-        ],
-        PixelFormat::Yuv420 => vec![codec_options(codec_name)],
+        PixelFormat::Yuv444 => {
+            let mut list = Vec::new();
+            for base in codec_option_candidates(codec_name) {
+                if codec_name != "h264_mf" && codec_name != "hevc_mf" {
+                    let mut with_prof = base.clone();
+                    with_prof.push(("profile", "high444p"));
+                    list.push(with_prof);
+                }
+                list.push(base);
+            }
+            list
+        }
+        PixelFormat::Yuv420 => codec_option_candidates(codec_name),
     };
+
+    let mut fps_candidates = vec![fps.max(1)];
+    if codec_name.ends_with("_mf") {
+        if fps > 120 {
+            fps_candidates.push(120);
+        }
+        if fps > 60 {
+            fps_candidates.push(60);
+        }
+    }
+
+    // 色彩动态范围候选：NVENC/QSV/AMF 优先 BT.709 Full Range（0..255，黑纯黑、白纯白、文字灰阶无损），
+    // 若驱动拒绝 Full Range（常见于部分 Windows MFT）则自动降级 BT.709 Limited 并同步矩阵，避免范围错配。
+    let color_candidates: &[ColorProfile] = if codec_name.ends_with("_mf") {
+        &[ColorProfile::Bt709Limited, ColorProfile::Bt709Full]
+    } else {
+        &[ColorProfile::Bt709Full, ColorProfile::Bt709Limited]
+    };
+
     let mut first_err = None;
-    for options in &attempts {
-        match open_encoder_with_options(
-            codec_name,
-            enc_w,
-            enc_h,
-            fps,
-            bitrate_kbps,
-            av_fmt,
-            options,
-        ) {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                first_err.get_or_insert(e);
+    for &color_profile in color_candidates {
+        for &try_fps in &fps_candidates {
+            for options in &attempts {
+                match open_encoder_with_options(
+                    codec_name,
+                    enc_w,
+                    enc_h,
+                    try_fps,
+                    bitrate_kbps,
+                    av_fmt,
+                    color_profile,
+                    options,
+                ) {
+                    Ok((octx, frame)) => {
+                        tracing::debug!(
+                            codec = codec_name,
+                            ?color_profile,
+                            fps = try_fps,
+                            ?options,
+                            "硬编上下文打开成功"
+                        );
+                        return Ok((octx, frame, color_profile));
+                    }
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                    }
+                }
             }
         }
     }
@@ -374,6 +448,7 @@ fn open_encoder(
 }
 
 /// 以确定的选项集打开编码器上下文（`open_encoder` 的单次尝试）。
+#[allow(clippy::too_many_arguments)]
 fn open_encoder_with_options(
     codec_name: &str,
     enc_w: u32,
@@ -381,6 +456,7 @@ fn open_encoder_with_options(
     fps: u32,
     bitrate_kbps: u32,
     av_fmt: ffmpeg::util::format::Pixel,
+    color_profile: ColorProfile,
     options: &[(&'static str, &'static str)],
 ) -> Result<(FfmpegEncoderVideo, FfmpegFrame)> {
     ffmpeg_init();
@@ -396,10 +472,23 @@ fn open_encoder_with_options(
     enc.set_width(enc_w);
     enc.set_height(enc_h);
     enc.set_format(av_fmt);
-    enc.set_bit_rate(bitrate_kbps.saturating_mul(1000) as usize);
+    let bit_rate = bitrate_kbps.saturating_mul(1000) as usize;
+    enc.set_bit_rate(bit_rate);
+    enc.set_max_bit_rate(bit_rate);
     enc.set_gop(100_000);
     enc.set_frame_rate(Some(ffmpeg::Rational(fps as i32, 1)));
     enc.set_max_b_frames(0);
+
+    // 显式写入 BT.709 VUI 色彩元数据：让 WebCodecs / 硬件解码器严格按同色域与同动态范围还原，
+    // 彻底消除未标 VUI 导致的偏绿/偏红与 16..235 灰阶发灰问题（对标 Sunshine / RustDesk 最佳实践）。
+    let av_range = match color_profile {
+        ColorProfile::Bt709Full => ffmpeg::util::color::Range::JPEG,
+        ColorProfile::Bt709Limited => ffmpeg::util::color::Range::MPEG,
+    };
+    enc.set_colorspace(ffmpeg::util::color::Space::BT709);
+    enc.set_color_primaries(ffmpeg::util::color::Primaries::BT709);
+    enc.set_color_transfer_characteristic(ffmpeg::util::color::TransferCharacteristic::BT709);
+    enc.set_color_range(av_range);
 
     let mut opts = ffmpeg::Dictionary::new();
     for (key, value) in options {
@@ -409,43 +498,73 @@ fn open_encoder_with_options(
         .open_with(opts)
         .with_context(|| format!("{codec_name} 打开失败（驱动/硬件不可用或参数不支持）"))?;
 
-    let frame = FfmpegFrame::new(av_fmt, enc_w, enc_h);
+    let mut frame = FfmpegFrame::new(av_fmt, enc_w, enc_h);
+    frame.set_color_space(ffmpeg::util::color::Space::BT709);
+    frame.set_color_range(av_range);
     Ok((opened, frame))
 }
 
-/// 各硬编编码器的低延迟私有选项（名称已对照 `ffmpeg -h encoder=<name>`
-/// 校验；未知选项会导致 avcodec_open2 失败，必须按编码器定制）。
-fn codec_options(codec_name: &str) -> Vec<(&'static str, &'static str)> {
+/// 各硬编编码器的低延迟高画质私有选项候选集（按画质与兼容性降序排列）。
+fn codec_option_candidates(codec_name: &str) -> Vec<Vec<(&'static str, &'static str)>> {
     match codec_name {
         "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => vec![
-            ("preset", "p1"),
-            ("tune", "ll"),
-            ("delay", "0"),
-            ("rc", "cbr"),
-            ("forced-idr", "1"),
+            // 首选：p3 平衡速度与细节 + spatial-aq 保护文字锐度与暗部层次 + VBR 避免静止浪费/复杂起块
+            vec![
+                ("preset", "p3"),
+                ("tune", "ll"),
+                ("zerolatency", "1"),
+                ("delay", "0"),
+                ("rc", "vbr"),
+                ("spatial-aq", "1"),
+                ("aq-strength", "8"),
+                ("forced-idr", "1"),
+            ],
+            // 兜底：旧版驱动不支持 spatial-aq / zerolatency 选项时回落基础低延迟配置
+            vec![
+                ("preset", "p1"),
+                ("tune", "ll"),
+                ("delay", "0"),
+                ("rc", "cbr"),
+                ("forced-idr", "1"),
+            ],
         ],
-        "h264_qsv" | "hevc_qsv" | "av1_qsv" => vec![("async_depth", "1"), ("low_power", "0")],
+        "h264_qsv" | "hevc_qsv" | "av1_qsv" => vec![
+            vec![
+                ("preset", "medium"),
+                ("async_depth", "1"),
+                ("low_power", "0"),
+            ],
+            vec![("async_depth", "1"), ("low_power", "0")],
+        ],
         "h264_amf" | "hevc_amf" | "av1_amf" => vec![
-            ("usage", "lowlatency"),
-            ("quality", "speed"),
-            ("rc", "cbr"),
-            ("async_depth", "1"),
+            vec![
+                ("usage", "lowlatency"),
+                ("quality", "balanced"),
+                ("vbaq", "true"),
+                ("rc", "vbr_latency"),
+                ("async_depth", "1"),
+            ],
+            vec![
+                ("usage", "lowlatency"),
+                ("quality", "speed"),
+                ("rc", "cbr"),
+                ("async_depth", "1"),
+            ],
         ],
-        // Windows 10/11 系统内置；CBR 保证带宽可预测。
-        "h264_mf" | "hevc_mf" => vec![("rate_control", "cbr")],
-        _ => Vec::new(),
+        // Windows 10/11 Media Foundation：优先启用系统级 GPU 硬件 MFT + 远程桌面零延迟模式，
+        // 若硬件 MFT 不存在或拒绝某项参数再逐步降级到低延迟软件 MFT。
+        "h264_mf" | "hevc_mf" => vec![
+            vec![
+                ("rate_control", "cbr"),
+                ("scenario", "display_remoting"),
+                ("hw_encoding", "true"),
+            ],
+            vec![("rate_control", "cbr"), ("hw_encoding", "true")],
+            vec![("rate_control", "cbr"), ("scenario", "display_remoting")],
+            vec![("rate_control", "cbr")],
+        ],
+        _ => vec![Vec::new()],
     }
-}
-
-/// 4:4:4 正式路径选项：与 420 相同的低延迟私有选项，另加可选
-/// `profile=high444p`（`h264_mf` 不接受显式 profile）。须与 `caps.rs`
-/// 探测选项 `options_444` 保持一致（两处同步维护）。
-fn codec_options_444(codec_name: &str, with_profile: bool) -> Vec<(&'static str, &'static str)> {
-    let mut opts = codec_options(codec_name);
-    if with_profile && codec_name != "h264_mf" {
-        opts.push(("profile", "high444p"));
-    }
-    opts
 }
 
 /// 探测用测试图案帧（与编码分辨率同尺寸的灰阶渐变 + 色块）。
@@ -479,7 +598,18 @@ impl VideoEncoder for FfmpegEncoder {
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
+        let kbps = kbps.max(1);
         self.bitrate_kbps = kbps;
+        let base = self.applied_bitrate_kbps.max(1);
+        let pct_diff = u64::from(kbps.abs_diff(base)) * 100 / u64::from(base);
+        // avcodec 硬编改码率需重建编码器并强制 IDR；对 200ms 周期的细小 AIMD 爬坡做
+        // 防抖（幅度 <25% 暂存不重建，25%~80% 至少间隔 1.5s，>=80% 手动跳变立即重建）。
+        let should_rebuild = pct_diff >= 80
+            || (pct_diff >= 25
+                && self.last_rebuild_at.elapsed() >= std::time::Duration::from_millis(1500));
+        if !should_rebuild {
+            return Ok(());
+        }
         let (enc_w, enc_h) = (self.enc_width, self.enc_height);
         self.rebuild(enc_w, enc_h)
     }

@@ -21,7 +21,7 @@ use windows::Graphics::DirectX::Direct3D11::{IDirect3DDevice, IDirect3DSurface};
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
@@ -29,9 +29,12 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIDevice, IDXGIFactory1,
+};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    ClientToScreen, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR,
+    MONITORINFOEXW, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -41,7 +44,9 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect, IsIconic, IsWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, GetCursorPos, GetWindowRect, IsIconic, IsWindow, SetCursorPos,
+};
 
 use crate::crop::{client_rect_in_frame, Rect};
 
@@ -188,10 +193,31 @@ impl WindowCapture {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let hmon = HMONITOR(hmonitor as *mut core::ffi::c_void);
-        let (device, context) = create_d3d11_device()?;
+        let mut hmon = HMONITOR(hmonitor as *mut core::ffi::c_void);
+        let item = match create_item_for_monitor(hmon) {
+            Ok(it) => it,
+            Err(first_err) => {
+                // 显示拓扑刚变化或句柄失效时，兜底取主显示器 HMONITOR 重试
+                let primary =
+                    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+                if !primary.0.is_null() && primary != hmon {
+                    if let Ok(it) = create_item_for_monitor(primary) {
+                        tracing::info!("CreateForMonitor 句柄失效，已自动回退到主显示器句柄");
+                        hmon = primary;
+                        it
+                    } else {
+                        return Err(first_err);
+                    }
+                } else {
+                    return Err(first_err);
+                }
+            }
+        };
+        // 双显卡（Intel/AMD 核显 + NVIDIA/AMD 独显 Optimus）关键兼容：
+        // 优先在物理驱动该 HMONITOR 的同一块 DXGI Adapter 上创建 D3D11Device，避免跨卡全屏捕获黑屏或 0 帧。
+        let (device, context) =
+            create_d3d11_device_for_monitor(hmon).or_else(|_| create_d3d11_device())?;
         let winrt_device = create_winrt_device(&device)?;
-        let item = create_item_for_monitor(hmon)?;
         Self::start_with_item(item, device, context, winrt_device, 0, true, opts)
     }
 
@@ -267,7 +293,9 @@ impl WindowCapture {
             rx: rx.clone(),
             hwnd,
             is_monitor,
-            min_interval: Duration::from_secs_f64(1.0 / opts.max_fps.max(1) as f64),
+            // 留 10% DWM VSync 回调抖动容差（对标 Sunshine/OBS），防止 144Hz 屏幕
+            // 因 ±0.5ms 拍频抖动连续丢隔帧导致实测帧率被腰斩为 72Hz。
+            min_interval: Duration::from_secs_f64(0.9 / opts.max_fps.max(1) as f64),
             state: Mutex::new(State {
                 staging: None,
                 staging_size: (0, 0),
@@ -295,6 +323,18 @@ impl WindowCapture {
             .context("注册 FrameArrived 失败")?;
 
         session.StartCapture().context("StartCapture 失败")?;
+
+        // 整屏捕获首帧唤醒：远端桌面完全静止（或笔记本面板自刷新 PSR 休眠）时，
+        // WGC 帧池可能迟迟不触发首次 FrameArrived 导致控制端卡在「等待远端画面…」。
+        // 原地 0 像素刷新一次光标图层即可触发 DWM 立即合成推出首帧，且不改变鼠标位置。
+        if is_monitor {
+            unsafe {
+                let mut pt = POINT::default();
+                if GetCursorPos(&mut pt).is_ok() {
+                    let _ = SetCursorPos(pt.x, pt.y);
+                }
+            }
+        }
 
         Ok((
             Self {
@@ -734,6 +774,49 @@ fn frame_bounds_origin(hwnd: HWND) -> Option<(i32, i32)> {
     }
     .ok()
     .map(|_| (rect.left, rect.top))
+}
+
+/// 查找物理挂载 `hmon` 的 DXGI 显卡适配器并在其上创建 D3D11Device（解决双显卡笔记本全屏捕获不出帧）。
+fn create_d3d11_device_for_monitor(hmon: HMONITOR) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 失败")?;
+    let mut adapter_idx = 0u32;
+    while let Ok(adapter1) = unsafe { factory.EnumAdapters1(adapter_idx) } {
+        adapter_idx += 1;
+        let mut out_idx = 0u32;
+        while let Ok(output) = unsafe { adapter1.EnumOutputs(out_idx) } {
+            out_idx += 1;
+            if let Ok(desc) = unsafe { output.GetDesc() } {
+                if desc.Monitor == hmon {
+                    let base_adapter: IDXGIAdapter =
+                        adapter1.cast().context("QI IDXGIAdapter 失败")?;
+                    let mut device: Option<ID3D11Device> = None;
+                    let mut context: Option<ID3D11DeviceContext> = None;
+                    // MSDN 规定：指定非空 pAdapter 时 DriverType 必须传 D3D_DRIVER_TYPE_UNKNOWN
+                    unsafe {
+                        D3D11CreateDevice(
+                            &base_adapter,
+                            D3D_DRIVER_TYPE_UNKNOWN,
+                            HMODULE::default(),
+                            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                            None,
+                            D3D11_SDK_VERSION,
+                            Some(&mut device),
+                            None,
+                            Some(&mut context),
+                        )
+                    }
+                    .context("在显示器所属 Adapter 上创建 D3D11Device 失败")?;
+                    let device =
+                        device.ok_or_else(|| anyhow!("Adapter D3D11CreateDevice 返回空设备"))?;
+                    let context =
+                        context.ok_or_else(|| anyhow!("Adapter D3D11CreateDevice 返回空上下文"))?;
+                    return Ok((device, context));
+                }
+            }
+        }
+    }
+    bail!("未找到归属该 HMONITOR 的 DXGI Output")
 }
 
 fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
