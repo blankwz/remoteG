@@ -1961,10 +1961,6 @@ async fn probe_stun_rfc5389(raw_addr: &str) -> Result<(f64, Option<String>), Str
 
     let target = addrs
         .find(|a| a.is_ipv4())
-        .or_else(|| {
-            // 如果全是 IPv6 再试一次
-            None
-        })
         .ok_or_else(|| "未解析到可用 IPv4 地址".to_string())?;
 
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")

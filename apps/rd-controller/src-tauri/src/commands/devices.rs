@@ -1611,12 +1611,11 @@ fn detect_easytier_binaries(
         let cmd = if cfg!(windows) { "where" } else { "which" };
         if let Ok(out) = std::process::Command::new(cmd).arg(core_name).output()
             && out.status.success()
+            && let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next()
         {
-            if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
-                let p = std::path::PathBuf::from(line.trim());
-                if p.is_file() {
-                    found_core = Some(p);
-                }
+            let p = std::path::PathBuf::from(line.trim());
+            if p.is_file() {
+                found_core = Some(p);
             }
         }
     }
