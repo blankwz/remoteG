@@ -505,7 +505,7 @@ fn open_encoder_with_options(
 }
 
 /// 各硬编编码器的低延迟高画质私有选项候选集（按画质与兼容性降序排列）。
-fn codec_option_candidates(codec_name: &str) -> Vec<Vec<(&'static str, &'static str)>> {
+pub(crate) fn codec_option_candidates(codec_name: &str) -> Vec<Vec<(&'static str, &'static str)>> {
     match codec_name {
         "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => vec![
             // 首选：p3 平衡速度与细节 + spatial-aq 保护文字锐度与暗部层次 + VBR 避免静止浪费/复杂起块

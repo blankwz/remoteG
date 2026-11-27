@@ -23,6 +23,8 @@
 //! ```
 
 pub mod caps;
+#[cfg(all(windows, feature = "ffmpeg"))]
+pub mod d3d11_zero_copy;
 pub mod dirty;
 pub mod frame;
 #[cfg(all(windows, feature = "ffmpeg"))]
@@ -92,9 +94,21 @@ pub struct EncoderInfo {
     pub hardware: bool,
 }
 
-/// 统一视频编码器接口（低延迟 H.264，输入 BGRA，输出 Annex-B AU）。
+/// GPU 显存内捕获帧（Windows D3D11 零拷贝直通硬编输入）。
+#[cfg(windows)]
+#[derive(Clone)]
+pub struct GpuFrame {
+    /// 源 BGRA8 `ID3D11Texture2D`（与编码器共享同一 `ID3D11Device`）。
+    pub texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    /// 源纹理内客户区裁剪矩形 `(x, y, width, height)`。
+    pub crop: (u32, u32, u32, u32),
+    /// 微秒时间戳。
+    pub pts_us: u64,
+}
+
+/// 统一视频编码器接口（低延迟 H.264/HEVC/AV1，输入 BGRA 或 GPU D3D11 纹理，输出 Annex-B AU）。
 pub trait VideoEncoder: Send {
-    /// 编码一帧。
+    /// 编码一帧（CPU BGRA 路径）。
     ///
     /// `force_key` 请求下一输出为 IDR（丢包恢复/新观众加入时使用）。
     /// 返回 `None` 表示本帧无输出（如编码器内部缓冲未满）。
@@ -102,6 +116,17 @@ pub trait VideoEncoder: Send {
     /// # Errors
     /// 编码器内部错误（输入尺寸不匹配、硬编设备故障等）。
     fn encode(&mut self, frame: &RawFrame, force_key: bool) -> Result<Option<EncodedAu>>;
+
+    /// 是否支持直接接收 GPU D3D11 纹理（零拷贝硬编路径）。
+    fn supports_gpu_input(&self) -> bool {
+        false
+    }
+
+    /// 零拷贝编码一帧 GPU D3D11 纹理（仅 `supports_gpu_input() == true` 时可用）。
+    #[cfg(windows)]
+    fn encode_gpu(&mut self, _frame: &GpuFrame, _force_key: bool) -> Result<Option<EncodedAu>> {
+        anyhow::bail!("当前编码器不支持 GPU 零拷贝输入")
+    }
 
     /// 运行中调整目标码率（kbps）。
     ///
@@ -172,6 +197,36 @@ pub fn create_for_codec(
             ))
         }
     }
+}
+
+/// 尝试创建基于 D3D11 显存零拷贝的硬件编码器（WGC `ID3D11Texture2D` → `ID3D11VideoProcessor`
+/// BGRA→NV12 → FFmpeg `AV_PIX_FMT_D3D11` 硬编，全程无 CPU 读回与色彩转换）。
+///
+/// 仅支持 4:2:0 编码（H.264 4:2:0 / HEVC / AV1）。若硬件、驱动或当前编码器不支持 D3D11VA
+/// 硬件帧输入，则返回 `Err`，调用方应无缝回退至 [`create_for_codec`]。
+#[cfg(all(windows, feature = "ffmpeg"))]
+pub fn create_d3d11_zero_copy(
+    cfg: &EncoderConfig,
+    codec: rd_proto::v0::Codec,
+    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+) -> Result<Box<dyn VideoEncoder>> {
+    anyhow::ensure!(
+        cfg.prefer_hw && cfg.pixel_format == PixelFormat::Yuv420,
+        "D3D11 零拷贝仅支持 prefer_hw=true 且 4:2:0 模式"
+    );
+    anyhow::ensure!(
+        codec != rd_proto::v0::Codec::H264444,
+        "D3D11 零拷贝暂不支持 H.264 4:4:4"
+    );
+    let enc = d3d11_zero_copy::D3d11HwEncoder::create(cfg, codec, device)?;
+    let info = enc.info();
+    tracing::info!(
+        name = info.name,
+        hardware = info.hardware,
+        codec = ?codec,
+        "选用 D3D11 GPU 零拷贝硬件编码器"
+    );
+    Ok(Box::new(enc))
 }
 
 /// 4:2:0 创建路径（硬编探测失败回退 OpenH264）。

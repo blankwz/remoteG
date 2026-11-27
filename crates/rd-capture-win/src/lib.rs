@@ -15,5 +15,6 @@ pub mod wgc;
 pub use crop::Rect;
 #[cfg(windows)]
 pub use wgc::{
-    is_supported, list_monitors, CaptureOptions, CapturedFrame, MonitorInfo, WindowCapture,
+    is_supported, list_monitors, CaptureOptions, CapturedFrame, GpuSurface, MonitorInfo,
+    SharedControl, WindowCapture,
 };

@@ -1374,10 +1374,26 @@ async fn start_pipeline(ctx: &Arc<SessionCtx>, mut spec: PipeSpec) -> anyhow::Re
         )])))
     });
 
+    #[cfg(windows)]
+    let zc_ctrl = {
+        let (ctrl, _dev) = capture.gpu_zero_copy_control();
+        let want_zc = zero_copy_enabled()
+            && spec.codec != Codec::H264444
+            && lab_state().prefer_hw.load(Ordering::Relaxed);
+        if want_zc {
+            ctrl.set_gpu_zero_copy(true);
+            // 首帧附带一次 CPU 读回：若 D3D11 零拷贝初始化失败需回退 CPU 编码，首帧立即可用无黑屏。
+            ctrl.request_cpu_readback();
+        }
+        Some(ctrl)
+    };
+
     let focus_xy = Arc::new(AtomicU64::new(0));
     let enc_thread = {
         let run = PipeRun {
             frame_rx,
+            #[cfg(windows)]
+            zc_ctrl,
             au_tx,
             tile_tx: tile_out_tx,
             state: Arc::clone(&ctx.state),
@@ -1892,9 +1908,23 @@ impl PipeHandle {
     }
 }
 
+/// 是否启用 D3D11 GPU 零拷贝硬编管线（默认开启；设 `RD_ZERO_COPY=0` 可回退纯 CPU 路径作 A/B 对比）。
+#[cfg(windows)]
+fn zero_copy_enabled() -> bool {
+    match std::env::var("RD_ZERO_COPY") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// 单窗口管线的一次性运行参数（编码线程打包入参）。
 struct PipeRun {
     frame_rx: crossbeam_channel::Receiver<CapturedFrame>,
+    #[cfg(windows)]
+    zc_ctrl: Option<Arc<sys_capture::SharedControl>>,
     au_tx: mpsc::Sender<(u32, EncodedAu)>,
     tile_tx: mpsc::Sender<(u32, TileOut)>,
     state: Arc<AgentState>,
@@ -1961,6 +1991,8 @@ impl PipeError {
 fn encode_loop(run: PipeRun) {
     let PipeRun {
         frame_rx,
+        #[cfg(windows)]
+        zc_ctrl,
         au_tx,
         tile_tx,
         state,
@@ -1991,6 +2023,8 @@ fn encode_loop(run: PipeRun) {
     let mut next_tick = Instant::now() + TILE_TICK;
     // 上次产出 AU 的时刻（帧率节流基准）
     let mut last_encode: Option<Instant> = None;
+    #[cfg(windows)]
+    let mut last_tile_readback = Instant::now();
     // 首秒双保险关键帧：OpenWindowAck 落地约 650ms 后在空闲窗口补发 1 帧确认 IDR，
     // 消除冷启动 UDP / WebCodecs 首包竞态导致的全屏等待黑屏。
     let mut confirm_idr_at = Some(Instant::now() + Duration::from_millis(650));
@@ -2006,12 +2040,22 @@ fn encode_loop(run: PipeRun) {
         if cur_gen != applied_gen {
             applied_gen = cur_gen;
             let ls = lab_state();
+            let want_hw = ls.prefer_hw.load(Ordering::Relaxed);
+            let want_444 = ls.request_444.load(Ordering::Relaxed);
             pipe.apply_lab_config(
-                ls.prefer_hw.load(Ordering::Relaxed),
-                ls.request_444.load(Ordering::Relaxed),
+                want_hw,
+                want_444,
                 ls.tile_enabled.load(Ordering::Relaxed),
                 ls.tile_still_ms.load(Ordering::Relaxed),
             );
+            #[cfg(windows)]
+            if let Some(ctrl) = zc_ctrl.as_ref() {
+                let want_zc = zero_copy_enabled() && want_hw && !want_444;
+                ctrl.set_gpu_zero_copy(want_zc);
+                if want_zc {
+                    ctrl.request_cpu_readback();
+                }
+            }
         }
         // 瓦片 tick：按绝对期限执行；仅当网络无在途排队帧时下发无损瓦片，绝不与实时视频抢带宽！
         let now = Instant::now();
@@ -2077,6 +2121,9 @@ fn encode_loop(run: PipeRun) {
                 }
                 // 应用码率决策（编码器创建/重配置即用最新值）
                 applied_kbps = retune_pipeline(&mut pipe, &target_kbps, applied_kbps);
+                #[cfg(windows)]
+                let gpu_surface = frame.gpu;
+                let has_cpu_pixels = !frame.data.is_empty();
                 let raw = RawFrame {
                     width: frame.width,
                     height: frame.height,
@@ -2084,9 +2131,47 @@ fn encode_loop(run: PipeRun) {
                     pts_us: unix_us(),
                     data: frame.data,
                 };
+                // 若正在切回 CPU 编码器且通道残留了纯 GPU 帧（无像素数据），安全跳过等待下一帧 CPU 帧。
+                #[cfg(windows)]
+                let need_cpu_now = !pipe.is_zero_copy()
+                    && (pipe.encoder.is_some()
+                        || !zero_copy_enabled()
+                        || !pipe.prefer_hw
+                        || pipe.pixel_format == PixelFormat::Yuv444);
+                #[cfg(windows)]
+                if need_cpu_now && !has_cpu_pixels {
+                    if let Some(ctrl) = zc_ctrl.as_ref() {
+                        ctrl.set_gpu_zero_copy(false);
+                    }
+                    continue;
+                }
                 let dirty = dirty_rects(frame.dirty);
-                match pipe.process(&raw, dirty.as_deref(), now) {
+                #[cfg(windows)]
+                let process_res =
+                    pipe.process_with_gpu(&raw, gpu_surface.as_ref(), dirty.as_deref(), now);
+                #[cfg(not(windows))]
+                let process_res = pipe.process(&raw, dirty.as_deref(), now);
+                match process_res {
                     Ok(step) => {
+                        // 首帧或重建后同步 WGC 零拷贝模式：零拷贝激活则跳过常规 CPU 读回，
+                        // 回退 CPU 编码器时立即关闭零拷贝以免后续帧缺少像素数据。
+                        #[cfg(windows)]
+                        if let Some(ctrl) = zc_ctrl.as_ref() {
+                            if pipe.is_zero_copy() {
+                                ctrl.set_gpu_zero_copy(true);
+                                // 无损文字瓦片开启时每 250ms 按需采样 1 帧 CPU 像素（削减 97%+ 读回带宽，
+                                // 同时保留静止代码/文字 QOI 像素级无损精修）。
+                                if pipe.refine
+                                    && now.duration_since(last_tile_readback)
+                                        >= Duration::from_millis(250)
+                                {
+                                    last_tile_readback = now;
+                                    ctrl.request_cpu_readback();
+                                }
+                            } else {
+                                ctrl.set_gpu_zero_copy(false);
+                            }
+                        }
                         // 块 1（T-049）：窗口尺寸变化联动虚拟屏选档。编码线程
                         // 无 tokio 上下文，走 fit 调度线程（std mpsc 入队）。
                         // 完整桌面哨兵 id 不参与单窗口虚拟屏需求表。
@@ -2107,7 +2192,7 @@ fn encode_loop(run: PipeRun) {
                                 return; // 瓦片发送任务已退出
                             }
                         }
-                        if pipe.refine {
+                        if pipe.refine && has_cpu_pixels {
                             last = Some((frame_seq, raw));
                         }
                     }
@@ -2287,8 +2372,184 @@ impl FramePipeline {
         }
     }
 
-    /// 处理一帧：脏块比对（失效回收）→ 尺寸变化处理 → 编码。
+    /// 当前编码器是否正在使用 D3D11 GPU 零拷贝输入。
+    #[cfg(windows)]
+    fn is_zero_copy(&self) -> bool {
+        self.encoder
+            .as_ref()
+            .is_some_and(|e| e.supports_gpu_input())
+    }
+
+    /// 处理一帧（纯 CPU 路径，兼容非 Windows 与单元测试）。
+    #[cfg_attr(all(windows, not(test)), allow(dead_code))]
     fn process(
+        &mut self,
+        raw: &RawFrame,
+        dirty: Option<&[DirtyRect]>,
+        now: Instant,
+    ) -> anyhow::Result<FrameStep> {
+        #[cfg(windows)]
+        {
+            self.process_with_gpu(raw, None, dirty, now)
+        }
+        #[cfg(not(windows))]
+        {
+            self.process_inner(raw, dirty, now)
+        }
+    }
+
+    /// 处理一帧（支持可选 D3D11 GPU 零拷贝输入）。
+    #[cfg(windows)]
+    fn process_with_gpu(
+        &mut self,
+        raw: &RawFrame,
+        gpu: Option<&sys_capture::GpuSurface>,
+        dirty: Option<&[DirtyRect]>,
+        now: Instant,
+    ) -> anyhow::Result<FrameStep> {
+        let was_initialized = self.last_size.is_some();
+        let size_changed = self.last_size != Some((raw.width, raw.height));
+        if size_changed {
+            match self.encoder.as_mut() {
+                Some(enc) => enc
+                    .reconfigure(raw.width, raw.height)
+                    .context("编码器 reconfigure 失败")?,
+                None => {
+                    let cfg = EncoderConfig {
+                        width: raw.width,
+                        height: raw.height,
+                        fps: self.fps,
+                        bitrate_kbps: self.kbps,
+                        prefer_hw: self.prefer_hw,
+                        pixel_format: self.pixel_format,
+                    };
+                    // 优先尝试 D3D11 GPU 零拷贝硬编（4:2:0 硬编路径，共享 WGC D3D11Device）；
+                    // 失败则无缝回退原有 CPU 路径，绝不黑屏。
+                    let mut created_enc: Option<Box<dyn VideoEncoder>> = None;
+                    if zero_copy_enabled()
+                        && self.prefer_hw
+                        && self.pixel_format == PixelFormat::Yuv420
+                        && self.codec != Codec::H264444
+                    {
+                        if let Some(g) = gpu {
+                            match rd_encode::create_d3d11_zero_copy(
+                                &cfg,
+                                self.codec,
+                                g.device.clone(),
+                            ) {
+                                Ok(e) => {
+                                    tracing::info!(
+                                        encoder = e.info().name,
+                                        codec = ?self.codec,
+                                        zero_copy = true,
+                                        "已启用 D3D11 GPU 零拷贝硬编管线"
+                                    );
+                                    created_enc = Some(e);
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        codec = ?self.codec,
+                                        "D3D11 零拷贝硬编不可用，回退常规硬/软编路径: {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let enc = match created_enc {
+                        Some(e) => e,
+                        None => match create_for_codec(&cfg, self.codec) {
+                            Ok(e) => e,
+                            Err(e) if self.codec != Codec::H264420 => {
+                                tracing::warn!(
+                                    codec = ?self.codec,
+                                    "高阶硬编创建失败，自动回退 H264_420: {e:#}"
+                                );
+                                self.codec = Codec::H264420;
+                                self.pixel_format = PixelFormat::Yuv420;
+                                let mut cfg420 = cfg;
+                                cfg420.pixel_format = PixelFormat::Yuv420;
+                                create_for_codec(&cfg420, Codec::H264420)
+                                    .context("创建视频编码器失败")?
+                            }
+                            Err(e) => return Err(e).context("创建视频编码器失败"),
+                        },
+                    };
+                    let info = enc.info();
+                    let ls = lab_state();
+                    *ls.enc_name.lock().unwrap_or_else(lock_poisoned) = info.name;
+                    ls.enc_hw.store(info.hardware, Ordering::Relaxed);
+                    ls.enc_444
+                        .store(self.pixel_format == PixelFormat::Yuv444, Ordering::Relaxed);
+                    self.encoder = Some(enc);
+                }
+            }
+            self.force_key = true;
+            self.last_size = Some((raw.width, raw.height));
+            self.need_feed = true; // reconfigure 后编码器可能重新缓冲
+            let still_ms = lab_state().tile_still_ms.load(Ordering::Relaxed);
+            self.refiner = self
+                .refine
+                .then(|| TileRefiner::new(raw.width, raw.height, still_ms));
+            if was_initialized {
+                tracing::info!(
+                    width = raw.width,
+                    height = raw.height,
+                    "窗口尺寸变化：编码器已 reconfigure（下一帧 IDR），瓦片精修器已重建"
+                );
+            }
+        }
+
+        // 静止判定：有 CPU 像素数据时由 refiner 精确块比对；纯 GPU 零拷贝帧退回 WGC 脏矩形判定。
+        let mut invalidates: Vec<TileOut> = Vec::new();
+        let has_cpu = !raw.data.is_empty();
+        let changed = match (self.refiner.as_mut(), has_cpu) {
+            (Some(r), true) => {
+                invalidates = r.on_frame(raw, dirty, now);
+                r.changed() > 0
+            }
+            _ => !dirty.is_some_and(|d| d.is_empty()),
+        };
+        if !changed && !size_changed && !self.need_feed {
+            return Ok(FrameStep {
+                au: None,
+                invalidates,
+                resized: false,
+            });
+        }
+        let enc = self
+            .encoder
+            .as_mut()
+            .expect("encoder created on first frame");
+        let force_key = std::mem::take(&mut self.force_key);
+        let au = if enc.supports_gpu_input() {
+            if let Some(g) = gpu {
+                let gf = rd_encode::GpuFrame {
+                    texture: g.texture.clone(),
+                    crop: (
+                        g.crop_rect.x.max(0) as u32,
+                        g.crop_rect.y.max(0) as u32,
+                        g.crop_rect.w,
+                        g.crop_rect.h,
+                    ),
+                    pts_us: raw.pts_us,
+                };
+                enc.encode_gpu(&gf, force_key)?
+            } else {
+                anyhow::bail!("D3D11 零拷贝编码器收到空 GPU 帧");
+            }
+        } else {
+            enc.encode(raw, force_key)?
+        };
+        self.need_feed = au.is_none();
+        Ok(FrameStep {
+            au,
+            invalidates,
+            resized: was_initialized && size_changed,
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn process_inner(
         &mut self,
         raw: &RawFrame,
         dirty: Option<&[DirtyRect]>,

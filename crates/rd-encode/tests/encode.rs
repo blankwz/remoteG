@@ -233,3 +233,153 @@ fn create_best_yuv444_local_probe() {
         Err(e) => println!("create_best(Yuv444) 失败: {e:#}"),
     }
 }
+
+/// D3D11 GPU 零拷贝硬编集成测试（Windows + ffmpeg）：
+/// 创建真实 D3D11Device + BGRA 显存纹理 → `create_d3d11_zero_copy` → 连续零拷贝编码 30 帧，
+/// 验证 Annex-B IDR、持续出帧与 `set_bitrate`/`reconfigure` 恢复能力。
+/// 无硬件编码器的纯软件 CI 虚拟机上，探测失败属预期并优雅跳过。
+#[cfg(all(windows, feature = "ffmpeg"))]
+#[test]
+fn d3d11_zero_copy_encodes_gpu_frames_and_reconfigures() {
+    use std::time::Instant;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    let mut device: Option<ID3D11Device> = None;
+    let create_res = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    };
+    let Some(device) = create_res.ok().and(device) else {
+        println!("跳过：当前环境无 D3D11 硬件设备");
+        return;
+    };
+
+    let (w, h) = (1920u32, 1080u32);
+    let cfg = EncoderConfig {
+        width: w,
+        height: h,
+        fps: 144,
+        bitrate_kbps: 20_000,
+        prefer_hw: true,
+        pixel_format: PixelFormat::Yuv420,
+    };
+    let mut enc =
+        match rd_encode::create_d3d11_zero_copy(&cfg, rd_proto::v0::Codec::H264420, device.clone())
+        {
+            Ok(e) => e,
+            Err(e) => {
+                println!("跳过：本机硬编不支持 D3D11VA 零拷贝 ({e:#})");
+                return;
+            }
+        };
+    assert!(
+        enc.supports_gpu_input(),
+        "零拷贝编码器必须声明 supports_gpu_input=true"
+    );
+    assert!(enc.info().hardware, "零拷贝编码器必须为硬编");
+
+    let make_gpu_tex = |tw: u32, th: u32| -> ID3D11Texture2D {
+        let mut pixels = vec![0u8; (tw * th * 4) as usize];
+        for y in 0..th {
+            for x in 0..tw {
+                let off = ((y * tw + x) * 4) as usize;
+                pixels[off] = (x % 255) as u8;
+                pixels[off + 1] = (y % 255) as u8;
+                pixels[off + 2] = 180;
+                pixels[off + 3] = 255;
+            }
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: tw,
+            Height: th,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let init = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: tw * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut tex: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&desc, Some(&init), Some(&mut tex)) }
+            .expect("CreateTexture2D");
+        tex.expect("non-null texture")
+    };
+
+    let tex_1080 = make_gpu_tex(w, h);
+    let mut produced = 0usize;
+    let mut first_idr = false;
+    let t0 = Instant::now();
+    for i in 0..30u64 {
+        let gf = rd_encode::GpuFrame {
+            texture: tex_1080.clone(),
+            crop: (0, 0, w, h),
+            pts_us: (i + 1) * 6_944, // 144Hz
+        };
+        if let Some(au) = enc.encode_gpu(&gf, i == 0).expect("encode_gpu 1080p") {
+            if produced == 0 {
+                first_idr = au.keyframe;
+                assert!(
+                    au.data.starts_with(&[0, 0, 0, 1]) || au.data.starts_with(&[0, 0, 1]),
+                    "首帧应为 Annex-B"
+                );
+            }
+            produced += 1;
+        }
+    }
+    let elapsed = t0.elapsed();
+    assert!(
+        produced >= 20,
+        "30 帧输入应产出足够多的 AU，实际={produced}"
+    );
+    assert!(first_idr, "首个输出 AU 必须为 IDR");
+    println!(
+        "D3D11 零拷贝 1080p@144Hz ({}): 30 帧耗时 {:.2}ms (均 {:.2}ms/帧, 产出 {produced} AU)",
+        enc.info().name,
+        elapsed.as_secs_f64() * 1000.0,
+        elapsed.as_secs_f64() * 1000.0 / 30.0
+    );
+
+    // 验证 reconfigure 到 1280x720 后仍能零拷贝出关键帧
+    enc.reconfigure(1280, 720).expect("reconfigure 720p");
+    let tex_720 = make_gpu_tex(1280, 720);
+    let mut got_after_resize = false;
+    for i in 0..8u64 {
+        let gf = rd_encode::GpuFrame {
+            texture: tex_720.clone(),
+            crop: (0, 0, 1280, 720),
+            pts_us: (i + 1) * 6_944,
+        };
+        if let Some(au) = enc.encode_gpu(&gf, i == 0).expect("encode_gpu 720p") {
+            assert!(au.keyframe, "reconfigure 后首帧必须为 IDR");
+            got_after_resize = true;
+            break;
+        }
+    }
+    assert!(got_after_resize, "reconfigure 后应正常产出 IDR");
+}

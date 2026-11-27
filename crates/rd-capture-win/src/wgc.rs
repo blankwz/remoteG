@@ -6,6 +6,7 @@
 //! 拷贝 → `Map` 读回 → 按 `crop` 裁客户区 → `crossbeam_channel::bounded(2)`
 //! 满则丢旧帧。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -23,9 +24,10 @@ use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
@@ -73,13 +75,27 @@ impl Default for CaptureOptions {
     }
 }
 
+/// GPU 显存内捕获帧（零拷贝直通给硬编 `ID3D11VideoProcessor` → `AV_PIX_FMT_D3D11`）。
+#[derive(Clone)]
+pub struct GpuSurface {
+    pub device: ID3D11Device,
+    pub context: ID3D11DeviceContext,
+    /// 已从 WGC 帧池显存内 `CopyResource` 出的独立 `DEFAULT` 纹理（BGRA8），可安全跨线程消费。
+    pub texture: ID3D11Texture2D,
+    /// 源纹理内客户区物理裁剪区域（全屏为 `0,0,w,h`；单窗口为客户区矩形）。
+    pub crop_rect: Rect,
+}
+
 /// 一帧客户区像素。`data` 为紧凑行排布（行距 = `stride`），BGRA8。
+/// 当开启 `gpu_zero_copy` 且本帧未请求按需 CPU 读回时，`data` 为空、`gpu` 为 `Some(...)`。
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
-    /// BGRA，客户区尺寸。
+    /// BGRA，客户区尺寸；纯 GPU 零拷贝帧为空 `Vec`。
     pub data: Vec<u8>,
+    /// GPU 显存纹理句柄（零拷贝模式为 `Some`）。
+    pub gpu: Option<GpuSurface>,
     /// 相对客户区的脏区；系统不支持 WGC 脏区（Win11 24H2 前）时为 `None`（由 T-010 块比对兜底）。
     pub dirty: Option<Vec<Rect>>,
     /// 与上一投递帧相比窗口内容尺寸（WGC `ContentSize`，含非客户区边框）发生了
@@ -88,6 +104,7 @@ pub struct CapturedFrame {
     pub resized: bool,
     pub captured_at: Instant,
     /// GPU→CPU 读回耗时（CopyResource + Map + 行拷贝），供 DoD「60fps 单帧读回 <8ms」验证。
+    /// 纯 GPU 零拷贝帧记录显存内 `CopyResource` 耗时（通常 <0.1ms）。
     pub readback: Duration,
 }
 
@@ -296,9 +313,14 @@ impl WindowCapture {
             // 留 10% DWM VSync 回调抖动容差（对标 Sunshine/OBS），防止 144Hz 屏幕
             // 因 ±0.5ms 拍频抖动连续丢隔帧导致实测帧率被腰斩为 72Hz。
             min_interval: Duration::from_secs_f64(0.9 / opts.max_fps.max(1) as f64),
+            gpu_zero_copy: AtomicBool::new(false),
+            cpu_readback_once: AtomicBool::new(false),
             state: Mutex::new(State {
                 staging: None,
                 staging_size: (0, 0),
+                gpu_pool: [None, None],
+                gpu_pool_size: (0, 0),
+                gpu_pool_idx: 0,
                 pool_size: item_size,
                 delivery: DeliveryState::default(),
                 last_sent: None,
@@ -347,8 +369,46 @@ impl WindowCapture {
         ))
     }
 
+    /// 获取本捕获会话绑定的 D3D11Device（供下游 `rd-encode` 零拷贝硬编共享同一 GPU 设备）。
+    pub fn d3d_device(&self) -> ID3D11Device {
+        self._shared.d3d_device.clone()
+    }
+
+    /// 运行时开启/关闭 GPU 显存零拷贝模式：
+    /// - `true`：跳过 staging `Map` 读回，直接通过显存内 `CopyResource` 投递 `GpuSurface`；
+    /// - `false`：回退常规 CPU `data` 读回（用于软编或不支持 D3D11 硬编时无缝切换）。
+    pub fn set_gpu_zero_copy(&self, enabled: bool) {
+        self._shared.gpu_zero_copy.store(enabled, Ordering::Release);
+    }
+
+    /// 获取 GPU 零拷贝开关的共享句柄（供编码线程在不持有 `WindowCapture` 时动态切换）。
+    pub fn gpu_zero_copy_control(&self) -> (Arc<SharedControl>, ID3D11Device) {
+        (
+            Arc::new(SharedControl {
+                shared: Arc::clone(&self._shared),
+            }),
+            self._shared.d3d_device.clone(),
+        )
+    }
+
     /// 停止捕获。实际清理在 Drop 中完成（先移除回调，再关闭帧池与会话）。
     pub fn stop(self) {}
+}
+
+/// 跨线程控制句柄：供编码线程在运行中切换零拷贝模式或触发按需单帧 CPU 读回（QOI 瓦片用）。
+pub struct SharedControl {
+    shared: Arc<Shared>,
+}
+
+impl SharedControl {
+    pub fn set_gpu_zero_copy(&self, enabled: bool) {
+        self.shared.gpu_zero_copy.store(enabled, Ordering::Release);
+    }
+
+    /// 请求下一捕获帧附带一次 CPU BGRA 读回（消费后自动复位，用于静止期 QOI 无损文字精修）。
+    pub fn request_cpu_readback(&self) {
+        self.shared.cpu_readback_once.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for WindowCapture {
@@ -369,12 +429,18 @@ struct Shared {
     hwnd: isize,
     is_monitor: bool,
     min_interval: Duration,
+    gpu_zero_copy: AtomicBool,
+    cpu_readback_once: AtomicBool,
     state: Mutex<State>,
 }
 
 struct State {
     staging: Option<ID3D11Texture2D>,
     staging_size: (u32, u32),
+    /// 2 槽显存内 `DEFAULT` 纹理环形缓冲，用于立刻拷贝 WGC 池帧并归还帧池。
+    gpu_pool: [Option<ID3D11Texture2D>; 2],
+    gpu_pool_size: (u32, u32),
+    gpu_pool_idx: usize,
     pool_size: SizeInt32,
     delivery: DeliveryState,
     last_sent: Option<Instant>,
@@ -486,62 +552,6 @@ fn process_frame(
         return false;
     }
 
-    // staging 纹理：随源尺寸变化重建。
-    let staging = {
-        let mut st = lock_state(&shared.state);
-        if st.staging_size != (desc.Width, desc.Height) {
-            let staging_desc = D3D11_TEXTURE2D_DESC {
-                Width: desc.Width,
-                Height: desc.Height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: desc.Format,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut staging = None;
-            if unsafe {
-                shared
-                    .d3d_device
-                    .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-            }
-            .is_err()
-            {
-                tracing::warn!("创建 staging 纹理失败 ({}x{})", desc.Width, desc.Height);
-                return false;
-            }
-            let Some(staging) = staging else { return false };
-            st.staging = Some(staging.clone());
-            st.staging_size = (desc.Width, desc.Height);
-            staging
-        } else {
-            match st.staging.clone() {
-                Some(t) => t,
-                None => return false,
-            }
-        }
-    };
-
-    let t0 = Instant::now();
-    unsafe { shared.context.CopyResource(&staging, &src) };
-    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    if unsafe {
-        shared
-            .context
-            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-    }
-    .is_err()
-    {
-        tracing::warn!("Map staging 失败");
-        return false;
-    }
-
     let client = if shared.is_monitor {
         Some(Rect {
             x: 0,
@@ -557,21 +567,146 @@ fn process_frame(
         )
     };
     let Some(rect) = client else {
-        unsafe { shared.context.Unmap(&staging, 0) };
         tracing::debug!("窗口最小化/无效，跳帧");
         return false; // 最小化 / 窗口销毁：不出帧
     };
 
-    let pitch = mapped.RowPitch as usize;
-    let bytes = pitch * desc.Height as usize;
-    let buf = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), bytes) };
-    let bw = rect.w as usize * 4;
-    let mut data = Vec::with_capacity(bw * rect.h as usize);
-    for row in 0..rect.h as usize {
-        let off = (rect.y as usize + row) * pitch + rect.x as usize * 4;
-        data.extend_from_slice(&buf[off..off + bw]);
+    let t0 = Instant::now();
+    let zero_copy = shared.gpu_zero_copy.load(Ordering::Acquire);
+    let mut gpu_surface = None;
+
+    if zero_copy {
+        // 显存内极速拷贝到独立 DEFAULT 纹理（~0.03ms），立刻归还 WGC 帧池。
+        let gpu_dst = {
+            let mut st = lock_state(&shared.state);
+            if st.gpu_pool_size != (desc.Width, desc.Height) {
+                let gpu_desc = D3D11_TEXTURE2D_DESC {
+                    Width: desc.Width,
+                    Height: desc.Height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: desc.Format,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut t0_tex = None;
+                let mut t1_tex = None;
+                let ok0 = unsafe {
+                    shared
+                        .d3d_device
+                        .CreateTexture2D(&gpu_desc, None, Some(&mut t0_tex))
+                }
+                .is_ok();
+                let ok1 = unsafe {
+                    shared
+                        .d3d_device
+                        .CreateTexture2D(&gpu_desc, None, Some(&mut t1_tex))
+                }
+                .is_ok();
+                if ok0 && ok1 && t0_tex.is_some() && t1_tex.is_some() {
+                    st.gpu_pool = [t0_tex, t1_tex];
+                    st.gpu_pool_size = (desc.Width, desc.Height);
+                    st.gpu_pool_idx = 0;
+                } else {
+                    st.gpu_pool = [None, None];
+                    st.gpu_pool_size = (0, 0);
+                }
+            }
+            let idx = st.gpu_pool_idx % 2;
+            st.gpu_pool_idx = st.gpu_pool_idx.wrapping_add(1);
+            st.gpu_pool[idx].clone()
+        };
+        if let Some(dst_tex) = gpu_dst {
+            unsafe { shared.context.CopyResource(&dst_tex, &src) };
+            gpu_surface = Some(GpuSurface {
+                device: shared.d3d_device.clone(),
+                context: shared.context.clone(),
+                texture: dst_tex,
+                crop_rect: rect,
+            });
+        }
     }
-    unsafe { shared.context.Unmap(&staging, 0) };
+
+    // 非零拷贝、零拷贝纹理创建失败、或编码线程按需请求 QOI 瓦片采样时执行 CPU staging 读回。
+    let need_cpu = !zero_copy
+        || gpu_surface.is_none()
+        || shared.cpu_readback_once.swap(false, Ordering::AcqRel);
+    let data = if need_cpu {
+        // staging 纹理：随源尺寸变化重建。
+        let staging = {
+            let mut st = lock_state(&shared.state);
+            if st.staging_size != (desc.Width, desc.Height) {
+                let staging_desc = D3D11_TEXTURE2D_DESC {
+                    Width: desc.Width,
+                    Height: desc.Height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: desc.Format,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                };
+                let mut staging = None;
+                if unsafe {
+                    shared
+                        .d3d_device
+                        .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                }
+                .is_err()
+                {
+                    tracing::warn!("创建 staging 纹理失败 ({}x{})", desc.Width, desc.Height);
+                    return false;
+                }
+                let Some(staging) = staging else { return false };
+                st.staging = Some(staging.clone());
+                st.staging_size = (desc.Width, desc.Height);
+                staging
+            } else {
+                match st.staging.clone() {
+                    Some(t) => t,
+                    None => return false,
+                }
+            }
+        };
+
+        unsafe { shared.context.CopyResource(&staging, &src) };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        if unsafe {
+            shared
+                .context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .is_err()
+        {
+            tracing::warn!("Map staging 失败");
+            return false;
+        }
+
+        let pitch = mapped.RowPitch as usize;
+        let bytes = pitch * desc.Height as usize;
+        let buf = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), bytes) };
+        let bw = rect.w as usize * 4;
+        let mut out = Vec::with_capacity(bw * rect.h as usize);
+        for row in 0..rect.h as usize {
+            let off = (rect.y as usize + row) * pitch + rect.x as usize * 4;
+            out.extend_from_slice(&buf[off..off + bw]);
+        }
+        unsafe { shared.context.Unmap(&staging, 0) };
+        out
+    } else {
+        Vec::new()
+    };
     let readback = t0.elapsed();
 
     let dirty = extract_dirty(shared, frame, rect);
@@ -587,6 +722,7 @@ fn process_frame(
             height: rect.h,
             stride: rect.w * 4,
             data,
+            gpu: gpu_surface,
             dirty,
             resized: false,
             captured_at: now,
@@ -811,6 +947,7 @@ fn create_d3d11_device_for_monitor(hmon: HMONITOR) -> Result<(ID3D11Device, ID3D
                         device.ok_or_else(|| anyhow!("Adapter D3D11CreateDevice 返回空设备"))?;
                     let context =
                         context.ok_or_else(|| anyhow!("Adapter D3D11CreateDevice 返回空上下文"))?;
+                    enable_multithread_protection(&device);
                     return Ok((device, context));
                 }
             }
@@ -838,7 +975,18 @@ fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     .context("D3D11CreateDevice 失败")?;
     let device = device.ok_or_else(|| anyhow!("D3D11CreateDevice 返回空设备"))?;
     let context = context.ok_or_else(|| anyhow!("D3D11CreateDevice 返回空上下文"))?;
+    enable_multithread_protection(&device);
     Ok((device, context))
+}
+
+/// 启用 D3D11 多线程保护，确保 WGC 回调线程（CopyResource）与下游零拷贝硬编线程
+/// （ID3D11VideoProcessor + FFmpeg D3D11VA）共享同一 `ID3D11Device` 时并发安全。
+fn enable_multithread_protection(device: &ID3D11Device) {
+    if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+        unsafe {
+            let _ = mt.SetMultithreadProtected(true);
+        }
+    }
 }
 
 fn create_winrt_device(device: &ID3D11Device) -> Result<IDirect3DDevice> {
@@ -872,6 +1020,7 @@ mod delivery_tests {
             height: 10,
             stride: 40,
             data: Vec::new(),
+            gpu: None,
             dirty: None,
             resized,
             captured_at: Instant::now(),
