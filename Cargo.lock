@@ -4417,6 +4417,7 @@ dependencies = [
  "rd-proto",
  "tracing",
  "tracing-subscriber",
+ "windows",
  "xxhash-rust",
  "zstd",
 ]
