@@ -151,8 +151,8 @@ jobs:
           path = sys.argv[1]
           txt = open(path, "r", encoding="utf-8").read()
           new_txt, n = re.subn(
-              r'(shellScript\s*=\s*")[^"]*xcode-script[^"]*(";)',
-              r'\1echo Using prebuilt Rust staticlib\\n\2',
+              r'(shellScript\s*=\s*")((?:\\.|[^"\\])*xcode-script(?:\\.|[^"\\])*)(";)',
+              r'\1echo Using prebuilt Rust staticlib\\n\3',
               txt,
           )
           print(f"Patched {n} xcode-script phase(s) in {path}")
